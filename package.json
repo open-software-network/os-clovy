@@ -59,7 +59,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
     "@tauri-apps/cli": "^2.11.3",
-    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/node": "24.10.1",
