@@ -68,7 +68,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "@vitest/coverage-v8": "^4.1.10",
     "agentation": "^3.0.2",
-    "jsdom": "^25.0.1",
+    "jsdom": "^30.0.1",
     "playwright": "^1.61.1",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
