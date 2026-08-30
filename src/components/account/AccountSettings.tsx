@@ -50,7 +50,7 @@ import { AccountAvatar, useAccountAvatar } from "./AccountAvatar";
 const FREE_PLAN_NAME = "Free plan";
 const PRO_PLAN_NAME = "Pro plan";
 const MAX_PLAN_NAME = "Max plan";
-const FREE_PLAN_CREDITS = 2000;
+export const FREE_PLAN_CREDITS = 4000;
 
 type Props = {
   account: AccountStatus;
@@ -714,7 +714,7 @@ function clampPercent(percent: number) {
   return Math.max(0, Math.min(100, Math.round(percent)));
 }
 
-function usagePercentFromBalance(
+export function usagePercentFromBalance(
   balance: AccountStatus["balance"],
   subscription: AccountStatus["subscription"],
 ) {
