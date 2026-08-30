@@ -1918,6 +1918,45 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(sessionActions).toHaveFocus();
   });
 
+  it("keeps the background files panel open when Usage claims Escape", async () => {
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_agent_artifacts") {
+        return Promise.resolve([
+          {
+            id: "artifact-1",
+            sessionId: session.id,
+            name: "results.md",
+            path: "/tmp/session-1/results.md",
+            mimeType: "text/markdown",
+            action: "created",
+            available: true,
+            createdAt: session.createdAt,
+          },
+        ]);
+      }
+      return defaultInvoke?.(command, args);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <div className="app-shell">
+        <AgentWorkspace initialSession={session} />
+      </div>,
+    );
+    await screen.findByText("Earlier answer");
+
+    await user.click(screen.getByRole("button", { name: "View files (1)" }));
+    expect(screen.getByRole("complementary", { name: "Files" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Usage" }));
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Usage" })).not.toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Files" })).toBeInTheDocument();
+  });
+
   it("shows route-only persisted usage without crashing", async () => {
     const autoSession = { ...session, model: "__june_auto_generation__:20" };
     mocks.invoke.mockImplementation(async (command: string) => {
