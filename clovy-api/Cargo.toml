@@ -27,7 +27,7 @@ dotenvy = "0.15"
 figment = { version = "0.10", features = ["env", "toml"] }
 futures-util = "0.3"
 hound = "3.5"
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 sha2 = "0.11"
 # Share store (JUN-308): the first persistent state in clovy-api. rustls only —
 # this binary runs inside a TEE with no OpenSSL.
