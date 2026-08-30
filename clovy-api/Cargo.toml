@@ -55,7 +55,7 @@ zeroize = { version = "1", features = ["derive"] }
 
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 pretty_assertions = "1"
-rstest = "0.23"
+rstest = "0.26"
 wiremock = "0.6"
 
 [workspace.lints.rust]
