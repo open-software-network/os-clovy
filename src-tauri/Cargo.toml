@@ -143,7 +143,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-window-vibrancy = "0.6"
+window-vibrancy = "0.8"
 platform-macos = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 security-framework = "3.7"
 
