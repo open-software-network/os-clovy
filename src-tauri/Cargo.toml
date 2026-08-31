@@ -107,7 +107,7 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # screencapturekit supports >=0.6,<0.9, but apple-metal 0.6.1+ references
 # macOS 26 SDK symbols that do not compile on Clovy's macOS 15/Xcode 16 lane.
-apple-metal = { version = "=0.6.0", default-features = false }
+apple-metal = { version = "=0.8.8", default-features = false }
 core-foundation = "0.10"
 keyring = { version = "3", features = ["apple-native"] }
 block2 = "0.6"
