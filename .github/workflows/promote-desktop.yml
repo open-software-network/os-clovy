@@ -515,7 +515,7 @@ jobs:
         run: pnpm computer-use:prepare -- --release --target universal-apple-darwin
 
       - name: Build and sign stable app artifacts
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           CLOVY_AGENT_RUNTIME_PREBUILT: "1"
