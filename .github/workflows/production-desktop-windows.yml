@@ -64,7 +64,7 @@ jobs:
           "VERSION=$env:VERSION_INPUT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_COMMIT=$($meta.commit)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The exact commit the promoted macOS release was built from, so the
           # Windows installer ships the same tested source under the same version.
@@ -74,7 +74,7 @@ jobs:
       # The stable source commit can predate the local setup action, so load
       # the policy from the immutable commit that started this workflow.
       - name: Checkout package manager policy
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .pnpm-policy

@@ -61,7 +61,7 @@ jobs:
           owner: open-software-network
           repositories: ${{ github.event.repository.name }},os-june-releases
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -302,7 +302,7 @@ jobs:
             echo "VERSION=${rc_version%-rc.*}"
           } >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The exact commit the rc was built from, so stable rebuilds that tree.
           ref: ${{ env.BUILD_COMMIT }}
@@ -313,7 +313,7 @@ jobs:
       # The RC source commit can predate the local setup action, so load the
       # policy from the immutable commit that started this workflow.
       - name: Checkout package manager policy
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .pnpm-policy
@@ -804,7 +804,7 @@ jobs:
           owner: open-software-network
           repositories: ${{ github.event.repository.name }},os-june-releases
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.extension-preflight.outputs.source_commit }}
 
@@ -906,7 +906,7 @@ jobs:
           owner: open-software-network
           repositories: ${{ github.event.repository.name }},os-june-releases
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1009,7 +1009,7 @@ jobs:
           owner: open-software-network
           repositories: ${{ github.event.repository.name }},os-june-releases,homebrew-tap
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.extension-preflight.outputs.source_commit }}
           fetch-depth: 0
