@@ -73,9 +73,9 @@ impl VeniceImageEditor {
         let status = response.status();
         if !status.is_success() {
             let retry_delay = retry::response_retry_delay(status, response.headers());
-            let retryable = retry_delay.is_some();
+            let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice image edit: non-success response");
+            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, retry_allowed = retry_delay.is_some(), "venice image edit: non-success response");
             // A 400 means Venice rejected this specific input (unknown model,
             // unsupported image, or a prompt its safety layer refused). Surface a
             // usable bad request; auth/billing/5xx stay provider failures.

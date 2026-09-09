@@ -107,9 +107,9 @@ impl OpenAiTranscriber {
         let status = response.status();
         if !status.is_success() {
             let retry_delay = retry::response_retry_delay(status, response.headers());
-            let retryable = retry_delay.is_some();
+            let retryable = retry::is_retryable_status(status);
             let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, "openai: non-success response");
+            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, retry_allowed = retry_delay.is_some(), "openai: non-success response");
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
                 retry_delay,

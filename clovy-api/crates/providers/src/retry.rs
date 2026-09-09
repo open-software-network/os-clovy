@@ -48,7 +48,7 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
         // An overflowing delta is still a long cooldown, not a malformed
-        // header that should fall back to an immediate retry.
+        // header that should fall back to the existing 300 ms backoff.
         return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
     }
     httpdate::parse_http_date(value)
@@ -56,9 +56,9 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
         .map(|date| date.duration_since(now).unwrap_or_default())
 }
 
-/// Transient HTTP statuses worth one more attempt: request timeout, rate
-/// limit, and any 5xx. Everything else (4xx) is deterministic and must not
-/// be replayed.
+/// Status classes eligible for a retry: request timeout, rate limit and 5xx.
+/// Retry-After may still rule out another attempt. Other 4xx are deterministic
+/// and must not be replayed.
 pub(crate) fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
@@ -175,10 +175,7 @@ mod tests {
     #[test]
     fn retry_after_accepts_delta_seconds_and_http_dates() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        assert_eq!(
-            parse_retry_after(" 60 ", now),
-            Some(Duration::from_secs(60))
-        );
+        assert_eq!(parse_retry_after(" 60 ", now), Some(Duration::from_mins(1)));
         let date = httpdate::fmt_http_date(now + Duration::from_secs(30));
         assert_eq!(parse_retry_after(&date, now), Some(Duration::from_secs(30)));
         let past = httpdate::fmt_http_date(now - Duration::from_secs(30));
@@ -213,7 +210,7 @@ mod tests {
             Some(UPSTREAM_RETRY_BACKOFF)
         );
         let mut headers = HeaderMap::new();
-        let date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+        let date = httpdate::fmt_http_date(SystemTime::now() + Duration::from_mins(2));
         headers.insert(RETRY_AFTER, HeaderValue::from_str(&date).unwrap());
         assert_eq!(
             response_retry_delay(StatusCode::TOO_MANY_REQUESTS, &headers),

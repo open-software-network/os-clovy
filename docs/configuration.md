@@ -93,8 +93,3 @@ returns the provider failure without retrying early. Missing or malformed
 headers use the existing 300 ms backoff. Longer waits require coordinating the
 wallet hold lifetime and settlement budget; the desktop request timeout alone
 is not a safe retry budget.
-
-For service-managed traffic routed through Open Software API, its separate
-`SERVICE_REQUESTS_PER_MINUTE` budget controls aggregate service demand. Changing
-that gateway budget requires an Open Software API deployment; this retry policy
-requires a Clovy API deployment.

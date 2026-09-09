@@ -247,9 +247,9 @@ impl VeniceTranscriber {
         let status = response.status();
         if !status.is_success() {
             let retry_delay = retry::response_retry_delay(status, response.headers());
-            let retryable = retry_delay.is_some();
+            let retryable = retry::is_retryable_status(status);
             let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, "venice: non-success response");
+            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, retry_allowed = retry_delay.is_some(), "venice: non-success response");
             if let Some(error) = user_venice_key_auth_error(status, &request.provider_credentials) {
                 return Err(UpstreamAttemptError::fatal(error));
             }
@@ -605,9 +605,9 @@ impl VeniceChat {
         let status = response.status();
         if !status.is_success() {
             let retry_delay = retry::response_retry_delay(status, response.headers());
-            let retryable = retry_delay.is_some();
+            let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice: chat non-success response");
+            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, retry_allowed = retry_delay.is_some(), "venice: chat non-success response");
             if let Some(error) = user_venice_key_auth_error(status, auth.provider_credentials) {
                 return Err(UpstreamAttemptError::fatal(error));
             }
@@ -1946,6 +1946,45 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let generator = VeniceGenerator::from_config(
+            http::default_client(),
+            http::default_client(),
+            &UpstreamConfig {
+                api_key: "venice_key".to_string(),
+                base_url: server.uri(),
+                byok_base_url: None,
+            },
+        );
+
+        let generated = generator
+            .generate(GenerationRequest {
+                title: "Title".to_string(),
+                transcript: "Transcript".to_string(),
+                transcript_source_labels: false,
+                manual_notes: None,
+                language: None,
+                existing_generated_note: None,
+                model: ModelId("zai-org-glm-5".to_string()),
+                system_prompt: "system".to_string(),
+                cost_quality: None,
+                provider_credentials: ProviderCredentials::default(),
+                inference_privacy: InferencePrivacy::Private,
+                unmetered: false,
+            })
+            .await;
+
+        assert_eq!(generated, Err(clovy_domain::DomainError::UpstreamProvider));
+    }
+
+    #[tokio::test]
+    async fn generator_does_not_retry_long_cooldowns() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
             .expect(1)
             .mount(&server)
             .await;

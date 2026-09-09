@@ -117,9 +117,9 @@ impl VeniceAugment {
         let status = response.status();
         if !status.is_success() {
             let retry_delay = retry::response_retry_delay(status, response.headers());
-            let retryable = retry_delay.is_some();
+            let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, url = %endpoint.url, body_bytes = body_text.len(), retryable, "venice augment: non-success response");
+            tracing::error!(%status, url = %endpoint.url, body_bytes = body_text.len(), retryable, retry_allowed = retry_delay.is_some(), "venice augment: non-success response");
             // Only a 400 means the upstream rejected this specific input.
             // Auth/billing/config failures (401, 403, 402, ...) are ours, not
             // the user's, and must stay provider failures so they are not
