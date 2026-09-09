@@ -67,14 +67,15 @@ impl VeniceImageEditor {
                 tracing::error!(%error, %url, model = %body.model, retryable, "venice image edit: transport error");
                 UpstreamAttemptError {
                     error: DomainError::UpstreamProvider,
-                    retryable,
+                    retry_delay: retryable.then_some(retry::UPSTREAM_RETRY_BACKOFF),
                 }
             })?;
         let status = response.status();
         if !status.is_success() {
+            let retry_delay = retry::response_retry_delay(status, response.headers());
             let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice image edit: non-success response");
+            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, retry_allowed = retry_delay.is_some(), "venice image edit: non-success response");
             // A 400 means Venice rejected this specific input (unknown model,
             // unsupported image, or a prompt its safety layer refused). Surface a
             // usable bad request; auth/billing/5xx stay provider failures.
@@ -88,7 +89,7 @@ impl VeniceImageEditor {
             }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
-                retryable,
+                retry_delay,
             });
         }
         // Success is the RAW edited image bytes (not the base64 envelope the
@@ -151,9 +152,11 @@ impl ImageEditor for VeniceImageEditor {
                     Ok(image) => return Ok(image),
                     Err(error) => error,
                 };
-                if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+                if attempt + 1 < retry::UPSTREAM_ATTEMPTS
+                    && let Some(delay) = error.retry_delay
+                {
                     tracing::warn!(%url, model = %request.model.0, attempt, "venice image edit: transient failure, retrying");
-                    tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(error.error);

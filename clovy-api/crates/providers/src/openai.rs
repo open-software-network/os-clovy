@@ -35,14 +35,16 @@ impl Transcriber for OpenAiTranscriber {
                 Ok(transcript) => return Ok(transcript),
                 Err(error) => error,
             };
-            if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+            if attempt + 1 < retry::UPSTREAM_ATTEMPTS
+                && let Some(delay) = error.retry_delay
+            {
                 tracing::warn!(
                     %url,
                     model = %request.model.0,
                     attempt,
                     "openai: transient upstream failure, retrying"
                 );
-                tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(error.error);
@@ -99,17 +101,18 @@ impl OpenAiTranscriber {
                 tracing::error!(%error, %url, model = %model_id, retryable, "openai: transport error");
                 UpstreamAttemptError {
                     error: DomainError::UpstreamProvider,
-                    retryable,
+                    retry_delay: retryable.then_some(retry::UPSTREAM_RETRY_BACKOFF),
                 }
             })?;
         let status = response.status();
         if !status.is_success() {
+            let retry_delay = retry::response_retry_delay(status, response.headers());
             let retryable = retry::is_retryable_status(status);
             let body = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, "openai: non-success response");
+            tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, retry_allowed = retry_delay.is_some(), "openai: non-success response");
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
-                retryable,
+                retry_delay,
             });
         }
         let parsed = response

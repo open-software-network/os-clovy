@@ -244,3 +244,8 @@ data-driven: discount reviewer patterns with a bad true/findings ratio
 | Clovy source rename (pre-PR) | Spec (codex, initial+final) | 6 | 6 | caught current OIDC guidance, out-of-scope prompt cleanup, Conductor and plan labels, and stale public-source glossary text; all fixed, final exact-head pass clean |
 | Clovy source rename (pre-PR) | Adversarial (codex, initial+final) | 0 | - | approved both reviewed heads after tracing dynamic workflow repository resolution, compatibility coordinates, OIDC gating, and the historical ADR addendum |
 | Clovy source rename (pre-PR) | Adversarial (claude, cross-harness) | - | - | runner produced no verdict in the bounded session window; missing output was not counted as approval |
+
+| #1072 | Adversarial (Codex, initial + final) | 1 | 1 | Caught new 60-second retry sleeps exceeding 30/60-second wallet holds; final policy preserves the existing 300 ms allowance and declines longer cooldowns. Final correctness, standards and amended-spec pass clean. |
+| #1072 | Standards (Claude) | 4 | 3 | Fixed glossary wording and two imprecise comments. Missing issue prefix was refuted by the explicit unconfigured-platform offline clause. |
+| #1072 | Spec (Claude) | 3 | 3 | Shared-consumer policy made explicit in amendments and covered by a generator test; removed external-service env guidance from Clovy config docs; preserved status classification logs with additive retry_allowed. |
+| #1072 | Adversarial (Claude) | 4 | 3 | Accepted diagnostic-field correction. Long-cooldown suppression and original wait allowance are deliberate constraints, documented in amendments; cooldown propagation is pre-existing missing behavior requiring separate client/error/hold coordination. |
