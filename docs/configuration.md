@@ -83,3 +83,18 @@ June-era `JUNE__*` variables remain lower-precedence compatibility inputs.
 - **OS Accounts token contract:** `iss` `https://accounts.opensoftware.co`, `aud` `open-software-apps`, `jwks_refresh_secs` 300, `jwks_miss_min_backoff_secs` 5.
 - **Pricing:** one `[pricing."<model_id>"]` table per priced model (unit, credits, provider, model_type, capabilities, ...). A model with no pricing entry is rejected at the boundary; the live Venice catalog extends this at boot (see [ADR-0007](adr/0007-model-capability-source-of-truth.md)).
 - **Attestation / issue reports:** the TEE trust-center URL + the fixed os-platform destination (`open-software` / `june`).
+
+## Upstream retry limits
+
+Provider calls allow at most two attempts and keep the existing 300 ms retry
+allowance. For retryable HTTP failures, `Retry-After` is read as delta seconds
+or an HTTP date. If the requested cooldown exceeds that allowance, Clovy API
+returns the provider failure without retrying early. Missing or malformed
+headers use the existing 300 ms backoff. Longer waits require coordinating the
+wallet hold lifetime and settlement budget; the desktop request timeout alone
+is not a safe retry budget.
+
+For service-managed traffic routed through Open Software API, its separate
+`SERVICE_REQUESTS_PER_MINUTE` budget controls aggregate service demand. Changing
+that gateway budget requires an Open Software API deployment; this retry policy
+requires a Clovy API deployment.

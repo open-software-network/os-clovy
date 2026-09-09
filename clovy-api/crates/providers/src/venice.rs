@@ -184,14 +184,16 @@ impl Transcriber for VeniceTranscriber {
                 Ok(transcript) => return Ok(transcript),
                 Err(error) => error,
             };
-            if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+            if attempt + 1 < retry::UPSTREAM_ATTEMPTS
+                && let Some(delay) = error.retry_delay
+            {
                 tracing::warn!(
                     %url,
                     model = %request.model.0,
                     attempt,
                     "venice: transient upstream failure, retrying"
                 );
-                tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(error.error);
@@ -239,12 +241,13 @@ impl VeniceTranscriber {
                 tracing::error!(%error, %url, model = %model_id, retryable, "venice: transport error");
                 UpstreamAttemptError {
                     error: DomainError::UpstreamProvider,
-                    retryable,
+                    retry_delay: retryable.then_some(retry::UPSTREAM_RETRY_BACKOFF),
                 }
             })?;
         let status = response.status();
         if !status.is_success() {
-            let retryable = retry::is_retryable_status(status);
+            let retry_delay = retry::response_retry_delay(status, response.headers());
+            let retryable = retry_delay.is_some();
             let body = response.text().await.unwrap_or_default();
             tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, "venice: non-success response");
             if let Some(error) = user_venice_key_auth_error(status, &request.provider_credentials) {
@@ -252,7 +255,7 @@ impl VeniceTranscriber {
             }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
-                retryable,
+                retry_delay,
             });
         }
         let parsed = response
@@ -559,14 +562,16 @@ impl VeniceChat {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) => error,
             };
-            if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+            if attempt + 1 < retry::UPSTREAM_ATTEMPTS
+                && let Some(delay) = error.retry_delay
+            {
                 tracing::warn!(
                     %url,
                     model = %body.model,
                     attempt,
                     "venice: transient chat failure, retrying"
                 );
-                tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(error.error);
@@ -594,12 +599,13 @@ impl VeniceChat {
                 tracing::error!(%error, %url, model = %body.model, retryable, "venice: chat transport error");
                 UpstreamAttemptError {
                     error: DomainError::UpstreamProvider,
-                    retryable,
+                    retry_delay: retryable.then_some(retry::UPSTREAM_RETRY_BACKOFF),
                 }
             })?;
         let status = response.status();
         if !status.is_success() {
-            let retryable = retry::is_retryable_status(status);
+            let retry_delay = retry::response_retry_delay(status, response.headers());
+            let retryable = retry_delay.is_some();
             let body_text = response.text().await.unwrap_or_default();
             tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice: chat non-success response");
             if let Some(error) = user_venice_key_auth_error(status, auth.provider_credentials) {
@@ -607,7 +613,7 @@ impl VeniceChat {
             }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
-                retryable,
+                retry_delay,
             });
         }
         let route = upstream_route(&response);

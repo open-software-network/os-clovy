@@ -479,6 +479,7 @@ dependencies = [
  "clovy-config",
  "clovy-domain",
  "hound",
+ "httpdate",
  "jsonwebtoken",
  "mp4",
  "pretty_assertions",

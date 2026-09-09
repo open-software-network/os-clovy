@@ -76,9 +76,11 @@ impl VeniceAugment {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) => error,
             };
-            if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+            if attempt + 1 < retry::UPSTREAM_ATTEMPTS
+                && let Some(delay) = error.retry_delay
+            {
                 tracing::warn!(url = %endpoint.url, attempt, "venice augment: transient failure, retrying");
-                tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                tokio::time::sleep(delay).await;
                 continue;
             }
             return Err(error.error);
@@ -109,12 +111,13 @@ impl VeniceAugment {
                 tracing::error!(%error, url = %endpoint.url, retryable, "venice augment: transport error");
                 UpstreamAttemptError {
                     error: DomainError::UpstreamProvider,
-                    retryable,
+                    retry_delay: retryable.then_some(retry::UPSTREAM_RETRY_BACKOFF),
                 }
             })?;
         let status = response.status();
         if !status.is_success() {
-            let retryable = retry::is_retryable_status(status);
+            let retry_delay = retry::response_retry_delay(status, response.headers());
+            let retryable = retry_delay.is_some();
             let body_text = response.text().await.unwrap_or_default();
             tracing::error!(%status, url = %endpoint.url, body_bytes = body_text.len(), retryable, "venice augment: non-success response");
             // Only a 400 means the upstream rejected this specific input.
@@ -131,7 +134,7 @@ impl VeniceAugment {
             }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
-                retryable,
+                retry_delay,
             });
         }
         response.json::<T>().await.map_err(|error| {

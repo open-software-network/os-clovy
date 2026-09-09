@@ -15,6 +15,7 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 hound.workspace = true
+httpdate.workspace = true
 mp4.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
