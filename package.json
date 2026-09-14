@@ -65,13 +65,13 @@
     "@types/node": "24.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^6.1.1",
     "@vitest/coverage-v8": "^4.1.10",
     "agentation": "^3.0.2",
     "jsdom": "^25.0.1",
     "playwright": "^1.61.1",
-    "typescript": "^5.6.3",
+    "typescript": "^7.0.2",
     "vite": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.0"
   }
 }
