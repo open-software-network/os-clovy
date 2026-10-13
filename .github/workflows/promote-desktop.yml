@@ -260,7 +260,7 @@ jobs:
           repositories: ${{ github.event.repository.name }},os-june-releases,homebrew-tap
 
       - name: Download frozen RC metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: desktop-extension-release-candidate
           path: ${{ runner.temp }}/rc-meta
@@ -814,7 +814,7 @@ jobs:
           node-version: 24
 
       - name: Download immutable desktop release provenance
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: stable-desktop-release-provenance
           path: ${{ runner.temp }}/stable-release-provenance
@@ -914,7 +914,7 @@ jobs:
           node-version: 24
 
       - name: Download frozen RC metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: desktop-extension-release-candidate
           path: ${{ runner.temp }}/release-candidate
@@ -1028,7 +1028,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Download immutable desktop release provenance
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: stable-desktop-release-provenance
           path: ${{ runner.temp }}/stable-release-provenance
