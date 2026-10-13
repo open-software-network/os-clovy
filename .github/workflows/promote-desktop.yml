@@ -234,7 +234,7 @@ jobs:
             --metadata "$RUNNER_TEMP/release-candidate/extension-build.json"
 
       - name: Preserve immutable RC inputs for promotion jobs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-extension-release-candidate
           path: ${{ runner.temp }}/release-candidate
@@ -779,7 +779,7 @@ jobs:
           verify_stable_assets "$uploaded_dir" "$stable_build_json"
 
       - name: Preserve immutable desktop release provenance
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: stable-desktop-release-provenance
           path: ${{ runner.temp }}/stable-release-assets/stable-build.json

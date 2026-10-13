@@ -49,14 +49,14 @@ jobs:
         run: pnpm test:rust:coverage
 
       - name: Upload frontend coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-frontend-coverage
           path: coverage/frontend
           if-no-files-found: error
 
       - name: Upload Tauri Rust coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-rust-coverage
           path: src-tauri/target/llvm-cov/html
@@ -78,7 +78,7 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo llvm-cov --workspace --all-features --html --output-dir target/llvm-cov/html
       - name: Upload coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clovy-api-rust-coverage
           path: clovy-api/target/llvm-cov/html
