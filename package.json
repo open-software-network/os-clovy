@@ -57,7 +57,7 @@
     "sonner": "^2.0.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.16",
+    "@biomejs/biome": "2.5.15",
     "@tauri-apps/cli": "^2.11.3",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
