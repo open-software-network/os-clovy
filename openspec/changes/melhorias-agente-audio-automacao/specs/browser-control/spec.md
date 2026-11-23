@@ -15,7 +15,11 @@ O Clovy SHALL usar agent-browser integrado por ferramentas próprias, com perfil
 - Test: native Mac/Windows — login sintético e isolamento; box — perfil/lease/lifecycle reais
 
 ### Requirement: Transporte privado e identidade estrita
-Controle SHALL passar pelo broker Clovy com dono conversa/run, origem, aba/documento/nó e referências qualificadas. Inspeção e ação MUST revalidar identidade exata; aba/nó fechado não pode redirecionar ação a similar. Canal do motor MUST ser privado/autenticado, sem streaming/CDP/comandos públicos desprotegidos. Não SHALL publicar MCP upstream, eval, cookies/auth vault ou sessão escolhida pelo modelo.
+Controle SHALL passar pelo broker Clovy com dono definido pelo host, origem e referências qualificadas por aba/documento/nó. Inspeção e ação MUST revalidar a identidade exata. O canal MUST ser privado e autenticado, sem streaming, CDP ou comandos públicos desprotegidos. Não SHALL publicar MCP upstream, eval, cookies, credenciais ou sessão escolhida pelo modelo.
+
+#### Scenario: Autoridade do contexto
+- **WHEN** um consumidor interno ou externo solicita controle
+- **THEN** a sessão/run interna ou o contexto externo autorizado pelo host, conforme `retirar-chat-do-clovy`, delimita a ação
 
 #### Scenario: Nó substituído depois da aprovação
 - **WHEN** um formulário troca o nó por outro com mesmo nome/role
@@ -56,9 +60,9 @@ O app SHALL preservar políticas de rede e bloqueio privado/DNS pinning aplicáv
 - Test: browser/adapter reais — resolver controlado e contador um; native broker — ledger unknown, handles inválidos e controle pré-efeito zero/refused
 
 ### Requirement: Integração completa e modo efetivo
-A capacidade autorizada SHALL executar transporte real em produção, com navegador/motor pinados e empacotados para macOS/Windows, erros acionáveis e fluxo nos dois CLIs. Segundo plano é padrão; modo visível é permitido quando background não suporta a ação e antes de despacho incerto. Dependência exclusiva de extensão/pareamento e backend antigo MUST ser retirados após cutover, preservando utilidades compartilhadas.
+A capacidade autorizada SHALL executar transporte real em produção, com navegador/motor pinados e empacotados para macOS/Windows, erros acionáveis e fluxo nos dois CLIs nas superfícies autorizadas. Segundo plano é padrão; modo visível é permitido quando background não suporta a ação e antes de despacho incerto. Dependência exclusiva de extensão/pareamento e backend antigo MUST ser retirados após cutover, preservando utilidades compartilhadas.
 
 #### Scenario: Usar sem terminal manual
-- **WHEN** usuário habilita o recurso e pede navegação em Claude Code ou Codex
+- **WHEN** o usuário habilita o recurso e Claude Code ou Codex solicita navegação em um contexto autorizado
 - **THEN** navegador dedicado inicia e ferramentas funcionam sem instalar/rodar CLI global ou anexar Chrome pessoal
 - Test: box — smoke com motor real; native — pacote/macOS/Windows e ambos CLIs

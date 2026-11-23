@@ -42,6 +42,15 @@ export default defineMessages({
     "routines.run.tomorrow": "tomorrow {time}",
     "routines.run.yesterday": "yesterday {time}",
     "routines.run.fallbackLabel": "Routine run",
+    "routines.run.result": "Run result",
+    "routines.run.loadingResult": "Loading result…",
+    "routines.run.unavailableResult": "This run result is unavailable.",
+    "routines.run.noResult": "This run has no recorded output.",
+    "routines.run.waiting": "Waiting for input",
+    "routines.run.finished": "Completed",
+    "routines.run.failed": "Failed",
+    "routines.run.interrupted": "Interrupted",
+    "routines.run.idle": "Idle",
 
     // Schedule picker
     "routines.schedule.daily": "Daily",
@@ -108,7 +117,7 @@ export default defineMessages({
     "routines.detail.browserUseToggle": "Allow browser use for this routine",
     "routines.detail.scriptNote":
       "This routine has an attached script ({script}) that runs outside the sandbox, so it always has full access. Switching it to Sandboxed removes the script when you save.",
-    "routines.detail.noRuns": "No runs yet. When this routine fires, its session appears here.",
+    "routines.detail.noRuns": "No runs yet. When this routine runs, its result appears here.",
 
     // List view
     "routines.view.cleanupFailed":
@@ -121,7 +130,7 @@ export default defineMessages({
     "routines.view.loading": "Loading routines…",
     "routines.view.noMatch": "No routines match “{query}”.",
     "routines.view.runsUnavailable": "Run history is unavailable right now.",
-    "routines.view.noRuns": "No runs yet. When a routine fires, its session appears here.",
+    "routines.view.noRuns": "No runs yet. When a routine runs, its result appears here.",
     "routines.view.starters": "Starter routines",
     "routines.view.starterUnrestrictedTip":
       "This starter needs full access: when it fires, Clovy can run commands and change any file your account can. You confirm that before creating it.",
@@ -130,11 +139,6 @@ export default defineMessages({
     "routines.view.actionsFor": "Actions for {name}",
     "routines.view.serverError": "Clovy ran into a problem with that request.",
     "routines.view.unavailable": "Routines are unavailable. Try again.",
-    "routines.describe.formLabel": "Describe a routine to Clovy",
-    "routines.describe.inputLabel": "Describe a routine",
-    "routines.describe.placeholder": "Have Clovy help you set up a routine",
-    "routines.describe.changeAccess": "Change what this routine can touch",
-    "routines.describe.send": "Ask Clovy to set it up",
 
     // Starter templates
     "routines.template.morningBrief.name": "Morning brief",
@@ -203,6 +207,15 @@ export default defineMessages({
     "routines.run.tomorrow": "amanhã às {time}",
     "routines.run.yesterday": "ontem às {time}",
     "routines.run.fallbackLabel": "Execução de rotina",
+    "routines.run.result": "Resultado da execução",
+    "routines.run.loadingResult": "Carregando resultado…",
+    "routines.run.unavailableResult": "O resultado desta execução não está disponível.",
+    "routines.run.noResult": "Esta execução não tem um resultado registrado.",
+    "routines.run.waiting": "Aguardando resposta",
+    "routines.run.finished": "Concluída",
+    "routines.run.failed": "Falhou",
+    "routines.run.interrupted": "Interrompida",
+    "routines.run.idle": "Inativa",
 
     "routines.schedule.daily": "Diariamente",
     "routines.schedule.weekdays": "Dias úteis",
@@ -289,11 +302,6 @@ export default defineMessages({
     "routines.view.actionsFor": "Ações de {name}",
     "routines.view.serverError": "O Clovy encontrou um problema com essa solicitação.",
     "routines.view.unavailable": "As rotinas não estão disponíveis. Tente de novo.",
-    "routines.describe.formLabel": "Descreva uma rotina para o Clovy",
-    "routines.describe.inputLabel": "Descrever uma rotina",
-    "routines.describe.placeholder": "Peça ajuda ao Clovy para configurar uma rotina",
-    "routines.describe.changeAccess": "Alterar o que esta rotina pode acessar",
-    "routines.describe.send": "Pedir ao Clovy para configurar",
 
     "routines.template.morningBrief.name": "Resumo da manhã",
     "routines.template.morningBrief.description":

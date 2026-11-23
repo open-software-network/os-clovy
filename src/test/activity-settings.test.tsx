@@ -586,8 +586,10 @@ describe("ActivitySettingsSection", () => {
 
       const tabsSupported = settingsTabsForPlatform(true);
       expect(tabsSupported.some((t) => t.id === "activity")).toBe(true);
+      expect(tabsSupported.some((t) => t.id === "mcp")).toBe(true);
       const tabsUnsupported = settingsTabsForPlatform(false);
       expect(tabsUnsupported.some((t) => t.id === "activity")).toBe(false);
+      expect(tabsUnsupported.some((t) => t.id === "mcp")).toBe(false);
     } finally {
       Object.defineProperty(navigator, "platform", {
         configurable: true,

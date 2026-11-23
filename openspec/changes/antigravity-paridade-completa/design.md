@@ -12,7 +12,7 @@ A prova posterior com CLI1.4.12 autenticou um perfil próprio, executou MCP e re
 
 ## Goals / Non-Goals
 
-**Goals:** mesma autoridade e mesmo catálogo do Clovy para Claude, Codex e Antigravity; funcionamento com apenas um instalado; alternância com continuidade do contexto autorizado; rotinas e geração pontual seguras; nenhum efeito autorizado pelo simples fato de trocar runtime.
+**Goals:** mesma autoridade e mesmo catálogo do Clovy para Claude, Codex e Antigravity na mesma superfície; funcionamento com apenas um motor elegível instalado; rotinas e geração pontual seguras; escolha de motor sem ampliar autoridade.
 
 **Non-Goals:** novo agente nativo, loop de ferramentas proprietário, catálogo por runtime, proxy de modelo, cópia de credenciais, alteração de configuração global, paridade dos comandos internos proprietários de cada CLI ou motores novos de áudio/mídia. Ferramentas de mídia/conectores existentes permanecem no pool com os mesmos pré-requisitos host-owned.
 
@@ -20,25 +20,25 @@ A prova posterior com CLI1.4.12 autenticou um perfil próprio, executou MCP e re
 
 ### D1. Um gateway existente, adaptadores somente de transporte e eventos
 
-Reutilizar o `McpLaunch` do turno e os mesmos handlers/catalogadores; o adaptador recebe um vínculo novo e entrega a conexão ao runtime. Ferramenta não pode desaparecer por uma whitelist específica do motor; diferenças legítimas são somente superfície, partição, política e pré-requisitos do app. Paridade será medida comparando o catálogo normalizado e exercitando leituras, escrita aprovada/negada, clarificação e cancelamento nos três motores. Não criar outro registro de ferramentas nem reencaminhar a chamada por Claude/Codex.
+Reutilizar o `McpLaunch` do turno e os mesmos handlers/catalogadores. O adaptador recebe um vínculo novo e entrega a conexão ao runtime. Diferenças de catálogo dependem de superfície, partição, política e pré-requisitos do app. Comparar catálogo normalizado, leitura autorizada, recusa de efeito protegido e cancelamento em Rotinas nos três motores. Validar efeitos externos nas Configurações MCP conforme `retirar-chat-do-clovy`. Não criar outro registro de ferramentas nem reencaminhar a chamada por Claude/Codex.
 
 Alternativas descartadas: configuração global com `agy mcp add` interfere em sessões e credenciais do dono; implementar um loop próprio duplica a autoridade que já pertence ao Clovy. A única abordagem proposta é completar o adaptador existente.
 
 ### D2. Perfil Agy gerenciado e conexão de turno em diretório próprio
 
-Manter um perfil nativo durável em `<app_data>/runtime-profiles/agy/home`, com dados de autenticação pertencentes ao SDK e nunca tratados como cache. HOME/XDG e os equivalentes Windows mudam somente no ambiente final do filho Agy; não modificar o ambiente do app nem o `LoginEnv` compartilhado. No Windows, o Go resolve home por USERPROFILE, configuração por APPDATA e cache por LOCALAPPDATA: só mudar HOME/XDG não isola esse runtime. Definir também esses caminhos e HOMEDRIVE/HOMEPATH coerentes para o perfil próprio, resolvendo antes o executável no PATH real. O relay conserva separadamente os valores host de identidade necessários à sua guarda, sem expor chaves ou tokens ao motor. Chat, geração pontual, teste de provedor e entrada de login usam o mesmo contexto.
+Manter um perfil nativo durável em `<app_data>/runtime-profiles/agy/home`, com dados de autenticação pertencentes ao SDK e nunca tratados como cache. HOME/XDG e os equivalentes Windows mudam somente no ambiente final do filho Agy; não modificar o ambiente do app nem o `LoginEnv` compartilhado. No Windows, o Go resolve home por USERPROFILE, configuração por APPDATA e cache por LOCALAPPDATA: só mudar HOME/XDG não isola esse runtime. Definir também esses caminhos e HOMEDRIVE/HOMEPATH coerentes para o perfil próprio, resolvendo antes o executável no PATH real. O relay conserva separadamente os valores host de identidade necessários à sua guarda, sem expor chaves ou tokens ao motor. Rotinas, geração pontual, teste de provedor e entrada de login usam o mesmo contexto.
 
-O diretório de execução do CLI pertence ao Clovy: estável por sessão de chat e exclusivo por chamada pontual. Não iniciar Agy no workspace arbitrário recebido pela API, adicionar esse diretório pessoal como raiz de descoberta ou escrever nele `.agents`. O workspace autorizado do usuário continua no contexto host-owned das ferramentas; não vira a raiz de personalizações do motor. Criar diretórios/configurações privados antes de gravar autoridade, usando primitivas existentes e verificação de ACL quando aplicável; recusar symlinks ou estado cuja propriedade não possa ser demonstrada sem alterar dados alheios.
+O diretório de execução do CLI pertence ao Clovy, com escopo de sessão para execuções vinculadas e exclusivo por chamada pontual. Não iniciar Agy no workspace arbitrário recebido pela API, adicionar esse diretório pessoal como raiz de descoberta ou escrever nele `.agents`. O workspace autorizado do usuário continua no contexto host-owned das ferramentas; não vira a raiz de personalizações do motor. Criar diretórios/configurações privados antes de gravar autoridade, usando primitivas existentes e verificação de ACL quando aplicável; recusar symlinks ou estado cuja propriedade não possa ser demonstrada sem alterar dados alheios.
 
 O SDK também procura personalizações em ancestrais até a raiz Git: o teste nativo carregou um hook do pai mesmo com HOME privado. Cada workspace de execução, inclusive login e pontual, deve ser uma raiz própria de descoberta. Inicializar nele um repositório vazio válido, com metadados mínimos privados e nenhum commit, sem depender de executar Git ou acrescentar biblioteca. A prova nativa qualificou `.git/HEAD`, `config`, `objects` e `refs` criados por filesystem; `core.hooksPath` aponta para diretório vazio próprio e `info/exclude` impede versionar o transporte. Remover roteamentos `GIT_*` herdados que apontariam para repositório/configuração externos. Isso não cria histórico paralelo: só delimita a descoberta do SDK; a história da conversa continua no Clovy.
 
 Gravar no workspace próprio `.agents/mcp_config.json` com somente o servidor do gateway atual, nome único, argumentos absolutos existentes `--dir`/`--turn` e `timeoutSeconds:900`. O nome não concede autoridade: o app valida o token e revoga o grant antes de limpar o transporte. Conservar a identidade do relay e sua proteção debug contra dados de produção; HOME privado do runtime não pode enfraquecer essa guarda. O relay continua falando com o servidor e o banco do app, nunca com outro banco calculado pelo HOME do motor.
 
-Cobrir preparo/spawn falho, sucesso, Stop e crash; turnos concorrentes não compartilham configuração ou vínculo. Remover somente artefatos temporários próprios, preservando autenticação e recibos. Eliminar a guarda de workspace compartilhado e seus callers, testes exclusivos e documentação obsoletos: não manter fallback, alias ou duas convenções. Qualificar nativamente que a retomada descobre o novo servidor e não usa a autoridade antiga.
+Cobrir preparo/spawn falho, sucesso, Stop e crash; turnos concorrentes não compartilham configuração ou vínculo. Remover somente artefatos temporários próprios, preservando autenticação e recibos. Eliminar a guarda de workspace compartilhado e seus callers, testes exclusivos e documentação obsoletos: não manter fallback, alias ou duas convenções. Qualificar nativamente que uma nova execução descobre o próprio servidor e não usa autoridade antiga.
 
 ### D3. Política do app, não a configuração permissiva do runtime
 
-Adicionar a linha Agy à tabela existente. Usar `--settings` transitório para fixar explicitamente modo e regras; permitir apenas o MCP do gateway vinculado nas exceções MCP do turno. A autorização de escrita continua exclusivamente no broker, inclusive em Bypass configurado pelo usuário. Não usar `--dangerously-skip-permissions`, `always-proceed`, `auto` ou configuração global para fazer testes passarem.
+Adicionar a linha Agy à tabela existente. Usar `--settings` transitório para fixar explicitamente modo e regras; permitir apenas o MCP do gateway vinculado nas exceções MCP do turno. A autorização de escrita continua exclusivamente no broker. Não usar `--dangerously-skip-permissions`, `always-proceed`, `auto` ou configuração global para fazer testes passarem.
 
 Rotinas usam a política não assistida existente e suas capacidades de leitura; a escrita que exige aprovação é recusada sem cartão pendente. Antes de admitir Agy em rotinas, uma prova nativa deve verificar precedência das regras sobre permissões globais, negação de escrita/comando/atuação não autorizados e ausência de passagem por extensões/hooks fora da política. Geração pontual recebe a mesma verificação de isolamento, schema e efeitos, sem presumir que a flag de sandbox desliga ferramentas. Uma limitação comprovada do CLI é bloqueio da entrega de paridade, não permissão para declarar um modo reduzido como completo; deve voltar ao usuário com evidência e alternativa concreta.
 
@@ -50,11 +50,11 @@ O app oferece uma ação explícita para iniciar a autenticação nativa no perf
 
 ### D4. Seleção e contexto são independentes de elegibilidade
 
-Separar a preferência padrão de chat da admissão não assistida; só incluir Agy nesta última depois da política qualificada. Respeitar o runtime escolhido e não trocar de motor em erro. Incluir Agy na descoberta/default do backend e do frontend; não mudar as rotas independentes de transcrição ou ditado.
+Resolver elegibilidade separadamente para cada uso. Só admitir Agy em rotinas depois de qualificar a política não assistida. Respeitar o runtime escolhido e não trocar de motor em erro. Incluir Agy na descoberta e seleção dos usos elegíveis no backend e no frontend; manter as rotas independentes de transcrição e ditado.
 
-Manter IDs de retomada restritos à sequência contínua do mesmo motor. Ao alternar, construir o contexto a partir da história canônica e das referências autorizadas do Clovy, incluindo evidência de ferramentas necessária para continuar, sem repetir suas ações nem restaurar tentativas rejeitadas. Reutilizar orçamento/resumos e leitores de contexto existentes; não criar um segundo sistema de memória nem prometer respostas idênticas entre modelos. Testar as seis trocas direcionadas e retorno A→B→A, com resultados e referências, não apenas uma frase ecoada.
+Preservar as proteções de identidade dos registros existentes e os leitores de contexto já utilizados. Em qualquer execução dos consumidores restantes, mudanças no motor selecionado só se aplicam a novas execuções e não transferem vínculos, grants ou decisões pendentes.
 
-O corte de perfil não deve enviar ao SDK privado um ID criado no HOME anterior. Identificar a origem dos novos IDs usando a persistência existente; para uma origem ausente ou diferente, iniciar conversa nativa nova com replay do histórico canônico autorizado. Preservar mensagens, resultados e referências antigos, sem copiar o armazenamento do SDK ou reenviar ações.
+A proteção de replay registrada na tarefa concluída 4.2 recusa IDs de outra origem no SDK privado. Preservar mensagens, resultados e referências antigos com seus limites de acesso, sem copiar o armazenamento do SDK ou reenviar ações.
 
 ### D5. Normalização e prova reais
 
@@ -67,7 +67,7 @@ Provas de geração pontual cobrem schema efetivo, timeout, ausência de efeitos
 - Perfil do motor e workspace do usuário têm funções distintas → contexto de lançamento único, MCP com vínculo exclusivo, relay do app preservado e nenhum arquivo de autoridade no projeto pessoal.
 - CLI novo aceita uma chave desconhecida e a ignora → observar configuração/negação efetivas em canários nativos, não aceitar argv como prova.
 - Rotina herda permissões, hooks ou MCPs globais → qualificar isolamento e impedir admissão quando não houver garantia; não alterar os arquivos do dono.
-- Troca de motor perde resultados anteriores ou repete ação → contexto canônico com evidências, nenhum replay de execução e regressão de efeito único.
+- Mudança de provedor entre execuções → histórico preservado e vínculos independentes, com regressão de efeito único.
 - Cota/auth/Windows indisponível → registrar o runtime e a prova que faltam, sem atribuir ao resultado sintético aprovação nativa integral.
 - Primeiro login no perfil Clovy pode ser necessário apesar do login pessoal → autenticação nativa iniciada pelo app, com estado/erro explicado e sem copiar credenciais; manter o perfil fora da limpeza de caches.
 

@@ -16,20 +16,20 @@ O uso do computador SHALL ficar pronto quando usuário o ativou, agent-desktop p
 - Test: integration — sem dependência de rollout ou modelos remotos
 
 ### Requirement: Só pelos CLIs com MCP do Clovy
-A ferramenta `computer_use` SHALL estar disponível apenas a turnos CLI vinculados/autorizados através de clovy-mcp. Cada ação MUST respeitar política efetiva de aprovação e grants de app/janela, mesmo em bypass. Capturas voltam ao CLI, nunca a outro modelo/provedor por causa desta capacidade.
+A ferramenta `computer_use` SHALL estar disponível pelo Clovy MCP somente com contexto e concessões de app/janela validados pelo host. Turnos internos precisam do vínculo autorizado. Clientes externos precisam de autoridade própria nos termos de `retirar-chat-do-clovy`. Cada ação MUST respeitar a política de aprovação e as concessões efetivas. Capturas voltam ao CLI que fez a chamada.
 
 #### Scenario: Turno no Claude Code
-- **WHEN** Claude Code assistido e autorizado chama `computer_use`
+- **WHEN** Claude Code chama `computer_use` com contexto e concessões válidos
 - **THEN** política efetiva de aprovação é respeitada e captura da janela correta retorna como bloco MCP
-- Test: integration — catálogo/dispatch; native — approvals e bypass explícito
+- Test: integração de catálogo e despacho, prova nativa de autorização e recusa
 
 #### Scenario: Turno no agente nativo
-- **WHEN** um caminho não CLI tenta oferecer `computer_use`
+- **WHEN** um caminho sem cliente MCP autorizado tenta oferecer `computer_use`
 - **THEN** a ferramenta não está na superfície disponível
-- Test: integration — ausência fora de turno CLI vinculado
+- Test: integração de descoberta e despacho sem contexto válido
 
-#### Scenario: Turno no Codex
-- **WHEN** Codex assistido e autorizado chama `computer_use`
+#### Scenario: Ação no Codex
+- **WHEN** Codex chama `computer_use` com contexto e concessões válidos
 - **THEN** política efetiva é respeitada e captura da janela correta retorna sem MCP upstream irrestrito
 - Test: integration e native Codex
 

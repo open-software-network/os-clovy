@@ -21,6 +21,7 @@
 //! cancelled at startup ([`setup`]).
 
 pub mod commands;
+pub mod external;
 pub mod store;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -740,6 +741,7 @@ impl BrokerIo for AppIo {
 /// process left pending, and settles a run's requests when it ends.
 pub fn setup(app: &tauri::App) {
     use tauri::{Listener, Manager};
+    external::setup(app);
     let broker = ApprovalBroker::new(
         AppIo {
             app: app.handle().clone(),
@@ -799,6 +801,9 @@ pub fn close(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(broker) = app.try_state::<ApprovalBroker>() {
         broker.close();
+    }
+    if let Some(broker) = app.try_state::<external::ExternalApprovalBroker>() {
+        broker.invalidate();
     }
 }
 

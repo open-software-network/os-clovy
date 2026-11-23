@@ -1,5 +1,11 @@
 # Pendências do agente e das ferramentas do Clovy
 
+> O registro abaixo preserva o levantamento e as evidências originais. O escopo
+> vigente está nas changes [melhorias de áudio e automação](../../openspec/changes/melhorias-agente-audio-automacao/tasks.md)
+> e [paridade do Antigravity](../../openspec/changes/antigravity-paridade-completa/tasks.md).
+> A retirada do chat aposenta os aceites de interface de conversa. Atividade,
+> Rotinas, provedores, permissões e ferramentas compatíveis seguem nesses planos.
+
 ## Escopo e fontes
 
 Registro original de 2026-11-01 a pedido do dono, antes de implementar as melhorias levantadas. Abrange o chat com Claude Code e Codex e a sessão anexada. As descrições de defeitos, linhas de código e expressões como “hoje” no diagnóstico abaixo pertencem àquela conferência inicial; não descrevem automaticamente o fonte integrado atual. O estado de implementação e prova está na matriz seguinte. Nenhuma caixa aberta autoriza ativar bypass ou ampliar grants.

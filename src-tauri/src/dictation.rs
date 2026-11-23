@@ -650,33 +650,39 @@ pub(crate) async fn delete_history_for_profile(
     Ok(())
 }
 
-/// Bound deletion claims the run and partition under SQLite's write lock.
-pub(crate) async fn delete_history_for_turn(
+/// MCP deletion claims the approved partition under SQLite's write lock.
+pub(crate) async fn delete_history_authorized(
     pool: &sqlx_sqlite::SqlitePool,
     profile: &str,
     id: &str,
-    binding: &crate::mcp_server::turns::TurnBinding,
+    authority: crate::db::repositories::McpMutation<'_>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await?;
-    crate::db::repositories::guard_bound_turn(
-        &mut tx,
-        profile,
-        &binding.session_id,
-        &binding.run_id,
-        &binding.authority,
+    use crate::db::repositories::McpMutation;
+    let mut tx = if matches!(authority, McpMutation::External(_)) {
+        pool.begin_with("BEGIN IMMEDIATE").await?
+    } else {
+        pool.begin().await?
+    };
+    authority.guard(&mut tx, profile).await?;
+    let expected = authority
+        .external_target()
+        .and_then(|target| target["createdAt"].as_str());
+    let result = sqlx::query::query(
+        "DELETE FROM dictation_history WHERE id=? AND profile=? AND (? IS NULL OR created_at = ?)",
     )
+    .bind(id)
+    .bind(profile)
+    .bind(expected)
+    .bind(expected)
+    .execute(&mut *tx)
     .await?;
-    let result = sqlx::query::query("DELETE FROM dictation_history WHERE id=? AND profile=?")
-        .bind(id)
-        .bind(profile)
-        .execute(&mut *tx)
-        .await?;
     if result.rows_affected() == 0 {
         return Err(AppError::new(
             "dictation_not_found",
             "The dictation was not found in this data partition.",
         ));
     }
+    authority.before_commit(profile)?;
     tx.commit().await?;
     Ok(())
 }
@@ -7684,29 +7690,15 @@ fn outcome_from_clean_transcript(
                 quarantine_transcript: Some(transcript),
             }
         }
-        transcript => {
-            if let Some(prompt) = agent_session_prompt_from_dictation(&transcript.text) {
-                DictationTranscriptionOutcome {
-                    helper_command: serde_json::json!({ "type": "discard_recording" }),
-                    event: Some(serde_json::json!({
-                        "type": "agent_session_prompt",
-                        "payload": { "prompt": prompt },
-                    })),
-                    transcript: Some(transcript),
-                    quarantine_transcript: None,
-                }
-            } else {
-                DictationTranscriptionOutcome {
-                    helper_command: serde_json::json!({
-                        "type": "paste_text",
-                        "text": transcript.text.clone(),
-                    }),
-                    event: None,
-                    transcript: Some(transcript),
-                    quarantine_transcript: None,
-                }
-            }
-        }
+        transcript => DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({
+                "type": "paste_text",
+                "text": transcript.text.clone(),
+            }),
+            event: None,
+            transcript: Some(transcript),
+            quarantine_transcript: None,
+        },
     }
 }
 
@@ -8028,39 +8020,6 @@ fn audio_detected_but_no_text_event(
 
 fn probable_speech_detected(observed_audio_level: Option<f32>) -> bool {
     observed_audio_level.is_some_and(|level| level >= DICTATION_AUDIO_ACTIVITY_THRESHOLD)
-}
-
-fn agent_session_prompt_from_dictation(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    let (first, after_first) = take_ascii_word(trimmed)?;
-    if !first.eq_ignore_ascii_case("hey") {
-        return None;
-    }
-    let after_first = skip_word_separators(after_first);
-    let (second, after_second) = take_ascii_word(after_first)?;
-    if !is_agent_session_wake_name(second) {
-        return None;
-    }
-    Some(skip_word_separators(after_second).trim().to_string())
-}
-
-fn is_agent_session_wake_name(word: &str) -> bool {
-    ["clovy", "clovie", "clovi", "june", "jun", "joon"]
-        .iter()
-        .any(|variant| word.eq_ignore_ascii_case(variant))
-}
-
-fn take_ascii_word(value: &str) -> Option<(&str, &str)> {
-    let end = value
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_alphabetic())
-        .map(|(index, ch)| index + ch.len_utf8())
-        .last()?;
-    Some(value.split_at(end))
-}
-
-fn skip_word_separators(value: &str) -> &str {
-    value.trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch.is_ascii_punctuation())
 }
 
 async fn store_dictation_history_item(
@@ -12704,30 +12663,6 @@ mod tests {
     }
 
     #[test]
-    fn hey_clovy_detection_requires_first_two_words_and_keeps_june_aliases() {
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey Clovy open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey Clovie open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey June open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("well hey clovy open"),
-            None
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("hey juniper open"),
-            None
-        );
-    }
-
-    #[test]
     fn empty_transcription_discards_with_a_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
@@ -13516,19 +13451,20 @@ mod tests {
     }
 
     #[test]
-    fn low_speech_evidence_cannot_emit_an_agent_session_prompt() {
+    fn greeting_is_plain_dictation_and_low_evidence_blocks_paste() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
-                text: "Hey Clovy delete this note.".to_string(),
+                text: "Hey Clovy open settings.".to_string(),
                 language: Some("en".to_string()),
                 provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
         );
+        assert!(outcome.event.is_none());
         assert_eq!(
-            outcome.event.as_ref().and_then(|event| event.get("type")),
-            Some(&serde_json::json!("agent_session_prompt"))
+            outcome.helper_command,
+            serde_json::json!({"type":"paste_text","text":"Hey Clovy open settings."})
         );
 
         let outcome = quarantine_low_speech_evidence_outcome(outcome, true);

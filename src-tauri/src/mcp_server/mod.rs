@@ -1,7 +1,7 @@
 //! The Clovy MCP server: lets local MCP clients (Claude Code, Cursor, and the
 //! CLI chat engines) read the current data partition's notes, dictations, and
 //! memories, and the installation's activity. On by default; the switch is
-//! `mcpServer` in `activity-settings.json`, changed only from Settings, Agent.
+//! `mcpServer` in `activity-settings.json`, changed only from Settings, MCP.
 //! Contract and protocol: `docs/mcp-server.md`.
 //!
 //! Layout: `channel` (Unix socket + installation secret), `stdio` (the
@@ -358,24 +358,43 @@ pub async fn mcp_server_set_enabled(
         ));
     }
     crate::activity::set_mcp_server_enabled(&app, request.enabled)?;
+    if !request.enabled {
+        if let Some(broker) =
+            app.try_state::<crate::approval_broker::external::ExternalApprovalBroker>()
+        {
+            broker.invalidate();
+        }
+    }
     reconcile(&app).await;
     status(&app).await
 }
 
 #[cfg(any(unix, windows))]
-fn app_handler(app: AppHandle) -> channel::TurnHandler {
-    std::sync::Arc::new(move |message: Value, binding| {
+fn app_handler(app: AppHandle) -> channel::AuthenticatedHandler {
+    use channel::Connection;
+    std::sync::Arc::new(move |message: Value, connection| {
         let app = app.clone();
         Box::pin(async move {
-            match app_data(&app, &message, binding.as_deref()).await {
+            let binding = match &connection {
+                Connection::Turn(binding) => Some(binding.as_ref()),
+                Connection::External(_) => None,
+            };
+            match app_data(&app, &message, binding).await {
                 Ok(data) => {
                     let broker = app.try_state::<crate::approval_broker::ApprovalBroker>();
                     let ctx = ToolCtx {
                         data: &data,
                         app: Some(&app),
-                        binding: binding.as_deref(),
+                        binding,
                         broker: broker.as_deref(),
                     };
+                    if let Connection::External(connection) = &connection {
+                        if let Some(external) = app.try_state::<crate::approval_broker::external::ExternalApprovalBroker>() {
+                            let settings = crate::commands::memory_settings_path(&app).ok();
+                            let recordings = crate::app_paths::app_data_dir(&app).ok();
+                            return protocol::handle_external(&ctx, connection, &external, settings.as_deref(), recordings.as_deref(), &message).await;
+                        }
+                    }
                     protocol::handle_in(&ctx, &message).await
                 }
                 Err(error) => protocol::request_id(&message).map(|id| {

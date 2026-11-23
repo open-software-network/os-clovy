@@ -541,7 +541,11 @@ async fn ui_stop_is_durable_before_host_teardown_and_blocks_a_stale_bound_write(
         repo.create_note_checked(
             "default",
             None,
-            Some((&binding.session_id, &binding.run_id, &binding.authority))
+            Some(crate::db::repositories::McpMutation::Turn(
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority
+            ))
         )
         .await
         .unwrap_err()

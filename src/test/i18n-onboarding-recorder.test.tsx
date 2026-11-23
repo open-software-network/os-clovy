@@ -93,15 +93,14 @@ afterEach(() => {
 });
 
 describe("onboarding i18n", () => {
-  it("renders the personality step in Portuguese", () => {
+  it("renders the permissions step in Portuguese", () => {
     applyInterfaceLocale("pt-BR");
-    window.history.replaceState({}, "", "/?clovyDemoStep=mood");
+    window.history.replaceState({}, "", "/?clovyDemoStep=permissions");
     render(<OnboardingFlow onComplete={vi.fn()} />);
 
     expect(
-      screen.getByRole("heading", { name: "Escolha minha personalidade" }),
+      screen.getByRole("heading", { name: "Deixe o Clovy ouvir e digitar" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Estratégico/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continuar" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Voltar" })).toBeInTheDocument();
   });

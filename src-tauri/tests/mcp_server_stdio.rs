@@ -675,3 +675,460 @@ async fn mcp_server_binary_carries_image_content_blocks_to_the_cli() {
     client.close().await;
     listener.stop_and_wait().await;
 }
+
+struct ExternalFixture {
+    // Keep the socket directory alive for the listener's lifetime.
+    listener: channel::Listener,
+    root: tempfile::TempDir,
+    notes: SqlitePool,
+    approvals: Arc<clovy_lib::approval_broker::external::ExternalApprovalBroker>,
+    profile: Arc<Mutex<String>>,
+}
+
+impl ExternalFixture {
+    async fn new(timeout: StdDuration) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let notes = notes_pool().await;
+        let profile = Arc::new(Mutex::new("default".to_string()));
+        let active_profile = Arc::clone(&profile);
+        let approvals = Arc::new(
+            clovy_lib::approval_broker::external::ExternalApprovalBroker::new(
+                move || Some(active_profile.lock().unwrap().clone()),
+                || {},
+                timeout,
+            ),
+        );
+        let settings = root.path().join("memory-settings.json");
+        std::fs::write(&settings, br#"{"enabled":true}"#).unwrap();
+        let fixture_recordings = root.path().to_path_buf();
+        let fixture_notes = notes.clone();
+        let fixture_profile = Arc::clone(&profile);
+        let fixture_approvals = Arc::clone(&approvals);
+        let handler: channel::AuthenticatedHandler = Arc::new(move |message, connection| {
+            let notes = fixture_notes.clone();
+            let profile = fixture_profile.lock().unwrap().clone();
+            let approvals = Arc::clone(&fixture_approvals);
+            let settings = settings.clone();
+            let recordings = fixture_recordings.clone();
+            Box::pin(async move {
+                let channel::Connection::External(connection) = connection else {
+                    panic!("fixture issued no turn grants");
+                };
+                let data = McpData {
+                    notes,
+                    profile,
+                    memory_enabled: true,
+                    activity: ActivityAccess::Off,
+                    now: Utc::now(),
+                };
+                protocol::handle_external(
+                    &ToolCtx::unbound(&data),
+                    &connection,
+                    &approvals,
+                    Some(&settings),
+                    Some(&recordings),
+                    &message,
+                )
+                .await
+            })
+        });
+        let listener = channel::Listener::start(&channel::channel_dir(root.path()), handler)
+            .await
+            .unwrap();
+        Self {
+            listener,
+            root,
+            notes,
+            approvals,
+            profile,
+        }
+    }
+
+    async fn connect(&self) -> Client {
+        Client::spawn(&channel::channel_dir(self.root.path())).await
+    }
+
+    async fn pending(&self, expected: usize) -> Vec<Value> {
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let rows = self.approvals.pending();
+                if rows.len() == expected {
+                    return rows
+                        .into_iter()
+                        .map(|row| serde_json::to_value(row).unwrap())
+                        .collect();
+                }
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected {expected} pending approvals"))
+    }
+
+    async fn memory_count(&self) -> i64 {
+        sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM memories WHERE source = 'agent'")
+            .fetch_one(&self.notes)
+            .await
+            .unwrap()
+    }
+
+    fn decide(
+        &self,
+        request: &Value,
+        approve: bool,
+    ) -> Result<(), clovy_lib::domain::types::AppError> {
+        self.approvals
+            .decide(request["id"].as_str().unwrap(), approve)
+    }
+
+    fn select_profile(&self, profile: &str) {
+        *self.profile.lock().unwrap() = profile.into();
+        self.approvals.invalidate();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_discovers_protected_tools_without_a_turn() {
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let mut client = fixture.connect().await;
+    let listed = client.request("tools/list", json!({})).await;
+    let names = listed["result"]["tools"].as_array().unwrap();
+    assert!(names.iter().any(|tool| tool["name"] == "get_note"));
+    assert!(names.iter().any(|tool| tool["name"] == "save_memory"));
+    assert!(!names.iter().any(|tool| tool["name"] == "get_conversation"));
+    assert_eq!(
+        client
+            .call("get_note", json!({"id":"note-roadmap"}))
+            .await
+            .unwrap()["id"],
+        "note-roadmap"
+    );
+    assert!(client
+        .call("get_note", json!({"id":"note-other-profile"}))
+        .await
+        .unwrap_err()
+        .contains("note_not_found"));
+    let missing_turn = client
+        .call(
+            "get_conversation",
+            json!({"conversationId":"internal-session-fixture"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(missing_turn.contains("turn_required"), "{missing_turn}");
+    let invalid = client
+        .call(
+            "save_memory",
+            json!({"content":"Fixture","workspace":"/invalid","runId":"internal-run-fixture"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        invalid.contains("agent_tool_arguments_invalid"),
+        "{invalid}"
+    );
+    assert!(fixture.approvals.pending().is_empty());
+    assert_eq!(fixture.memory_count().await, 0);
+    client.close().await;
+    fixture.listener.stop_and_wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_applies_one_decision_to_one_connection_and_target() {
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let mut first = fixture.connect().await;
+    let mut second = fixture.connect().await;
+    let approve = tokio::spawn(async move {
+        let result = first
+            .call("save_memory", json!({"content":"Keep the local fixture"}))
+            .await;
+        (first, result)
+    });
+    let deny = tokio::spawn(async move {
+        let result = second
+            .call("save_memory", json!({"content":"Deny the local fixture"}))
+            .await;
+        (second, result)
+    });
+    let requests = fixture.pending(2).await;
+    let allowed = requests
+        .iter()
+        .find(|value| {
+            value["preview"]
+                .as_str()
+                .unwrap()
+                .contains("Keep the local fixture")
+        })
+        .unwrap();
+    let blocked = requests
+        .iter()
+        .find(|value| value["id"] != allowed["id"])
+        .unwrap();
+    assert_eq!(allowed["profile"], "default");
+    assert_eq!(allowed["tool"], "save_memory");
+    assert_eq!(fixture.memory_count().await, 0);
+    fixture.decide(blocked, false).unwrap();
+    fixture.decide(allowed, true).unwrap();
+    assert_eq!(
+        fixture.decide(allowed, true).unwrap_err().code,
+        "mcp_external_approval_expired"
+    );
+    let (mut first, written) = approve.await.unwrap();
+    let id = written.unwrap()["id"].as_str().unwrap().to_string();
+    let (second, denied) = deny.await.unwrap();
+    assert!(denied.unwrap_err().contains("user_denied"));
+    assert_eq!(fixture.memory_count().await, 1);
+    let delete = tokio::spawn(async move {
+        let result = first.call("forget_memory", json!({"id":id})).await;
+        (first, result)
+    });
+    let pending_delete = fixture.pending(1).await.remove(0);
+    assert_eq!(pending_delete["tool"], "forget_memory");
+    assert!(pending_delete["preview"]
+        .as_str()
+        .unwrap()
+        .contains("Permanently delete"));
+    assert!(pending_delete["preview"]
+        .as_str()
+        .unwrap()
+        .contains("Keep the local fixture"));
+    assert_eq!(fixture.memory_count().await, 1);
+    fixture.decide(&pending_delete, true).unwrap();
+    let (first, result) = delete.await.unwrap();
+    assert_eq!(result.unwrap()["forgotten"], true);
+    assert_eq!(fixture.memory_count().await, 0);
+    let tombstones: i64 =
+        sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM memory_tombstones")
+            .fetch_one(&fixture.notes)
+            .await
+            .unwrap();
+    assert_eq!(tombstones, 1);
+    let session_count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM agent_runs")
+        .fetch_one(&fixture.notes)
+        .await
+        .unwrap();
+    assert_eq!(session_count, 0);
+    first.close().await;
+    second.close().await;
+    fixture.listener.stop_and_wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_expiry_disconnect_and_cancellation_revoke_pending_calls() {
+    let fixture = ExternalFixture::new(StdDuration::from_millis(1500)).await;
+    let mut client = fixture.connect().await;
+    let expires = tokio::spawn(async move {
+        let expired = client
+            .call("save_memory", json!({"content":"Expires"}))
+            .await;
+        (client, expired)
+    });
+    let request = fixture.pending(1).await.remove(0);
+    let (mut client, expired) = expires.await.unwrap();
+    assert!(expired
+        .unwrap_err()
+        .contains("mcp_external_approval_expired"));
+    assert!(fixture.decide(&request, true).is_err());
+
+    client.send(json!({"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"save_memory","arguments":{"content":"User cancelled"}}})).await;
+    let cancel = fixture.pending(1).await.remove(0);
+    client
+        .send(
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":300}}),
+        )
+        .await;
+    fixture.pending(0).await;
+    assert!(fixture.decide(&cancel, true).is_err());
+
+    for id in 310..314 {
+        client.send(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"save_memory","arguments":{"content":"Disconnected"}}})).await;
+    }
+    let disconnected = fixture.pending(4).await;
+    client.close().await;
+    fixture.pending(0).await;
+    for request in disconnected {
+        assert!(fixture.decide(&request, true).is_err());
+    }
+    assert_eq!(fixture.memory_count().await, 0);
+    fixture.listener.stop_and_wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_revalidates_approved_write_after_profile_switch_and_writer_wait() {
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let mut client = fixture.connect().await;
+    let changed = tokio::spawn(async move {
+        let result = client
+            .call("save_memory", json!({"content":"Old data partition"}))
+            .await;
+        (client, result)
+    });
+    let request = fixture.pending(1).await.remove(0);
+    let writer = fixture.notes.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    fixture.decide(&request, true).unwrap();
+    fixture.select_profile("work");
+    fixture.select_profile("default");
+    writer.rollback().await.unwrap();
+    let (mut client, result) = changed.await.unwrap();
+    assert!(result.unwrap_err().contains("mcp_external_scope_changed"));
+    assert_eq!(fixture.memory_count().await, 0);
+
+    let pending = tokio::spawn(async move {
+        let result = client
+            .call("save_memory", json!({"content":"Still pending"}))
+            .await;
+        (client, result)
+    });
+    let request = fixture.pending(1).await.remove(0);
+    fixture.select_profile("work");
+    fixture.pending(0).await;
+    assert!(fixture.decide(&request, true).is_err());
+    let (mut client, result) = pending.await.unwrap();
+    assert!(result.unwrap_err().contains("mcp_external_scope_changed"));
+    assert_eq!(fixture.memory_count().await, 0);
+    assert_eq!(
+        client
+            .call("get_note", json!({"id":"note-other-profile"}))
+            .await
+            .unwrap()["id"],
+        "note-other-profile"
+    );
+    client.close().await;
+    fixture.listener.stop_and_wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_rejects_a_second_approved_write_against_a_changed_target() {
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let mut first = fixture.connect().await;
+    let mut second = fixture.connect().await;
+    let memory = Repositories::new(fixture.notes.clone())
+        .create_memory("default", None, "Unchanged fixture", "user")
+        .await
+        .unwrap();
+    let target = memory.id.clone();
+    let update_first = tokio::spawn(async move {
+        let result = first
+            .call("update_memory", json!({"id":target,"content":"Edit one"}))
+            .await;
+        (first, result)
+    });
+    let target = memory.id.clone();
+    let update_second = tokio::spawn(async move {
+        let result = second
+            .call("update_memory", json!({"id":target,"content":"Edit two"}))
+            .await;
+        (second, result)
+    });
+    let approvals = fixture.pending(2).await;
+    assert!(approvals.iter().all(|request| request["preview"]
+        .as_str()
+        .unwrap()
+        .contains("Unchanged fixture")));
+    for request in approvals {
+        fixture.decide(&request, true).unwrap();
+    }
+    let (first, a) = update_first.await.unwrap();
+    let (second, b) = update_second.await.unwrap();
+    assert_ne!(a.is_ok(), b.is_ok());
+    let (result, conflict) = match (a, b) {
+        (Ok(result), Err(conflict)) | (Err(conflict), Ok(result)) => (result, conflict),
+        _ => unreachable!("only one approved mutation can apply"),
+    };
+    assert!(conflict.contains("memory_conflict"), "{conflict}");
+    let stored: String =
+        sqlx::query_scalar::query_scalar("SELECT content FROM memories WHERE id = ?")
+            .bind(memory.id)
+            .fetch_one(&fixture.notes)
+            .await
+            .unwrap();
+    assert_eq!(result["content"], stored);
+    first.close().await;
+    second.close().await;
+    fixture.listener.stop_and_wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_relay_refuses_project_cascade_when_only_an_artifact_changed() {
+    use clovy_lib::domain::types::RecordingSourceMode;
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let mut client = fixture.connect().await;
+    let repos = Repositories::new(fixture.notes.clone());
+    let project = repos
+        .create_folder("default", "Project fixture", None)
+        .await
+        .unwrap();
+    let note = repos
+        .create_note("default", Some(project.id.clone()))
+        .await
+        .unwrap();
+    let recording = "recording-fixture";
+    repos
+        .create_recording_session(
+            &note.id,
+            recording,
+            RecordingSourceMode::MicrophoneOnly,
+            "",
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+    query("UPDATE recording_sessions SET status = 'stopped' WHERE id = ?")
+        .bind(recording)
+        .execute(&fixture.notes)
+        .await
+        .unwrap();
+    let paths =
+        clovy_lib::app_paths::AppPaths::from_data_dir(fixture.root.path().to_owned()).unwrap();
+    let directory = paths.recording_session_dir(&note.id, recording).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+
+    let project_id = project.id.clone();
+    let cascade = tokio::spawn(async move {
+        let result = client
+            .call(
+                "delete_project",
+                json!({"projectId":project_id,"deleteNotes":true}),
+            )
+            .await;
+        (client, result)
+    });
+    let approval = fixture.pending(1).await.remove(0);
+    assert!(approval["preview"]
+        .as_str()
+        .unwrap()
+        .contains("Project fixture"));
+    assert_eq!(
+        repos.get_note(&note.id).await.unwrap().revision,
+        note.revision
+    );
+    let file = directory.join("synthetic-fixture.wav");
+    std::fs::write(&file, b"fixture only").unwrap();
+    repos
+        .create_audio_artifact(
+            &note.id,
+            recording,
+            file.to_str().unwrap(),
+            1,
+            12,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repos.get_note(&note.id).await.unwrap().revision,
+        note.revision
+    );
+    fixture.decide(&approval, true).unwrap();
+    let (client, result) = cascade.await.unwrap();
+    assert!(result.unwrap_err().contains("project_conflict"));
+    assert!(file.is_file());
+    assert!(repos.get_note(&note.id).await.is_ok());
+    assert_eq!(
+        repos.list_folders("default").await.unwrap()[0].name,
+        "Project fixture"
+    );
+    client.close().await;
+    fixture.listener.stop_and_wait().await;
+}

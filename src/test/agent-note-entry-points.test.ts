@@ -111,40 +111,6 @@ describe("agent note entry point pending request", () => {
 });
 
 describe("note header actions", () => {
-  it("calls the Ask Clovy handler from the note toolbar", async () => {
-    const user = userEvent.setup();
-    const onAskClovy = vi.fn();
-    render(
-      createElement(NoteHeaderActions, {
-        noteId: "note-1",
-        noteTitle: "Launch plan",
-        onAskClovy,
-      }),
-    );
-
-    await user.click(screen.getByRole("button", { name: "Ask Clovy" }));
-
-    expect(onAskClovy).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows a working dot while the note's chat is generating", () => {
-    const { container } = render(
-      createElement(NoteHeaderActions, {
-        noteId: "note-1",
-        noteTitle: "Launch plan",
-        askClovyWorking: true,
-      }),
-    );
-
-    // The button name stays clean ("Ask Clovy"); the working state rides on a
-    // data attribute + a decorative dot, not the accessible name.
-    expect(screen.getByRole("button", { name: "Ask Clovy" })).toHaveAttribute(
-      "data-working",
-      "true",
-    );
-    expect(container.querySelector(".note-header-ask-dot")).not.toBeNull();
-  });
-
   it("copies a portable reference for Clovy", async () => {
     const user = userEvent.setup();
     const writeText = installClipboard();

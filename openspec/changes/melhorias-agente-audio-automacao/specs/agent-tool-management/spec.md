@@ -7,11 +7,11 @@ Permitir que o agente opere as capacidades existentes do aplicativo com ferramen
 ## ADDED Requirements
 
 ### Requirement: Gestão autorizada do produto
-Turnos Clovy autorizados SHALL gerir conversas, projetos, notas, rotinas, memória, atividade, ditado, gravações e skills conforme o contrato D3. Mutações MUST revalidar escopo antes/depois da aprovação e refletir na UI. Externos/rotinas preservam seus grants; paths e partições arbitrários são recusados.
+Contextos autorizados do Clovy SHALL gerir conversas, projetos, notas, rotinas, memória, atividade, ditado, gravações e skills conforme o contrato D3. Mutações MUST revalidar escopo antes e depois da aprovação e refletir nas áreas que exibem os objetos alterados. Clientes externos e rotinas ficam limitados às suas concessões. Paths e partições arbitrários são recusados.
 
 #### Scenario: Ciclo de gestão
-- **WHEN** agente cria fixture, lê, edita e exclui em conversa autorizada
-- **THEN** releitura e UI mostram os mesmos IDs/valores e a exclusão não remove objeto alheio
+- **WHEN** o agente cria, lê, edita e exclui uma fixture em um contexto autorizado
+- **THEN** releitura e áreas correspondentes mostram os mesmos IDs e valores, e a exclusão não remove objeto alheio
 - Test: integration + UI — fixture por domínio, Claude/Codex
 
 #### Scenario: Operações completas
@@ -20,7 +20,7 @@ Turnos Clovy autorizados SHALL gerir conversas, projetos, notas, rotinas, memór
 - Test: integration — cobertura explícita por operação e domínio
 
 #### Scenario: UI muda de partição
-- **WHEN** uma chamada aguarda aprovação e a UI muda a partição ativa
+- **WHEN** uma chamada vinculada aguarda aprovação e a UI muda a partição ativa
 - **THEN** a chamada mantém o escopo host-owned da conversa e não toca dados da nova partição
 - Test: integration — duas partições/projetos e associação cruzada recusada
 

@@ -1,4 +1,3 @@
-import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconAudio } from "central-icons/IconAudio";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
 import { IconFilePdf } from "central-icons/IconFilePdf";
@@ -10,28 +9,15 @@ import { useT } from "../../i18n";
 import { noteReferenceToken } from "../agent/composer/noteReference";
 import { toast } from "../ui/Toaster";
 
-/** The note's top-bar actions: Ask Clovy (toggles the contextual chat panel),
- * and an overflow menu (copy reference, export, delete). Lives in the
- * note toolbar's actions slot so it sits in a consistent, predictable spot
- * across every note. */
 export function NoteHeaderActions({
   noteId,
   noteTitle,
-  askClovyOpen,
-  askClovyWorking,
-  onAskClovy,
   onExportPdf,
   onDownloadAudio,
   onDelete,
 }: {
   noteId: string;
   noteTitle: string;
-  /** The panel is open, so the button reads as its pressed toggle. */
-  askClovyOpen?: boolean;
-  /** This note's chat is generating a reply — show a working dot even while
-   * the panel is closed, so a fired-off question is visibly still running. */
-  askClovyWorking?: boolean;
-  onAskClovy?: () => void;
   /** Opens the system print sheet with a PDF-ready version of the note. */
   onExportPdf?: () => void;
   /** Downloads the note's finalized audio artifacts. */
@@ -39,21 +25,8 @@ export function NoteHeaderActions({
   /** Opens the delete-note confirmation. */
   onDelete?: () => void;
 }) {
-  const t = useT();
   return (
     <div className="note-header-actions">
-      <button
-        type="button"
-        className="note-header-ask"
-        aria-expanded={askClovyOpen || undefined}
-        data-working={askClovyWorking || undefined}
-        title={askClovyWorking ? t("notes.header.askWorking") : undefined}
-        onClick={() => onAskClovy?.()}
-      >
-        <IconBubble3 size={14} aria-hidden />
-        {t("notes.header.ask")}
-        {askClovyWorking ? <span className="note-header-ask-dot" aria-hidden /> : null}
-      </button>
       <NoteOverflowMenu
         noteId={noteId}
         noteTitle={noteTitle}

@@ -10,13 +10,13 @@ import {
 } from "../lib/data-partition";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import { resetOnboardingForReplay } from "../lib/onboarding";
+import { AGENT_NEW_SESSION_PENDING_KEY, AGENT_OPEN_EVENT } from "../lib/agent-events";
 import {
-  AGENT_NEW_SESSION_EVENT,
-  AGENT_NEW_SESSION_PENDING_KEY,
-  AGENT_OPEN_EVENT,
-  AGENT_SESSIONS_CHANGED_EVENT,
-} from "../lib/agent-events";
-import { CLOSE_TAB_EVENT, OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
+  AGENT_MENU_BAR_NEW_SESSION_EVENT,
+  AGENT_MENU_BAR_OPEN_SESSION_EVENT,
+  CLOSE_TAB_EVENT,
+  OPEN_SETTINGS_EVENT,
+} from "../lib/menu-bar";
 import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type {
   BootstrapResponse,
@@ -243,6 +243,7 @@ vi.mock("../lib/tauri", () => ({
   dictationSettings: vi.fn().mockRejectedValue(new Error("dictation settings unavailable")),
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
+  routineOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: mocks.agentHudHide,
   pendingMeetingStartRequest: mocks.readPendingMeetingStartRequest,
   acknowledgeMeetingStartRequest: mocks.acknowledgeMeetingStartRequest,
@@ -501,113 +502,23 @@ describe("App shortcuts", () => {
     }));
   });
 
-  it("shows the startup session list App loaded in the sidebar", async () => {
+  it.each([
+    "MacIntel",
+    "Win32",
+    "Linux x86_64",
+  ])("opens Today on %s without restoring a chat", async (platform) => {
+    const restoreNavigator = stubNavigatorPlatform(platform, platform);
+    window.localStorage.setItem("clovy:agent:last-open-session", "session-start");
     mocks.listAgentSessions.mockResolvedValue([agentSession("session-start", "Startup session")]);
-
-    render(<App />);
-
-    expect(await screen.findByText("Startup session")).toBeInTheDocument();
-  });
-
-  it("starts a new session with Command-N", async () => {
-    const onNewSession = vi.fn();
-    window.addEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
-
     try {
       render(<App />);
-
-      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-
-      fireEvent.keyDown(window, { key: "n", metaKey: true });
-
-      await waitFor(() => expect(onNewSession).toHaveBeenCalled());
-      expect(mocks.createNote).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
-    }
-  });
-
-  it("keeps each agent tab tied to its selected session", async () => {
-    const restoreNavigator = stubNavigatorPlatform(
-      "MacIntel",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    );
-    const user = userEvent.setup();
-
-    try {
-      render(<App />);
-
-      expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
-
-      const firstSession = {
-        ...agentSession("session-1", "First session"),
-        preview: "First preview",
-        last_active: "2026-06-04T12:00:00Z",
-      };
-      act(() => {
-        window.dispatchEvent(
-          new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
-            detail: {
-              sessions: [firstSession],
-              selectedSessionId: firstSession.id,
-              workingSessionIds: [],
-            },
-          }),
-        );
-        window.dispatchEvent(
-          new CustomEvent(AGENT_OPEN_EVENT, { detail: { session: firstSession } }),
-        );
-      });
-
-      await waitFor(() =>
-        expect(screen.getByRole("tab", { name: "First session" })).toHaveAttribute(
-          "data-active",
-          "true",
-        ),
-      );
-
-      await user.click(screen.getByRole("button", { name: "New tab" }));
-      expect(await screen.findByRole("tab", { name: "New session" })).toHaveAttribute(
+      expect(await screen.findByRole("tab", { name: "Today" })).toHaveAttribute(
         "data-active",
         "true",
       );
-
-      const secondSession = {
-        ...agentSession("session-2", "Second session"),
-        preview: "Second preview",
-        last_active: "2026-06-05T12:00:00Z",
-      };
-      // The workspace rebroadcasts the runtime's list; only the newest
-      // broadcast is committed, so the runtime must know both sessions.
-      mocks.listAgentSessions.mockResolvedValue([secondSession, firstSession]);
-      act(() => {
-        window.dispatchEvent(
-          new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
-            detail: {
-              sessions: [secondSession, firstSession],
-              selectedSessionId: secondSession.id,
-              workingSessionIds: [],
-            },
-          }),
-        );
-      });
-
-      await waitFor(() =>
-        expect(screen.getByRole("tab", { name: "Second session" })).toHaveAttribute(
-          "data-active",
-          "true",
-        ),
-      );
-
-      await user.click(screen.getByRole("button", { name: "Show all 2 tabs" }));
-      await user.click(screen.getByRole("menuitem", { name: "First session" }));
-
-      await waitFor(() =>
-        expect(screen.getByRole("tab", { name: "First session" })).toHaveAttribute(
-          "data-active",
-          "true",
-        ),
-      );
+      expect(screen.queryByText("Startup session")).not.toBeInTheDocument();
+      expect(mocks.createAgentSession).not.toHaveBeenCalled();
+      expect(mocks.startAgentRun).not.toHaveBeenCalled();
     } finally {
       restoreNavigator();
     }
@@ -643,7 +554,7 @@ describe("App shortcuts", () => {
     await waitFor(() =>
       expect(screen.queryByRole("tab", { name: "New note" })).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
   });
 
   it("closes the active tab from the native close-tab menu event", async () => {
@@ -672,7 +583,7 @@ describe("App shortcuts", () => {
     await waitFor(() =>
       expect(screen.queryByRole("tab", { name: "New note" })).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute("data-active", "true");
+    expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
     expect(closeTabListenerCount()).toBe(1);
   });
 
@@ -1039,85 +950,6 @@ describe("App shortcuts", () => {
     }
   });
 
-  it("starts a session with Ctrl-N and creates a note with Ctrl-Shift-N on Windows", async () => {
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    const onNewSession = vi.fn();
-    window.addEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
-    try {
-      render(<App />);
-
-      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-
-      // The Cmd key does nothing on Windows — Ctrl is the primary modifier.
-      fireEvent.keyDown(window, { key: "n", metaKey: true });
-      expect(onNewSession).not.toHaveBeenCalled();
-      expect(mocks.createNote).not.toHaveBeenCalled();
-
-      fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-      await waitFor(() => expect(onNewSession).toHaveBeenCalled());
-      expect(mocks.createNote).not.toHaveBeenCalled();
-
-      fireEvent.keyDown(window, { key: "n", ctrlKey: true, shiftKey: true });
-      await waitFor(() => expect(mocks.createNote).toHaveBeenCalledWith(undefined));
-    } finally {
-      window.removeEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
-      restoreNavigator();
-    }
-  });
-
-  it("opens a fresh agent session on Windows while preloading the first note", async () => {
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    const staleSession = {
-      id: "session-1",
-      title: "Stored session",
-      preview: "Stored session preview",
-      last_active: now,
-    };
-    window.localStorage.setItem("clovy:agent:last-open-session", staleSession.id);
-    mocks.listAgentSessions.mockResolvedValue([staleSession]);
-    const sessionStorageSetItem = window.sessionStorage.setItem.bind(window.sessionStorage);
-    const sessionStorageSetItemSpy = vi
-      .spyOn(window.sessionStorage, "setItem")
-      .mockImplementation((key, value) => {
-        if (key === AGENT_NEW_SESSION_PENDING_KEY) {
-          throw new DOMException("Storage unavailable", "QuotaExceededError");
-        }
-        sessionStorageSetItem(key, value);
-      });
-
-    try {
-      render(<App />);
-
-      expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
-      expect(await screen.findByRole("button", { name: "Stored session" })).toBeInTheDocument();
-      expect(screen.getByRole("tab", { name: "New session" })).toHaveAttribute(
-        "data-active",
-        "true",
-      );
-      expect(screen.getByRole("button", { name: "New session" })).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
-      expect(screen.getByRole("region", { name: "Sessions" })).toHaveAttribute(
-        "data-active",
-        "true",
-      );
-      expect(screen.queryByRole("button", { name: "New note" })).not.toBeInTheDocument();
-      expect(screen.queryByDisplayValue("First note")).not.toBeInTheDocument();
-      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    } finally {
-      sessionStorageSetItemSpy.mockRestore();
-      window.localStorage.removeItem("clovy:agent:last-open-session");
-      restoreNavigator();
-    }
-  });
-
   it("returns to the note after opening its folder from the note header", async () => {
     const user = userEvent.setup();
     const first = note({
@@ -1140,7 +972,7 @@ describe("App shortcuts", () => {
 
     render(<App />);
 
-    // The app launches on the agent view; the notes list is one hop away.
+    // The notes list is one hop from Today.
     await user.click(await screen.findByRole("button", { name: "Meeting notes" }));
     await user.click(await screen.findByRole("button", { name: /^First note/ }));
     await screen.findByDisplayValue("First note");
@@ -1155,14 +987,14 @@ describe("App shortcuts", () => {
     expect(await screen.findByDisplayValue("First note")).toBeInTheDocument();
   });
 
-  it("opens on Home without an account in a release build", async () => {
+  it("opens on Today without an account in a release build", async () => {
     vi.stubEnv("DEV", false);
     mocks.osAccountsStatus.mockResolvedValue({ signedIn: false, configured: false });
 
     try {
       render(<App />);
 
-      expect(await screen.findByRole("region", { name: "Home" })).toBeInTheDocument();
+      expect(await screen.findByRole("tab", { name: "Today" })).toBeInTheDocument();
       expect(mocks.bootstrapApp).toHaveBeenCalledOnce();
       expect(screen.queryByRole("button", { name: "Continue with OpenSoftware" })).toBeNull();
     } finally {
@@ -1185,54 +1017,6 @@ describe("App shortcuts", () => {
     } finally {
       vi.unstubAllEnvs();
     }
-  });
-
-  it("refreshes partition-scoped chat sessions when the data partition switches", async () => {
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await waitFor(() => expect(mocks.listAgentSessions).toHaveBeenCalled());
-    const callsBeforeSwitch = mocks.listAgentSessions.mock.calls.length;
-
-    act(() => {
-      setCurrentDataPartitionName("research");
-    });
-
-    await waitFor(() =>
-      expect(mocks.listAgentSessions.mock.calls.length).toBeGreaterThan(callsBeforeSwitch),
-    );
-  });
-
-  it("exposes no sessions before the data partition mapping has loaded successfully", async () => {
-    const user = userEvent.setup();
-    const privateSession = {
-      id: "partition-a-session",
-      title: "Named data partition secret",
-      preview: "Private data partition conversation",
-      last_active: now,
-    };
-    mocks.listSessionPartitions.mockRejectedValue(
-      new Error("session data partition map unavailable"),
-    );
-
-    render(<App />);
-    await waitFor(() => expect(mocks.listSessionPartitions).toHaveBeenCalled());
-
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
-          detail: {
-            sessions: [privateSession],
-            selectedSessionId: undefined,
-            workingSessionIds: [],
-          },
-        }),
-      );
-      await Promise.resolve();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
-    expect(screen.queryByText(privateSession.title)).toBeNull();
   });
 
   it("invalidates note tabs from the previous data partition", async () => {
@@ -1271,61 +1055,10 @@ describe("App shortcuts", () => {
     expect(screen.queryByText("Data partition A private note")).toBeNull();
   });
 
-  it("abandons pending project intent when the data partition switches", async () => {
-    const user = userEvent.setup();
-    const folder = {
-      id: "folder-a",
-      name: "Data partition A project",
-      memoryDisabled: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [folder],
-      notes: [note()],
-      activeRecoveries: [],
-    });
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await user.click(screen.getByRole("button", { name: "Projects" }));
-    const projectCard = (await screen.findByText(folder.name)).closest("article");
-    expect(projectCard).not.toBeNull();
-    await user.click(projectCard as HTMLElement);
-    const newSessionButtons = await screen.findAllByRole("button", { name: "New session" });
-    const projectNewSessionButton = newSessionButtons.at(-1);
-    expect(projectNewSessionButton).toBeDefined();
-    await user.click(projectNewSessionButton as HTMLElement);
-
-    mocks.listNotes.mockResolvedValue({ items: [] });
-    mocks.listFolders.mockResolvedValue([]);
-    act(() => setCurrentDataPartitionName("partition-b"));
-    await waitFor(() => expect(mocks.listFolders).toHaveBeenCalled());
-
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
-          detail: {
-            sessions: [{ id: "partition-b-session", title: "Data partition B session" }],
-            selectedSessionId: "partition-b-session",
-            workingSessionIds: [],
-          },
-        }),
-      );
-    });
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(mocks.assignSessionToFolder).not.toHaveBeenCalled();
-  });
-
   it("refreshes visible data when rows move into the current data partition", async () => {
     render(<App />);
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await waitFor(() => expect(mocks.listAgentSessions).toHaveBeenCalled());
     const noteCallsBeforeMove = mocks.listNotes.mock.calls.length;
-    const sessionCallsBeforeMove = mocks.listAgentSessions.mock.calls.length;
 
     act(() => {
       dispatchDataPartitionChanged("default");
@@ -1334,92 +1067,75 @@ describe("App shortcuts", () => {
     await waitFor(() =>
       expect(mocks.listNotes.mock.calls.length).toBeGreaterThan(noteCallsBeforeMove),
     );
-    await waitFor(() =>
-      expect(mocks.listAgentSessions.mock.calls.length).toBeGreaterThan(sessionCallsBeforeMove),
-    );
+    expect(mocks.listAgentSessions).not.toHaveBeenCalled();
   });
 
-  it("opens the chat for an Agent HUD click carrying a stored session id", async () => {
-    mocks.listAgentSessions.mockResolvedValue([agentSession("session-9", "Notified session")]);
+  it.each([
+    "MacIntel",
+    "Win32",
+  ])("keeps the note shortcut and ignores the retired chat shortcut on %s", async (platform) => {
+    const restoreNavigator = stubNavigatorPlatform(platform, platform);
+    const modifier = platform === "Win32" ? { ctrlKey: true } : { metaKey: true };
+    try {
+      render(<App />);
+      await screen.findByRole("tab", { name: "Today" });
+      fireEvent.keyDown(window, { key: "n", ...modifier });
+      expect(mocks.createNote).not.toHaveBeenCalled();
+      expect(mocks.createAgentSession).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY)).toBeNull();
+      fireEvent.keyDown(window, { key: "n", shiftKey: true, ...modifier });
+      await waitFor(() => expect(mocks.createNote).toHaveBeenCalledWith(undefined));
+    } finally {
+      restoreNavigator();
+    }
+  });
 
+  it("returns legacy chat destinations to Today without loading conversations", async () => {
+    const user = userEvent.setup();
     render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await waitFor(() => expect(mocks.agentOpenReady).toHaveBeenCalledOnce());
-    mocks.agentOpenReady.mockClear();
-
-    act(() => {
+    await screen.findByRole("tab", { name: "Today" });
+    for (const name of [AGENT_MENU_BAR_NEW_SESSION_EVENT, AGENT_MENU_BAR_OPEN_SESSION_EVENT]) {
+      await waitFor(() => expect(mocks.listeners.has(name)).toBe(true));
+      await user.click(screen.getByRole("button", { name: "Meeting notes" }));
+      expect(screen.getByRole("tab", { name: "Notes" })).toHaveAttribute("data-active", "true");
+      act(() => mocks.listeners.get(name)?.({ payload: "old-session" }));
+      expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
+    }
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    act(() =>
       window.dispatchEvent(
-        new CustomEvent(AGENT_OPEN_EVENT, { detail: { storedSessionId: "session-9" } }),
-      );
-    });
-
-    expect(await screen.findByRole("button", { name: "Send message" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: HERO_GREETING })).not.toBeInTheDocument();
-    expect(mocks.agentOpenReady).not.toHaveBeenCalled();
-  });
-
-  it("falls back to the agent view when the notified chat is missing", async () => {
-    mocks.listAgentSessions.mockResolvedValue([]);
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_OPEN_EVENT, { detail: { sessionId: "session-gone" } }),
-      );
-    });
-
-    expect(await screen.findByRole("heading", { name: HERO_GREETING })).toBeInTheDocument();
-  });
-
-  it("preserves a newer notification click while acknowledging the delivered one", async () => {
-    mocks.listAgentSessions.mockResolvedValue([
-      agentSession("session-old", "Older notification"),
-      agentSession("session-new", "Newer notification"),
-    ]);
-
-    render(<App />);
-    await screen.findByRole("button", { name: "Older notification" });
-    await waitFor(() => expect(mocks.agentOpenReady).toHaveBeenCalledOnce());
-    mocks.agentOpenReady.mockClear();
-    mocks.agentOpenReady.mockResolvedValueOnce("session-new");
-
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_OPEN_EVENT, { detail: { sessionId: "session-old" } }),
-      );
-    });
-
-    await waitFor(() => expect(mocks.agentOpenReady).toHaveBeenCalledOnce());
-    await waitFor(() => expect(mocks.getAgentSession).toHaveBeenCalledWith("session-new"));
-  });
-
-  it("navigates to the chat of a notification clicked before the webview was ready", async () => {
-    mocks.agentOpenReady.mockResolvedValue("session-9");
-    mocks.listAgentSessions.mockResolvedValue([agentSession("session-9", "Notified session")]);
-
-    render(<App />);
-
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument(),
+        new CustomEvent(AGENT_OPEN_EVENT, {
+          detail: { storedSessionId: "old-session" },
+        }),
+      ),
     );
+    expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
+    expect(mocks.listAgentSessions).not.toHaveBeenCalled();
+    expect(mocks.createAgentSession).not.toHaveBeenCalled();
+    expect(mocks.startAgentRun).not.toHaveBeenCalled();
   });
 
-  it("retries the notified-chat lookup while the agent runtime is still starting", async () => {
-    mocks.agentOpenReady.mockResolvedValue("session-9");
-    let sessionListCalls = 0;
-    mocks.listAgentSessions.mockImplementation(async () => {
-      sessionListCalls += 1;
-      if (sessionListCalls <= 2) throw new Error("agent_runtime_not_running");
-      return [agentSession("session-9", "Notified session")];
-    });
-
+  it("routes a routine notification into Routines without opening a conversation", async () => {
     render(<App />);
+    await screen.findByRole("tab", { name: "Today" });
+    const event = "clovy:routine:open";
+    await waitFor(() => expect(mocks.listeners.has(event)).toBe(true));
+    act(() => mocks.listeners.get(event)?.({ payload: { sessionId: "routine-run" } }));
+    expect(screen.getByRole("tab", { name: "Routines" })).toHaveAttribute("data-active", "true");
+    expect(mocks.createAgentSession).not.toHaveBeenCalled();
+    expect(mocks.startAgentRun).not.toHaveBeenCalled();
+  });
 
-    await waitFor(
-      () => expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument(),
-      { timeout: 8_000 },
-    );
-  }, 15_000);
+  it("opens new tabs in Today and restores the previous area when switching tabs", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("tab", { name: "Today" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(screen.getByRole("tab", { name: "Projects" })).toHaveAttribute("data-active", "true");
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    expect(screen.getByRole("tab", { name: "Today" })).toHaveAttribute("data-active", "true");
+  });
 });

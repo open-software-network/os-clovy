@@ -39,7 +39,11 @@ async fn registry_revocation_while_writer_is_held_refuses_note_write_even_if_db_
         note.revision as i64,
         Some("Must not commit"),
         None,
-        Some((&binding.session_id, &binding.run_id, &binding.authority)),
+        Some(crate::db::repositories::McpMutation::Turn(
+            &binding.session_id,
+            &binding.run_id,
+            &binding.authority,
+        )),
     );
     tokio::pin!(write);
     assert!(futures_util::poll!(write.as_mut()).is_pending());
@@ -122,7 +126,11 @@ async fn note_transaction_rejects_cancelled_or_reassigned_bound_turn() {
             note.revision as i64,
             Some("unsafe"),
             None,
-            Some((&binding.session_id, &binding.run_id, &binding.authority)),
+            Some(crate::db::repositories::McpMutation::Turn(
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority,
+            )),
         )
         .await
         .unwrap_err();
@@ -138,7 +146,11 @@ async fn note_transaction_rejects_cancelled_or_reassigned_bound_turn() {
         .delete_note_in_profile(
             "default",
             &note.id,
-            Some((&binding.session_id, &binding.run_id, &binding.authority)),
+            Some(crate::db::repositories::McpMutation::Turn(
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority,
+            )),
         )
         .await
         .unwrap_err();

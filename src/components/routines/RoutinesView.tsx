@@ -1,15 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
-import { IconArrowUp } from "central-icons/IconArrowUp";
 import { IconCalendarRepeat } from "central-icons/IconCalendarRepeat";
-import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
-import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconPencil } from "central-icons/IconPencil";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconPlay } from "central-icons/IconPlay";
-import { IconShieldCheck } from "central-icons/IconShieldCheck";
 import { IconShieldCrossed } from "central-icons/IconShieldCrossed";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconZap } from "central-icons/IconZap";
@@ -30,6 +26,7 @@ import { useConnectorPolicy } from "../../lib/connector-policy";
 import {
   isReplaceableRoutineRunTitle,
   listRoutineRunSessions,
+  onRoutineRunOpen,
   routineIdFromSession,
   type RoutineRunSession,
 } from "../../lib/agent-routine-history";
@@ -39,7 +36,6 @@ import {
   pauseRoutine,
   removeRoutine,
   resumeRoutine,
-  routineCreationPrompt,
   routineUnrestricted,
   triggerRoutine,
   UNRESTRICTED_ROUTINE_TOOLSETS,
@@ -61,7 +57,7 @@ import { HoverTip } from "../ui/HoverTip";
 import { RoutineCreate, type RoutineCreateInput } from "./RoutineCreate";
 import { RoutineDetail } from "./RoutineDetail";
 import { formatRunTime, RoutineRunList } from "./RoutineRunList";
-import { GrowingTextarea } from "./GrowingTextarea";
+import { RoutineRunResult } from "./RoutineRunResult";
 import { ROUTINE_TEMPLATES, type RoutineTemplate } from "./routine-templates";
 
 const NO_ROUTINES: RoutineJob[] = [];
@@ -98,21 +94,15 @@ async function creditApprovalRuns(runs: RoutineRunSession[], reported: Set<strin
   }
 }
 
-type RoutinesViewProps = {
-  /** The chat-first creation path: hands off a composed agent prompt and the
-   * app opens a new Clovy session with it, so the agent does the cron-job
-   * setup (naming, scheduling) from a plain description. */
-  onCreateRoutine: (prompt: string) => void;
-  /** Opens a past scheduled run in the agent view. */
-  onOpenRun: (session: RoutineRunSession) => void;
-};
+type RoutinePage = { kind: "detail"; jobId: string; tab?: "history" };
 
 type Page =
   | { kind: "list" }
   | { kind: "create"; template?: RoutineTemplate }
-  | { kind: "detail"; jobId: string };
+  | RoutinePage
+  | { kind: "result"; runId: string; back: { kind: "list" } | RoutinePage };
 
-export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) {
+export function RoutinesView() {
   const t = useT();
   const { policy } = useConnectorPolicy();
   const [allRoutines, setRoutines] = useState<RoutineJob[]>([]);
@@ -124,19 +114,33 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<RoutineJob | null>(null);
   const [page, setPage] = useState<Page>({ kind: "list" });
+  const [requestedRunId, setRequestedRunId] = useState<string>();
+  const returnFocusRunId = useRef<string>();
+  const listHeading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => onRoutineRunOpen(setRequestedRunId), []);
+  useEffect(() => {
+    if (page.kind === "result" || !returnFocusRunId.current) return;
+    const target =
+      document.getElementById(`routine-run-${returnFocusRunId.current}`) ??
+      document.getElementById("routine-history-tab") ??
+      listHeading.current;
+    target?.focus();
+    returnFocusRunId.current = undefined;
+  }, [page.kind]);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailErrorRetryable, setDetailErrorRetryable] = useState(false);
-  const [describeDraft, setDescribeDraft] = useState("");
   const [refreshSpins, setRefreshSpins] = useState(0);
-  // Per-routine mode choice for the routine being described. Defaults to
-  // sandboxed on every open: like the chat picker, Unrestricted is a
-  // deliberate per-creation opt-in, never a sticky preference.
-  const [describeUnrestricted, setDescribeUnrestricted] = useState(false);
   const [allRuns, setRuns] = useState<RoutineRunSession[]>([]);
   const [runsUnavailableState, setRunsUnavailable] = useState(false);
+  const [runsLoaded, setRunsLoaded] = useState(false);
+  useEffect(() => {
+    if (!requestedRunId || !runsLoaded) return;
+    setPage({ kind: "result", runId: requestedRunId, back: { kind: "list" } });
+    setRequestedRunId(undefined);
+  }, [requestedRunId, runsLoaded]);
   const routineLoadSequenceRef = useRef(0);
   const visibleRoutineLoadSequenceRef = useRef(0);
   const visibleRoutineLoadsInFlightRef = useRef(0);
@@ -207,10 +211,12 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
       if (runLoadSequenceRef.current !== sequence) return;
       setRuns(nextRuns);
       setRunsUnavailable(false);
+      setRunsLoaded(true);
       void creditApprovalRuns(nextRuns, reportedRunsRef.current);
     } catch {
       if (runLoadSequenceRef.current !== sequence) return;
       setRunsUnavailable(true);
+      setRunsLoaded(true);
     }
   }, []);
 
@@ -487,18 +493,6 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
     }
   }
 
-  function submitDescribe() {
-    const description = describeDraft.trim();
-    if (!description) return;
-    setDescribeDraft("");
-    // routineCreationPrompt is async: for an unrestricted routine it strips the
-    // native memory toolset from the list it embeds when Memory is off, so the
-    // describe path cannot grant unscoped memory access behind the off switch.
-    void routineCreationPrompt(description, {
-      unrestricted: describeUnrestricted,
-    }).then(onCreateRoutine);
-  }
-
   function openCreate(template?: RoutineTemplate) {
     setCreateError(null);
     setPage({ kind: "create", template });
@@ -538,19 +532,6 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
     }
   }, [page.kind, loading, detailRoutine]);
 
-  // The describe bar is the chat composer, anchored to the bottom of the
-  // panel like the agent session pages — always there, so describing a
-  // routine to Clovy never needs a button first.
-  const describeBar = (
-    <DescribeBar
-      draft={describeDraft}
-      unrestricted={describeUnrestricted}
-      onDraftChange={setDescribeDraft}
-      onUnrestrictedChange={setDescribeUnrestricted}
-      onSubmit={submitDescribe}
-    />
-  );
-
   const dialogs = (
     <>
       <ConfirmDialog
@@ -565,6 +546,27 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
     </>
   );
 
+  function openRun(run: RoutineRunSession) {
+    const back =
+      page.kind === "detail" ? { ...page, tab: "history" as const } : { kind: "list" as const };
+    setPage({ kind: "result", runId: run.id, back });
+  }
+
+  if (page.kind === "result") {
+    const run = runs.find((run) => run.id === page.runId);
+    return (
+      <RoutineRunResult
+        key={page.runId}
+        run={run}
+        label={run ? runLabel(run) : t("routines.run.fallbackLabel")}
+        onBack={() => {
+          returnFocusRunId.current = page.runId;
+          setPage(page.back);
+        }}
+      />
+    );
+  }
+
   if (page.kind === "create") {
     return (
       <>
@@ -575,7 +577,6 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
           onBack={() => setPage({ kind: "list" })}
           onCreate={(input) => void submitCreate(input)}
         />
-        {describeBar}
         {dialogs}
       </>
     );
@@ -588,6 +589,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
         <RoutineDetail
           key={detailRoutine.job_id}
           routine={detailRoutine}
+          initialTab={page.tab}
           runs={routineRuns}
           busy={busyIds.has(detailRoutine.job_id)}
           saving={saving}
@@ -597,7 +599,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
           onToggleActive={() => void toggleActive(detailRoutine)}
           onRunNow={() => runNow(detailRoutine)}
           onDelete={() => setPendingDelete(detailRoutine)}
-          onOpenRun={onOpenRun}
+          onOpenRun={openRun}
           onRetryLoad={detailErrorRetryable ? retryDetailLoad : undefined}
           retrying={refreshing}
         />
@@ -610,7 +612,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
     <section className="routines-workspace" aria-label={t("routines.title")}>
       <header className="folders-header">
         <div className="folders-heading">
-          <h1>
+          <h1 ref={listHeading} tabIndex={-1}>
             {t("routines.title")}
             {routines.length > 0 ? <span className="folders-count">{routines.length}</span> : null}
           </h1>
@@ -712,7 +714,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
             <p className="routines-runs-empty">{t("routines.view.noRuns")}</p>
           ) : (
             <div className="routines-runs-panel">
-              <RoutineRunList runs={filteredRuns} label={runLabel} onOpen={onOpenRun} />
+              <RoutineRunList runs={filteredRuns} label={runLabel} onOpen={openRun} />
             </div>
           )}
         </section>
@@ -727,7 +729,6 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
         </section>
       ) : null}
 
-      {describeBar}
       {dialogs}
     </section>
   );
@@ -996,163 +997,6 @@ function RoutineErrorBanner({
           {t("common.tryAgain")}
         </button>
       ) : null}
-    </div>
-  );
-}
-
-// Titles and descriptions are getters so the menu follows the interface
-// language (read at render time, never frozen at import).
-const ROUTINE_EXECUTION_MODE_OPTIONS = [
-  {
-    unrestricted: false,
-    icon: <IconShieldCheck size={16} aria-hidden />,
-    get title() {
-      return translate("routines.mode.sandboxed");
-    },
-    get description() {
-      return translate("routines.mode.sandboxedOption");
-    },
-  },
-  {
-    unrestricted: true,
-    icon: <IconShieldCrossed size={16} aria-hidden />,
-    get title() {
-      return translate("routines.mode.unrestricted");
-    },
-    get description() {
-      return translate("routines.mode.unrestrictedOption");
-    },
-  },
-] as const;
-
-/** The chat experience as the routines pages' bottom bar: the agent
- * composer's box, sandbox trigger, and send arrow (same classes, same
- * affordances), permanently anchored like on the agent session pages.
- * Submitting hands the description off to a real Clovy session that sets the
- * routine up. */
-function DescribeBar({
-  draft,
-  unrestricted,
-  onDraftChange,
-  onUnrestrictedChange,
-  onSubmit,
-}: {
-  draft: string;
-  unrestricted: boolean;
-  onDraftChange: (draft: string) => void;
-  onUnrestrictedChange: (unrestricted: boolean) => void;
-  onSubmit: () => void;
-}) {
-  const t = useT();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const rootRef = useRef<HTMLFormElement>(null);
-
-  // The sandbox menu dismisses on any outside click, like the composer's
-  // own popovers.
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onPointer(event: MouseEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenuOpen(false);
-    }
-    window.addEventListener("mousedown", onPointer);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onPointer);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
-
-  return (
-    <div className="routines-describe">
-      <form
-        ref={rootRef}
-        className="routines-describe-composer"
-        aria-label={t("routines.describe.formLabel")}
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <div className="agent-composer-box">
-          <GrowingTextarea
-            aria-label={t("routines.describe.inputLabel")}
-            value={draft}
-            placeholder={t("routines.describe.placeholder")}
-            onChange={(event) => onDraftChange(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing) return;
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-          <div className="agent-composer-toolbar">
-            <button
-              type="button"
-              className="agent-sandbox-trigger"
-              data-unrestricted={unrestricted ? "true" : undefined}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              title={t("routines.describe.changeAccess")}
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              {unrestricted ? (
-                <IconShieldCrossed size={14} aria-hidden />
-              ) : (
-                <IconShieldCheck size={14} aria-hidden />
-              )}
-              {unrestricted ? t("routines.mode.unrestricted") : t("routines.mode.sandboxed")}
-              <IconChevronDownSmall size={12} aria-hidden />
-            </button>
-            <div className="agent-composer-actions">
-              <button
-                type="submit"
-                className="agent-composer-send"
-                disabled={!draft.trim()}
-                aria-label={t("routines.describe.send")}
-              >
-                <IconArrowUp size={16} />
-              </button>
-            </div>
-          </div>
-        </div>
-        {menuOpen ? (
-          <div className="agent-sandbox-menu" role="menu" aria-label={t("routines.mode.question")}>
-            <p className="agent-sandbox-menu-title">{t("routines.mode.question")}</p>
-            {ROUTINE_EXECUTION_MODE_OPTIONS.map((option) => (
-              <button
-                key={String(option.unrestricted)}
-                type="button"
-                role="menuitemradio"
-                aria-checked={unrestricted === option.unrestricted}
-                onClick={() => {
-                  setMenuOpen(false);
-                  onUnrestrictedChange(option.unrestricted);
-                }}
-              >
-                {option.icon}
-                <span className="agent-sandbox-option">
-                  <span className="agent-sandbox-option-title">{option.title}</span>
-                  <span className="agent-sandbox-option-desc">{option.description}</span>
-                </span>
-                {unrestricted === option.unrestricted ? (
-                  <IconCheckmark2Small
-                    size={16}
-                    aria-hidden
-                    className="agent-sandbox-option-check"
-                  />
-                ) : null}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </form>
     </div>
   );
 }

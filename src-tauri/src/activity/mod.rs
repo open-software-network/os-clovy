@@ -295,32 +295,41 @@ pub(crate) async fn tool_update_settings(
     let binding = binding.clone();
     let pool = pool.clone();
     let profile = profile.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<ActivityStatusDto, AppError> {
-        let state = app.state::<ActivityState>();
-        let runtime = runtime(&state)?;
+    tokio::task::spawn_blocking(move || {
         // Notes authority and the activity settings lock have no reverse lock
-        // dependency. Await the real host/DB guard only on this blocking worker.
-        let settings = runtime.shared.update_settings_checked(
-            &runtime.settings_path,
-            || {
-                tauri::async_runtime::block_on(crate::mcp_server::tools::revalidate_binding(
-                    Some(&app),
-                    &pool,
-                    &binding,
-                    &profile,
-                ))
-            },
-            |current| patch.apply(current),
-        )?;
-        if !settings.enabled {
-            runtime.shared.set_manual_pause(false);
-        }
-        crate::coding_agents::wake(&app);
-        publish(&app);
-        Ok(status_of(Some(runtime)))
+        // dependency. Await the actual host/DB guard on this blocking worker.
+        tool_update_settings_checked(&app, patch, || {
+            tauri::async_runtime::block_on(crate::mcp_server::tools::revalidate_binding(
+                Some(&app),
+                &pool,
+                &binding,
+                &profile,
+            ))
+        })
     })
     .await
     .map_err(|error| AppError::new("activity_settings_save_failed", error.to_string()))?
+}
+
+pub(crate) fn tool_update_settings_checked(
+    app: &AppHandle,
+    patch: ActivitySettingsPatch,
+    check: impl FnOnce() -> Result<(), AppError>,
+) -> Result<ActivityStatusDto, AppError> {
+    let state = app.state::<ActivityState>();
+    let runtime = runtime(&state)?;
+    let settings =
+        runtime
+            .shared
+            .update_settings_checked(&runtime.settings_path, check, |current| {
+                patch.apply(current)
+            })?;
+    if !settings.enabled {
+        runtime.shared.set_manual_pause(false);
+    }
+    crate::coding_agents::wake(app);
+    publish(app);
+    Ok(status_of(Some(runtime)))
 }
 
 pub(crate) fn tool_set_paused(

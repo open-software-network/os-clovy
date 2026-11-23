@@ -74,6 +74,7 @@ function triggerDraftFromStored(stored: ConnectorTrigger): TriggerDraft {
 
 type RoutineDetailProps = {
   routine: RoutineJob;
+  initialTab?: "details" | "history";
   /** Past runs of this routine only. */
   runs: RoutineRunSession[];
   busy: boolean;
@@ -96,6 +97,7 @@ type RoutineDetailProps = {
  * dirty comparison after saves refresh the prop. */
 export function RoutineDetail({
   routine,
+  initialTab = "details",
   runs,
   busy,
   saving,
@@ -127,7 +129,7 @@ export function RoutineDetail({
   const [storedTrigger, setStoredTrigger] = useState<ConnectorTrigger | null>(null);
   const [trigger, setTrigger] = useState<TriggerDraft>({ source: "schedule" });
   const [accounts, setAccounts] = useState<ConnectorAccount[]>([]);
-  const [activeTab, setActiveTab] = useState<"details" | "history">("details");
+  const [activeTab, setActiveTab] = useState<"details" | "history">(initialTab);
   // "Run now" only queues the job for the scheduler's next tick, so the
   // confirmation is a short-lived label swap rather than a new run row.
   const [queued, setQueued] = useState(false);

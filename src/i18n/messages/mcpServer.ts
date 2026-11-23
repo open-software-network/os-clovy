@@ -2,9 +2,24 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "mcpServer.tab": "MCP",
     "mcpServer.heading": "Clovy MCP server",
     "mcpServer.description":
-      "Let coding tools on this computer, like Claude Code and Cursor, read your notes, dictations, and memories from the current data set, and your activity on this computer. Read-only and local.",
+      "Connect local clients to your notes, dictations, memories, and activity. Protected actions require approval in Clovy.",
+    "mcpServer.approvals.heading": "External approvals",
+    "mcpServer.approvals.indicator": {
+      one: "{count} MCP approval",
+      other: "{count} MCP approvals",
+    },
+    "mcpServer.approvals.profile": "Data set",
+    "mcpServer.approvals.approve": "Approve once",
+    "mcpServer.approvals.deny": "Deny",
+    "mcpServer.approvals.loading": "Loading pending requests…",
+    "mcpServer.approvals.empty": "No pending requests.",
+    "mcpServer.approvals.loadError": "Could not load external approval requests.",
+    "mcpServer.approvals.approved": "Request approved.",
+    "mcpServer.approvals.denied": "Request denied.",
+    "mcpServer.approvals.unavailable": "The request could not be decided. It may have expired.",
     "mcpServer.toggleTitle": "Turn on MCP server",
     "mcpServer.toggleDescription":
       "Answers only while Clovy is open. Activity tools appear when activity capture is on.",
@@ -26,9 +41,25 @@ export default defineMessages({
     "mcpServer.copyCursorConfig": "Copy Cursor configuration",
   },
   "pt-BR": {
+    "mcpServer.tab": "MCP",
     "mcpServer.heading": "Servidor MCP do Clovy",
     "mcpServer.description":
-      "Permite que ferramentas de programação neste computador, como Claude Code e Cursor, leiam suas notas, ditados e memórias do conjunto de dados atual e sua atividade neste computador. Somente leitura e local.",
+      "Conecte clientes locais às suas notas, ditados, memórias e atividade. Ações protegidas exigem aprovação no Clovy.",
+    "mcpServer.approvals.heading": "Aprovações externas",
+    "mcpServer.approvals.indicator": {
+      one: "{count} aprovação MCP",
+      other: "{count} aprovações MCP",
+    },
+    "mcpServer.approvals.profile": "Conjunto de dados",
+    "mcpServer.approvals.approve": "Aprovar uma vez",
+    "mcpServer.approvals.deny": "Negar",
+    "mcpServer.approvals.loading": "Carregando pedidos pendentes…",
+    "mcpServer.approvals.empty": "Nenhum pedido pendente.",
+    "mcpServer.approvals.loadError": "Não foi possível carregar os pedidos de aprovação externa.",
+    "mcpServer.approvals.approved": "Pedido aprovado.",
+    "mcpServer.approvals.denied": "Pedido negado.",
+    "mcpServer.approvals.unavailable":
+      "Não foi possível registrar sua decisão. O pedido pode ter expirado.",
     "mcpServer.toggleTitle": "Ligar servidor MCP",
     "mcpServer.toggleDescription":
       "Responde só enquanto o Clovy está aberto. As ferramentas de atividade aparecem quando a captura de atividade está ligada.",

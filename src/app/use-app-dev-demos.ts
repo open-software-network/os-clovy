@@ -11,8 +11,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
     getSelectedNoteId,
     recordingStatusRef,
     setActiveView,
-    setAgentSessions,
-    setCompletedSessions,
     setLiveTranscriptEvents,
     setRecordingNote,
   } = dependencies;
@@ -55,39 +53,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
       dispose?.();
     };
   }, []);
-  // Dev-only console driver (window.__completedDemo) that seeds synthetic
-  // agent sessions with a completed slice, so the sidebar's Completed row and
-  // the sessions page's Completed group render in a plain browser.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/completed-sessions-demo").then(({ registerCompletedSessionsDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerCompletedSessionsDemo({
-        seedSessions: (sessions, completedAt) => {
-          setAgentSessions((current) => [...current, ...sessions]);
-          setCompletedSessions((prev) => ({ ...prev, ...completedAt }));
-        },
-        clearSessions: (idPrefix) => {
-          setAgentSessions((current) =>
-            current.filter((session) => !session.id.startsWith(idPrefix)),
-          );
-          setCompletedSessions((prev) => {
-            const next: Record<string, string> = {};
-            for (const [id, completedAt] of Object.entries(prev)) {
-              if (!id.startsWith(idPrefix)) next[id] = completedAt;
-            }
-            return next;
-          });
-        },
-      }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, [setAgentSessions, setCompletedSessions]);
   // Dev-only console driver (window.__recordNoticesDemo) that parks the
   // recorder-area notices (consent reminder, source warning, mic-blocked) on the
   // selected note without a real recording, so their styling can be inspected.

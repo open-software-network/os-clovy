@@ -1,10 +1,9 @@
 //! Memory mutations share the native settings-locked creation path and the
 //! repository's transactional deletion/tombstone path.
 use super::{ToolCtx, ToolGroup};
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
-use crate::db::repositories::Repositories;
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest};
+use crate::db::repositories::{mcp_project_target, Repositories};
 use crate::domain::types::AppError;
-use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
@@ -55,11 +54,12 @@ pub(super) async fn call_with_settings(
     settings_path: &Path,
 ) -> Result<Value, AppError> {
     let repos = Repositories::new(ctx.data.notes.clone());
-    call_with_repositories(ctx, name, arguments, settings_path, &repos).await
+    call_authorized(ctx, None, name, arguments, settings_path, &repos).await
 }
 
 /// The same MCP admission path with an explicit repository, so tests can pause
 /// real persistence boundaries without replacing approval or turn validation.
+#[cfg(test)]
 pub(super) async fn call_with_repositories(
     ctx: &ToolCtx<'_>,
     name: &str,
@@ -67,10 +67,29 @@ pub(super) async fn call_with_repositories(
     settings_path: &Path,
     repos: &Repositories,
 ) -> Result<Value, AppError> {
-    let binding = ctx
-        .binding
-        .ok_or_else(|| AppError::new(TURN_REQUIRED, "Memory writes require a Clovy turn."))?;
-    ctx.revalidate().await?;
+    call_authorized(ctx, None, name, arguments, settings_path, repos).await
+}
+
+pub(super) async fn call_external(
+    ctx: &ToolCtx<'_>,
+    external: &ExternalCall<'_>,
+    name: &str,
+    arguments: &Value,
+    settings_path: &Path,
+) -> Result<Value, AppError> {
+    let repos = Repositories::new(ctx.data.notes.clone());
+    call_authorized(ctx, Some(external), name, arguments, settings_path, &repos).await
+}
+
+async fn call_authorized(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    arguments: &Value,
+    settings_path: &Path,
+    repos: &Repositories,
+) -> Result<Value, AppError> {
+    ctx.revalidate_local(external).await?;
     ensure_enabled(ctx, settings_path).await?;
     let project_id = match arguments.get("projectId") {
         None => None,
@@ -90,7 +109,9 @@ pub(super) async fn call_with_repositories(
         None
     };
     let content = if matches!(name, "save_memory" | "update_memory") {
-        Some(required(arguments, "content")?)
+        Some(crate::commands::validated_memory_content(required(
+            arguments, "content",
+        )?)?)
     } else {
         None
     };
@@ -98,9 +119,16 @@ pub(super) async fn call_with_repositories(
     if name == "search_memories" {
         return search_memories(ctx, arguments, project_id).await;
     }
-    ctx.broker()?
-        .request(
-            &ApprovalTurn::from(binding),
+    let target = match (external, id, project_id) {
+        (Some(_), Some(id), _) => Some(memory_target(ctx, id).await?),
+        (Some(_), None, Some(project)) => {
+            Some(mcp_project_target(&ctx.data.notes, &ctx.data.profile, project).await?)
+        }
+        _ => None,
+    };
+    let authority = ctx
+        .approve_local(
+            external,
             ApprovalRequest {
                 tool: name.into(),
                 call_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -123,36 +151,36 @@ pub(super) async fn call_with_repositories(
                     preview: None,
                 },
             },
+            target.as_ref(),
         )
-        .await
-        .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
-    ctx.revalidate().await?;
+        .await?;
+    ctx.revalidate_local(external).await?;
     // Settings or project membership may change while the card waits.
     ensure_enabled(ctx, settings_path).await?;
     check_scope(ctx, project_id, id).await?;
     let result = match name {
         "save_memory" => {
-            let memory = crate::commands::create_memory_with_settings_for_turn(
+            let memory = crate::commands::create_memory_with_settings_authorized(
                 repos,
                 settings_path,
                 &ctx.data.profile,
                 project_id,
                 content.unwrap_or_default(),
                 "agent",
-                Some((&binding.session_id, &binding.run_id, &binding.authority)),
+                Some(authority),
             )
             .await?;
             serde_json::to_value(memory)
                 .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))
         }
         "update_memory" => {
-            let memory = crate::commands::update_memory_with_settings_for_turn(
+            let memory = crate::commands::update_memory_with_settings_authorized(
                 repos,
                 settings_path,
                 &ctx.data.profile,
                 id.unwrap_or_default(),
                 content.unwrap_or_default(),
-                Some((&binding.session_id, &binding.run_id, &binding.authority)),
+                Some(authority),
             )
             .await?;
             serde_json::to_value(memory)
@@ -160,12 +188,12 @@ pub(super) async fn call_with_repositories(
         }
         "forget_memory" => {
             let id = id.unwrap_or_default();
-            crate::commands::forget_memory_with_settings_for_turn(
+            crate::commands::forget_memory_with_settings_authorized(
                 repos,
                 settings_path,
                 &ctx.data.profile,
                 id,
-                Some((&binding.session_id, &binding.run_id, &binding.authority)),
+                Some(authority),
             )
             .await?;
             Ok(json!({"forgotten":true,"id":id}))
@@ -179,6 +207,19 @@ pub(super) async fn call_with_repositories(
         );
     }
     Ok(result)
+}
+
+async fn memory_target(ctx: &ToolCtx<'_>, id: &str) -> Result<Value, AppError> {
+    let row =
+        query("SELECT folder_id, content, updated_at FROM memories WHERE id = ? AND profile = ?")
+            .bind(id)
+            .bind(&ctx.data.profile)
+            .fetch_optional(&ctx.data.notes)
+            .await?
+            .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?;
+    Ok(
+        json!({"id":id,"projectId":row.get::<Option<String>,_>("folder_id"),"content":row.get::<String,_>("content"),"updatedAt":row.get::<String,_>("updated_at")}),
+    )
 }
 
 async fn ensure_enabled(ctx: &ToolCtx<'_>, path: &Path) -> Result<(), AppError> {

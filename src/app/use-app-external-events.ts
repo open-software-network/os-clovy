@@ -1,136 +1,82 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
-import { agentOpenReady } from "../lib/tauri";
-import { AGENT_OPEN_EVENT } from "../lib/agent-events";
+import { ROUTINE_OPEN_EVENT, requestRoutineRunOpen } from "../lib/agent-routine-history";
+import { agentOpenReady, routineOpenReady } from "../lib/tauri";
+import { AGENT_NEW_SESSION_EVENT, AGENT_OPEN_EVENT } from "../lib/agent-events";
 import { requestTodayOpen, TODAY_OPEN_EVENT, todayOpenReady } from "../lib/day-intelligence";
-import { listAgentSessions } from "../lib/tauri";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
-import type { UseAppExternalEventsDependencies } from "./use-app-external-events-types";
+import {
+  AGENT_MENU_BAR_NEW_SESSION_EVENT,
+  AGENT_MENU_BAR_OPEN_SESSION_EVENT,
+} from "../lib/menu-bar";
+import type { SidebarView } from "../components/sidebar/Sidebar";
 
-type AgentOpenPayload = {
-  session?: AgentSessionDto;
-  storedSessionId?: string;
-  // Notification events predate the qualified stored-session field.
-  sessionId?: string;
-};
+export function useAppExternalEvents(setActiveView: (view: SidebarView) => void) {
+  useEffect(() => {
+    let aborted = false;
+    const unlisteners: Array<() => void> = [];
+    const openToday = () => setActiveView("today");
+    const acknowledgeLegacyOpen = () => {
+      openToday();
+      void agentOpenReady().catch(() => null);
+    };
 
-export function useAppExternalEvents(dependencies: UseAppExternalEventsDependencies) {
-  const { agentMenuBarSessionsRef, setActiveAgentSession, setActiveView, setAgentOrigin } =
-    dependencies;
+    async function install() {
+      const registrations = await Promise.allSettled([
+        listen(AGENT_OPEN_EVENT, acknowledgeLegacyOpen),
+        listen(AGENT_MENU_BAR_NEW_SESSION_EVENT, openToday),
+        listen(AGENT_MENU_BAR_OPEN_SESSION_EVENT, openToday),
+      ]);
+      for (const registration of registrations) {
+        if (registration.status !== "fulfilled") continue;
+        if (aborted) registration.value();
+        else unlisteners.push(registration.value);
+      }
+      if (aborted) return;
+      const queued = await agentOpenReady().catch(() => null);
+      if (!aborted && queued) openToday();
+    }
+
+    window.addEventListener(AGENT_OPEN_EVENT, acknowledgeLegacyOpen);
+    window.addEventListener(AGENT_NEW_SESSION_EVENT, openToday);
+    void install();
+    return () => {
+      aborted = true;
+      for (const unlisten of unlisteners) unlisten();
+      window.removeEventListener(AGENT_OPEN_EVENT, acknowledgeLegacyOpen);
+      window.removeEventListener(AGENT_NEW_SESSION_EVENT, openToday);
+    };
+  }, [setActiveView]);
 
   useEffect(() => {
     let aborted = false;
-
-    function openAgentWorkspace(session?: AgentSessionDto) {
-      setAgentOrigin(undefined);
-      setActiveAgentSession(session);
-      setActiveView("agent");
-    }
-
-    // Notification clicks carry only a stored session id (the session may have
-    // changed since the notification was posted). Resolve it against the
-    // known sessions, refreshing from the bridge when it is not cached. The
-    // workspace opens immediately for feedback and upgrades to the chat when
-    // the lookup lands; a session that no longer exists stays on the agent
-    // view rather than dropping the click on an unrelated one. The sequence
-    // counter keeps a slow lookup for an older click from overriding a newer
-    // one. A cold start can reach this before local session storage is ready, so a
-    // failed listing (as opposed to a successful listing that lacks the id)
-    // retries during bootstrap instead of eating the click.
-    const sessionLookupAttempts = 20;
-    const sessionLookupRetryMs = 1_000;
-    let openSequence = 0;
-    async function openAgentSessionByStoredId(storedSessionId: string) {
-      openSequence += 1;
-      const sequence = openSequence;
-      const cached = agentMenuBarSessionsRef.current.find(
-        (session) => session.id === storedSessionId,
-      );
-      if (cached) {
-        openAgentWorkspace(cached);
-        return;
-      }
-      openAgentWorkspace(undefined);
-      for (let attempt = 0; attempt < sessionLookupAttempts; attempt += 1) {
-        let sessions: AgentSessionDto[];
-        try {
-          sessions = await listAgentSessions();
-        } catch {
-          await new Promise((resolve) => window.setTimeout(resolve, sessionLookupRetryMs));
-          if (aborted || sequence !== openSequence) return;
-          continue;
-        }
-        if (aborted || sequence !== openSequence) return;
-        const session = sessions.find((candidate) => candidate.id === storedSessionId);
-        if (session) openAgentWorkspace(session);
-        return;
-      }
-    }
-
-    function drainQueuedNotification() {
-      void agentOpenReady()
-        .then((storedSessionId) => {
-          if (!aborted && storedSessionId) {
-            void openAgentSessionByStoredId(storedSessionId);
-          }
-        })
-        .catch(() => {});
-    }
-
-    async function openNotificationSession(deliveredStoredSessionId: string) {
-      let storedSessionId = deliveredStoredSessionId;
-      try {
-        storedSessionId = (await agentOpenReady()) ?? deliveredStoredSessionId;
-      } catch {
-        // The event itself is authoritative when the queue handshake fails.
-      }
-      if (!aborted) await openAgentSessionByStoredId(storedSessionId);
-    }
-
-    function handleOpenPayload(payload?: AgentOpenPayload) {
-      if (payload?.session) {
-        openAgentWorkspace(payload.session);
-        return;
-      }
-      if (payload?.storedSessionId) {
-        // Agent HUD opens are already authoritative and must not consume a
-        // notification click that happened to queue at the same time.
-        void openAgentSessionByStoredId(payload.storedSessionId);
-        return;
-      }
-      if (payload?.sessionId) {
-        // The backend keeps the clicked session queued in case the emit
-        // raced a webview reload. Acknowledge notification-originated events
-        // first so a newer queued click wins deterministically.
-        void openNotificationSession(payload.sessionId);
-        return;
-      }
-      openAgentWorkspace(undefined);
-    }
-
-    function handleOpenEvent(event: Event) {
-      handleOpenPayload((event as CustomEvent<AgentOpenPayload>).detail);
-    }
-
     let unlisten: (() => void) | undefined;
-    window.addEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
-    void listen<AgentOpenPayload>(AGENT_OPEN_EVENT, (event) => {
-      handleOpenPayload(event.payload);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
 
-    // Listeners are registered; drain a notification click that launched the
-    // app before the webview could hear the open event.
-    drainQueuedNotification();
+    function openRun(sessionId: string | null | undefined) {
+      if (aborted || !sessionId) return;
+      setActiveView("routines");
+      requestRoutineRunOpen(sessionId);
+    }
 
+    void listen<{ sessionId?: string }>(ROUTINE_OPEN_EVENT, ({ payload }) => {
+      openRun(payload.sessionId);
+      void routineOpenReady().catch(() => null);
+    })
+      .then((cleanup) => {
+        if (aborted) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+        void routineOpenReady()
+          .then(openRun)
+          .catch(() => {});
+      })
+      .catch(() => {});
     return () => {
       aborted = true;
       unlisten?.();
-      window.removeEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
     };
-  }, []);
+  }, [setActiveView]);
 
   // Activity notifications (day summary ready, failures) open the "Today"
   // view at that day's summary. A click that launched the app is drained

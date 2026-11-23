@@ -9,9 +9,9 @@ A autorização das ferramentas do Clovy SHALL ser decidida pelo app com a mesma
 - **WHEN** Claude Code, Codex ou Antigravity pede a mesma ferramenta do Clovy na mesma superfície e política
 - **THEN** o app aplica o mesmo catálogo, validação, aprovação, execução e formato de resultado
 
-#### Scenario: Troca durante aprovação pendente
-- **WHEN** existe uma aprovação pendente e o usuário seleciona outro motor para o próximo turno
-- **THEN** a seleção não aprova nem muda o vínculo do pedido atual; o próximo turno recebe vínculo próprio e a política efetiva correspondente
+#### Scenario: Motor atualizado para uma execução futura
+- **WHEN** o usuário seleciona outro motor durante a execução de uma rotina
+- **THEN** a execução atual conserva seu vínculo e política, e a próxima recebe vínculo próprio e sua política efetiva
 
 #### Scenario: Autoridade expirada
 - **WHEN** um turno termina, falha, é cancelado ou o app encerra

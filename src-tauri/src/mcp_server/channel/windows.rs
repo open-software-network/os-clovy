@@ -138,7 +138,7 @@ impl Listener {
         handler: impl Into<Service>,
         turns: TurnRegistry,
     ) -> io::Result<Self> {
-        let Service(handler) = handler.into();
+        let service = handler.into();
         let secret: Arc<str> = security::secret(dir, true)?.into();
         let socket = endpoint(dir)?;
         // Cancelled IOCP operations can briefly retain the previous instance
@@ -195,7 +195,7 @@ impl Listener {
                         // Unknown/denied peers fail before reading credentials.
                         if peer.is_err() { continue; }
                         drop(peer);
-                        served.spawn(serve(Pipe(stream), Authentication { same_user: true, secret: secret.clone() }, handshake, slots.clone(), turns.clone(), handler.clone(), connections.clone()));
+                        served.spawn(serve(Pipe(stream), Authentication { same_user: true, secret: secret.clone() }, handshake, slots.clone(), turns.clone(), service.clone(), connections.clone()));
                     }
                 }
             }

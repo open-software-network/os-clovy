@@ -323,7 +323,7 @@ off; see [coding-agent-sessions.md](coding-agent-sessions.md)), for day
 intelligence `daySummary` `{time: "18:00"}` and `notifications` `{enabled:
 true, quietHours: {enabled: false, start: "22:00", end: "08:00"}}`, and
 `mcpServer` (true; the Clovy MCP server switch, changed only by
-`mcp_server_set_enabled` from Settings, Agent; `activity_save_settings` keeps
+`mcp_server_set_enabled` from Settings → MCP; `activity_save_settings` keeps
 the stored value, see [mcp-server.md](mcp-server.md)), and `defaultsVersion`
 (internal; `activity_save_settings` keeps the stored value). Fields missing
 from the file load their defaults, so a new profile starts with capture and
@@ -339,7 +339,7 @@ and no start changes it. If that save fails (reported on the process's
 stderr), the app runs with the upgraded settings in memory while the file
 keeps the old content, so the upgrade is repeated at the next start until a
 save succeeds. The first successful save from either switch (Settings,
-Activity or Settings, Agent) writes the marker together with the user's
+Activity or Settings → MCP) writes the marker together with the user's
 choice, so a saved opt-out is never undone by the upgrade. A save that fails
 returns `activity_settings_save_failed` and changes nothing, in memory or on
 disk. Missing macOS permissions block recording (`needsPermissions`), whereas

@@ -17,7 +17,7 @@ export function useAppTabEvents(dependencies: UseAppTabEventsDependencies) {
     closeTab,
     cycleTab,
     dispatch,
-    openNewChatTab,
+    openNewTab,
     pendingCalendarContextAdoptionsRef,
     setTabs,
     tabs,
@@ -82,7 +82,7 @@ export function useAppTabEvents(dependencies: UseAppTabEventsDependencies) {
       const key = event.key;
       if (key.toLowerCase() === "t") {
         event.preventDefault();
-        openNewChatTab();
+        openNewTab();
         return;
       }
       if (key.toLowerCase() === "w") {

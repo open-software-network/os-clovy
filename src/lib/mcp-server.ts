@@ -23,3 +23,21 @@ export async function mcpServerSetEnabled(enabled: boolean): Promise<McpServerSt
     request: { enabled },
   });
 }
+
+export type McpExternalApproval = {
+  id: string;
+  tool: string;
+  title: string;
+  profile: string;
+  preview: string;
+};
+
+export const MCP_EXTERNAL_APPROVALS_CHANGED = "mcp-external-approvals-changed";
+
+export function listMcpExternalApprovals() {
+  return invoke<McpExternalApproval[]>("mcp_external_approvals");
+}
+
+export function decideMcpExternalApproval(id: string, approve: boolean) {
+  return invoke<void>("mcp_external_approval_decide", { id, approve });
+}

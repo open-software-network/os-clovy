@@ -101,37 +101,54 @@ impl ToolGroup for RoutineTools {
                 &binding.authority,
             ));
             let result = match name {
-                "list_routines" => serde_json::to_value(crate::routines::list(pool).await?),
-                "create_routine" => serde_json::to_value(crate::routines::create_for_turn(pool, serde_json::from_value(arguments.clone()).map_err(invalid_arguments)?, turn).await?),
-                "update_routine" => serde_json::to_value(crate::routines::update_for_turn(pool, serde_json::from_value(arguments.clone()).map_err(invalid_arguments)?, turn).await?),
-                "pause_routine" => serde_json::to_value(crate::routines::pause_for_turn(pool, routine_id(arguments)?, turn).await?),
-                "resume_routine" => serde_json::to_value(crate::routines::resume_for_turn(pool, routine_id(arguments)?, turn).await?),
+                "list_routines" | "list_routine_runs" => {
+                    return read(ctx, name, arguments, false).await
+                }
+                "create_routine" => serde_json::to_value(
+                    crate::routines::create_for_turn(
+                        pool,
+                        serde_json::from_value(arguments.clone()).map_err(invalid_arguments)?,
+                        turn,
+                    )
+                    .await?,
+                ),
+                "update_routine" => serde_json::to_value(
+                    crate::routines::update_for_turn(
+                        pool,
+                        serde_json::from_value(arguments.clone()).map_err(invalid_arguments)?,
+                        turn,
+                    )
+                    .await?,
+                ),
+                "pause_routine" => serde_json::to_value(
+                    crate::routines::pause_for_turn(pool, routine_id(arguments)?, turn).await?,
+                ),
+                "resume_routine" => serde_json::to_value(
+                    crate::routines::resume_for_turn(pool, routine_id(arguments)?, turn).await?,
+                ),
                 "delete_routine" => {
                     let id = routine_id(arguments)?;
                     crate::routines::delete_for_turn(pool, id, turn).await?;
                     Ok(json!({"deleted":true,"routineId":id}))
                 }
-                "list_routine_runs" => {
-                    let id = arguments.get("routineId").and_then(Value::as_str);
-                    if let Some(id) = id { crate::routines::get(pool, id).await?; }
-                    let limit = arguments.get("limit").and_then(Value::as_i64).unwrap_or(20).clamp(1,100);
-                    let offset = arguments.get("offset").and_then(Value::as_i64).unwrap_or(0).max(0);
-                    let mut runs = crate::routines::list_runs_page(pool, id, limit + 1, offset).await?;
-                    let has_more = runs.len() > limit as usize;
-                    runs.truncate(limit as usize);
-                    Ok(json!({"items":runs,"offset":offset,"hasMore":has_more,"nextOffset":has_more.then_some(offset + runs.len() as i64)}))
-                }
                 "run_routine" => {
-                    let app = ctx.app.ok_or_else(|| AppError::new("mcp_app_unavailable", "Routine execution requires the running Clovy app."))?;
+                    let app = ctx.app.ok_or_else(|| {
+                        AppError::new(
+                            "mcp_app_unavailable",
+                            "Routine execution requires the running Clovy app.",
+                        )
+                    })?;
                     let id = routine_id(arguments)?;
-                    let run = crate::routines::trigger_and_start_for_turn(app, pool, id, turn).await?;
+                    let run =
+                        crate::routines::trigger_and_start_for_turn(app, pool, id, turn).await?;
                     match run {
                         Some(run) => serde_json::to_value(run),
                         None => return Err(crate::routines::trigger_blocked_error(pool, id).await?),
                     }
                 }
                 _ => return Err(AppError::new("mcp_tool_unknown", "Unknown routine tool.")),
-            }.map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?;
+            }
+            .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))?;
             if !read_only(name) {
                 if let Some(app) = ctx.app {
                     let _ = app.emit("clovy-data-changed", json!({"profile":ctx.data.profile,"kind":"routines","id":arguments.get("routineId")}));
@@ -141,6 +158,61 @@ impl ToolGroup for RoutineTools {
         })
     }
 }
+/// Routine status is installation-wide. External projection omits the saved
+/// prompt, grants, execution metadata, and linked conversation/run IDs.
+pub(super) async fn read(
+    ctx: &ToolCtx<'_>,
+    name: &str,
+    arguments: &Value,
+    external: bool,
+) -> Result<Value, AppError> {
+    let pool = &ctx.data.notes;
+    if name == "list_routines" {
+        let routines = crate::routines::list(pool).await?;
+        if !external {
+            return serde_json::to_value(routines)
+                .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()));
+        }
+        return Ok(json!(routines.into_iter().map(|routine| json!({
+            "id":routine.id,"name":routine.name,"schedule":routine.schedule,
+            "timezone":routine.timezone,"state":routine.state,"enabled":routine.enabled,
+            "nextRunAt":routine.next_run_at,"lastRunAt":routine.last_run_at,"lastStatus":routine.last_status
+        })).collect::<Vec<_>>()));
+    }
+    let id = arguments.get("routineId").and_then(Value::as_str);
+    if let Some(id) = id {
+        crate::routines::get(pool, id).await?;
+    }
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let offset = arguments
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let mut runs = crate::routines::list_runs_page(pool, id, limit + 1, offset).await?;
+    let has_more = runs.len() > limit as usize;
+    runs.truncate(limit as usize);
+    let items = if external {
+        json!(runs
+            .into_iter()
+            .map(|run| json!({
+                "id":run.id,"routineId":run.routine_id,"triggerKind":run.trigger_kind,
+                "status":run.status,"scheduledFor":run.scheduled_for,"startedAt":run.started_at,
+                "completedAt":run.completed_at,"model":run.model,"errorCode":run.error_code
+            }))
+            .collect::<Vec<_>>())
+    } else {
+        json!(runs)
+    };
+    Ok(
+        json!({"items":items,"offset":offset,"hasMore":has_more,"nextOffset":has_more.then_some(offset.saturating_add(limit))}),
+    )
+}
+
 fn invalid_arguments(error: serde_json::Error) -> AppError {
     AppError::new("invalid_arguments", error.to_string())
 }

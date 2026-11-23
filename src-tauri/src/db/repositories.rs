@@ -1527,21 +1527,26 @@ impl Repositories {
         content: &str,
         source: &str,
     ) -> Result<MemoryDto, AppError> {
-        self.create_memory_for_turn(profile, folder_id, content, source, None)
+        self.create_memory_authorized(profile, folder_id, content, source, None)
             .await
     }
 
-    pub(crate) async fn create_memory_for_turn(
+    pub(crate) async fn create_memory_authorized(
         &self,
         profile: &str,
         folder_id: Option<&str>,
         content: &str,
         source: &str,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<MemoryDto, AppError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some((session, run, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+        }
+        if let (Some(id), Some(target)) =
+            (folder_id, authority.and_then(McpMutation::external_target))
+        {
+            check_mcp_project_target(&mut tx, profile, id, target).await?;
         }
         let now = timestamp();
         let memory = MemoryDto {
@@ -1597,6 +1602,9 @@ impl Repositories {
                 .memory_scope_write_error(&mut tx, profile, folder_id.expect("scoped insert"))
                 .await?);
         }
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
         tx.commit().await?;
         Ok(memory)
     }
@@ -1607,20 +1615,23 @@ impl Repositories {
         id: &str,
         content: &str,
     ) -> Result<MemoryDto, AppError> {
-        self.update_memory_for_turn(profile, id, content, None)
+        self.update_memory_authorized(profile, id, content, None)
             .await
     }
 
-    pub(crate) async fn update_memory_for_turn(
+    pub(crate) async fn update_memory_authorized(
         &self,
         profile: &str,
         id: &str,
         content: &str,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<MemoryDto, AppError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some((session, run, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+            if let Some(target) = authority.external_target() {
+                check_memory_target(&mut tx, profile, id, target).await?;
+            }
         }
         let result = query(
             "UPDATE memories
@@ -1670,6 +1681,9 @@ impl Repositories {
         .fetch_one(&mut *tx)
         .await?;
         let memory = memory_from_row(row);
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
         tx.commit().await?;
         Ok(memory)
     }
@@ -1710,13 +1724,13 @@ impl Repositories {
         self.delete_memory_inner(profile, id, true, None).await
     }
 
-    pub(crate) async fn forget_memory_for_turn(
+    pub(crate) async fn forget_memory_authorized(
         &self,
         profile: &str,
         id: &str,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<(), AppError> {
-        self.delete_memory_inner(profile, id, true, turn).await
+        self.delete_memory_inner(profile, id, true, authority).await
     }
 
     async fn delete_memory_inner(
@@ -1724,7 +1738,7 @@ impl Repositories {
         profile: &str,
         id: &str,
         enforce_project_gate: bool,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<(), AppError> {
         #[cfg(test)]
         self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteTransaction)
@@ -1736,8 +1750,11 @@ impl Repositories {
         } else {
             self.pool.begin().await?
         };
-        if let Some((session, run, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session, run, authority).await?;
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+            if let Some(target) = authority.external_target() {
+                check_memory_target(&mut tx, profile, id, target).await?;
+            }
         }
         if enforce_project_gate {
             let row = query(
@@ -1782,6 +1799,9 @@ impl Repositories {
         #[cfg(test)]
         self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteCommit)
             .await;
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1801,15 +1821,22 @@ impl Repositories {
         &self,
         profile: &str,
         folder_id: Option<&str>,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<NoteDto, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = timestamp();
-        let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
         }
         if let Some(folder_id) = folder_id {
+            if let Some(target) = authority.and_then(McpMutation::external_target) {
+                check_mcp_project_target(&mut tx, profile, folder_id, target).await?;
+            }
             let claimed = query(
                 "UPDATE folders SET id = id WHERE id = ? AND profile = ? AND deleted_at IS NULL",
             )
@@ -1831,6 +1858,9 @@ impl Repositories {
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
+        }
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
         }
         tx.commit().await?;
         Ok(self.get_note_with_profile(&id, Some(profile)).await?)
@@ -2836,11 +2866,15 @@ impl Repositories {
         expected_revision: i64,
         title: Option<&str>,
         content: Option<&str>,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<NoteDto, AppError> {
-        let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
         }
         let updated = query("UPDATE notes SET title = COALESCE(?, title), edited_content = COALESCE(?, edited_content), updated_at = ?, revision = revision + 1 WHERE id = ? AND profile = ? AND revision = ?")
             .bind(title).bind(content).bind(timestamp()).bind(note_id).bind(profile).bind(expected_revision)
@@ -2861,6 +2895,9 @@ impl Repositories {
                     "The note changed; read it again before updating.",
                 )
             });
+        }
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
         }
         tx.commit().await?;
         Ok(self.get_note_with_profile(note_id, Some(profile)).await?)
@@ -3003,11 +3040,15 @@ impl Repositories {
         &self,
         profile: &str,
         note_id: &str,
-        turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<Vec<String>, AppError> {
-        let mut tx = self.pool.begin().await?;
-        if let Some((session_id, run_id, authority)) = turn {
-            guard_bound_turn(&mut tx, profile, session_id, run_id, authority).await?;
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
         }
         // Acquire the write lock before checking ownership and collecting paths.
         let claimed = query("UPDATE notes SET id = id WHERE id = ? AND profile = ?")
@@ -3019,6 +3060,15 @@ impl Repositories {
         if claimed == 0 {
             return Err(AppError::new("note_not_found", "Note was not found."));
         }
+        if let Some(target) = authority.and_then(McpMutation::external_target) {
+            let current = mcp_note_delete_target(&mut tx, profile, note_id).await?;
+            if &current != target {
+                return Err(AppError::new(
+                    "note_conflict",
+                    "The note or its recordings changed after approval was requested.",
+                ));
+            }
+        }
         let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions WHERE note_id = ? AND status IN ('recording', 'paused')")
             .bind(note_id).fetch_one(&mut *tx).await?;
         if active != 0 {
@@ -3029,6 +3079,9 @@ impl Repositories {
         }
         let paths = note_artifact_paths_for_deletion(&mut tx, note_id).await?;
         delete_note_records(&mut tx, note_id).await?;
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
         tx.commit().await?;
         Ok(with_video_capture_metadata(paths))
     }
@@ -5802,6 +5855,177 @@ impl Repositories {
     }
 }
 
+/// Authority for a local write admitted by MCP. External approval has no
+/// session or run, and is checked inside the same transaction as the effect.
+#[derive(Clone, Copy)]
+pub(crate) enum McpMutation<'a> {
+    Turn(
+        &'a str,
+        &'a str,
+        &'a crate::domain::turn_authority::TurnAuthority,
+    ),
+    External(crate::approval_broker::external::ExternalApproval<'a>),
+}
+
+impl<'a> McpMutation<'a> {
+    pub(crate) fn from_turn(
+        (session, run, authority): (
+            &'a str,
+            &'a str,
+            &'a crate::domain::turn_authority::TurnAuthority,
+        ),
+    ) -> Self {
+        Self::Turn(session, run, authority)
+    }
+
+    pub(crate) async fn guard(
+        self,
+        tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+        profile: &str,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Turn(session, run, authority) => {
+                guard_bound_turn(tx, profile, session, run, authority).await
+            }
+            Self::External(approval) => approval.check(profile),
+        }
+    }
+
+    pub(crate) fn external_target(self) -> Option<&'a serde_json::Value> {
+        match self {
+            Self::External(approval) => approval.target(),
+            Self::Turn(..) => None,
+        }
+    }
+
+    pub(crate) fn before_commit(self, profile: &str) -> Result<(), AppError> {
+        match self {
+            Self::External(approval) => approval.check(profile),
+            Self::Turn(..) => Ok(()),
+        }
+    }
+}
+
+pub(crate) async fn mcp_project_target<'a>(
+    executor: impl sqlx::executor::Executor<'a, Database = Sqlite>,
+    profile: &str,
+    id: &str,
+) -> Result<serde_json::Value, AppError> {
+    let row = query(
+        "SELECT name, updated_at FROM folders WHERE id=? AND profile=? AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(profile)
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| AppError::new("folder_not_found", "Project was not found."))?;
+    Ok(
+        serde_json::json!({"projectId":id,"name":row.get::<String,_>("name"),"updatedAt":row.get::<String,_>("updated_at")}),
+    )
+}
+
+async fn check_mcp_project_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+    target: &serde_json::Value,
+) -> Result<(), AppError> {
+    if &mcp_project_target(&mut **tx, profile, id).await? != target {
+        return Err(AppError::new(
+            "project_conflict",
+            "The destination project changed after approval was requested.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn mcp_note_delete_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+) -> Result<serde_json::Value, AppError> {
+    use sha2::{Digest, Sha256};
+    let row = query("SELECT title, revision, updated_at FROM notes WHERE id=? AND profile=?")
+        .bind(id)
+        .bind(profile)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| AppError::new("note_not_found", "The note was not found."))?;
+    let recordings = query(
+        "SELECT id,started_at,status FROM recording_sessions WHERE note_id=? ORDER BY id LIMIT 101",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if recordings.len() > 100 {
+        return Err(AppError::new(
+            "mcp_external_preview_too_large",
+            "Clovy could not preview all recordings for approval.",
+        ));
+    }
+    let recordings = recordings.iter().map(|recording| serde_json::json!({
+        "id":recording.get::<String,_>("id"),"startedAt":recording.get::<String,_>("started_at"),"status":recording.get::<String,_>("status")
+    })).collect::<Vec<_>>();
+    let mut paths = note_artifact_paths_for_deletion(tx, id).await?;
+    paths.sort();
+    let artifacts = query(
+        "SELECT 'audio' AS kind, id, status, checksum AS contents FROM audio_artifacts WHERE note_id = ?
+         UNION ALL
+         SELECT 'video' AS kind, recording_session_id AS id, status, COALESCE(CAST(duration_ms AS TEXT), '') AS contents FROM video_artifacts WHERE note_id = ?
+         ORDER BY kind, id LIMIT 101",
+    ).bind(id).bind(id).fetch_all(&mut **tx).await?;
+    if artifacts.len() > 100 {
+        return Err(AppError::new(
+            "mcp_external_preview_too_large",
+            "Clovy could not preview all recording artifacts for approval.",
+        ));
+    }
+    // Keep local paths in storage while detecting any target change under
+    // the same writer as the eventual deletion.
+    let mut fingerprint = Sha256::new();
+    for path in &paths {
+        fingerprint.update(path.len().to_le_bytes());
+        fingerprint.update(path.as_bytes());
+    }
+    for artifact in &artifacts {
+        for column in ["kind", "id", "status", "contents"] {
+            let value = artifact.get::<&str, _>(column);
+            fingerprint.update(value.len().to_le_bytes());
+            fingerprint.update(value.as_bytes());
+        }
+    }
+    Ok(serde_json::json!({
+        "id":id,"title":row.get::<String,_>("title"),"revision":row.get::<i64,_>("revision"),
+        "updatedAt":row.get::<String,_>("updated_at"),"recordings":recordings,
+        "recordingFiles":paths.len(),"recordingFilesFingerprint":format!("{:x}",fingerprint.finalize())
+    }))
+}
+
+async fn check_memory_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+    target: &serde_json::Value,
+) -> Result<(), AppError> {
+    let row =
+        query("SELECT folder_id, content, updated_at FROM memories WHERE id = ? AND profile = ?")
+            .bind(id)
+            .bind(profile)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?;
+    if target["projectId"].as_str() != row.get::<Option<&str>, _>("folder_id")
+        || target["content"].as_str() != Some(row.get::<&str, _>("content"))
+        || target["updatedAt"].as_str() != Some(row.get::<&str, _>("updated_at"))
+    {
+        return Err(AppError::new(
+            "memory_conflict",
+            "Memory changed after approval was requested.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn guard_bound_turn(
     tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
     profile: &str,
@@ -6366,7 +6590,7 @@ fn contained_session_video_paths(
     ))
 }
 
-async fn note_artifact_paths_for_deletion(
+pub(crate) async fn note_artifact_paths_for_deletion(
     tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     note_id: &str,
 ) -> Result<Vec<String>, sqlx::error::Error> {
@@ -6391,7 +6615,7 @@ async fn note_artifact_paths_for_deletion(
     Ok(rows.into_iter().map(|row| row.get("path")).collect())
 }
 
-fn with_video_capture_metadata(paths: Vec<String>) -> Vec<String> {
+pub(crate) fn with_video_capture_metadata(paths: Vec<String>) -> Vec<String> {
     let partials = paths
         .iter()
         .filter(|path| path.ends_with(".partial.mp4"))
@@ -6777,7 +7001,11 @@ mod tests {
                 .delete_note_in_profile(
                     profile,
                     &note.id,
-                    Some(("delete-session", run, &authority)),
+                    Some(crate::db::repositories::McpMutation::Turn(
+                        "delete-session",
+                        run,
+                        &authority,
+                    )),
                 )
                 .await
                 .unwrap_err();
@@ -6802,7 +7030,11 @@ mod tests {
             .delete_note_in_profile(
                 "default",
                 &note.id,
-                Some(("delete-session", "delete-run", &revoked)),
+                Some(crate::db::repositories::McpMutation::Turn(
+                    "delete-session",
+                    "delete-run",
+                    &revoked,
+                )),
             )
             .await
             .unwrap_err();
@@ -6813,7 +7045,11 @@ mod tests {
             .delete_note_in_profile(
                 "default",
                 &note.id,
-                Some(("delete-session", "delete-run", &authority)),
+                Some(crate::db::repositories::McpMutation::Turn(
+                    "delete-session",
+                    "delete-run",
+                    &authority,
+                )),
             )
             .await
             .unwrap();

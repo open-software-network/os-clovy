@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("app shell copy in English (default)", () => {
   it("keeps the English tab titles", () => {
-    expect(tabMeta({ view: "all-notes" }, [], [], []).title).toBe("All notes");
+    expect(tabMeta({ view: "all-notes" }, [], []).title).toBe("All notes");
   });
 });
 
@@ -20,10 +20,10 @@ describe("app shell copy in pt-BR", () => {
   beforeEach(() => applyInterfaceLocale("pt-BR"));
 
   it("translates tab titles at call time", () => {
-    expect(tabMeta({ view: "all-notes" }, [], [], []).title).toBe("Todas as notas");
-    expect(tabMeta({ view: "home" }, [], [], []).title).toBe("Início");
-    expect(tabMeta({ view: "settings" }, [], [], []).title).toBe("Configurações");
-    expect(tabMeta({ view: "agent" }, [], [], []).title).toBe("Nova sessão");
+    expect(tabMeta({ view: "all-notes" }, [], []).title).toBe("Todas as notas");
+    expect(tabMeta({ view: "home" }, [], []).title).toBe("Hoje");
+    expect(tabMeta({ view: "settings" }, [], []).title).toBe("Configurações");
+    expect(tabMeta({ view: "agent" }, [], []).title).toBe("Hoje");
   });
 
   it("pluralizes app toasts and countdowns", () => {

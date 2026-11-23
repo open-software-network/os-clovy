@@ -101,24 +101,18 @@ function WorkspaceLoadFailure({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-type AgentWorkspaceModule = typeof import("../components/agent/AgentWorkspace");
-type AgentWorkspaceProps = NonNullable<ComponentProps<AgentWorkspaceModule["AgentWorkspace"]>>;
 type FoldersWorkspaceModule = typeof import("../components/folders/FoldersWorkspace");
 type FoldersWorkspaceProps = ComponentProps<FoldersWorkspaceModule["FoldersWorkspace"]>;
 type NoteEditorModule = typeof import("../components/note-editor/NoteEditor");
 type NoteEditorProps = ComponentProps<NoteEditorModule["NoteEditor"]>;
 type RoutinesViewModule = typeof import("../components/routines/RoutinesView");
-type RoutinesViewProps = ComponentProps<RoutinesViewModule["RoutinesView"]>;
+type RoutinesViewProps = Record<string, never>;
 type AppSettingsModule = typeof import("../components/settings/AppSettings");
 type AppSettingsProps = ComponentProps<AppSettingsModule["AppSettings"]>;
 type ActivityTimelineViewModule =
   typeof import("../components/activity-timeline/ActivityTimelineView");
 type ActivityTimelineViewProps = ComponentProps<ActivityTimelineViewModule["ActivityTimelineView"]>;
 
-const agentWorkspace = createWorkspaceLoader<AgentWorkspaceModule, AgentWorkspaceProps>(
-  () => import("../components/agent/AgentWorkspace"),
-  (module) => module.AgentWorkspace,
-);
 const foldersWorkspace = createWorkspaceLoader<FoldersWorkspaceModule, FoldersWorkspaceProps>(
   () => import("../components/folders/FoldersWorkspace"),
   (module) => module.FoldersWorkspace,
@@ -143,7 +137,6 @@ const activityTimelineView = createWorkspaceLoader<
   (module) => module.ActivityTimelineView,
 );
 
-export const AgentWorkspaceRoute = agentWorkspace.Component;
 export const FoldersWorkspaceRoute = foldersWorkspace.Component;
 export const NoteEditorRoute = noteEditor.Component;
 export const RoutinesViewRoute = routinesView.Component;
@@ -211,4 +204,4 @@ function WorkspaceFallback() {
   );
 }
 
-export const preloadInitialWorkspace = agentWorkspace.preload;
+export const preloadInitialWorkspace = activityTimelineView.preload;

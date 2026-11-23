@@ -306,6 +306,10 @@ curated locally; missing keys are checked when an operation is requested.
 
 ## CLI chat engine
 
+> Referência do motor de execução e do formato persistido. A interface de chat,
+> incluindo Início e o chat de notas, foi retirada. Rotinas continuam usando o
+> motor CLI e os registros de sessão. Veja [ADR-0075](adr/0075-desktop-opens-today-and-approves-external-mcp-actions.md).
+
 A chat session's **chat engine** is an installed CLI, encoded as
 `__clovy_cli_engine__:<cli>` (`crate::chat_engine`). `chat_default_engine`
 resolves the default locally: Claude Code, otherwise the existing Codex
@@ -662,6 +666,10 @@ argument: its installer ships `agy.exe`.
   the CLI manages its own context.
 
 ## Routines on a CLI engine
+
+Rotinas reúne a criação, a edição e a execução manual. O histórico abre uma
+visualização de leitura com o estado e o resultado ou erro da execução. Ela usa
+os itens persistidos da execução, incluindo sessões importadas de versões anteriores.
 
 Routines run on an installed Claude Code or Codex engine selected by
 `providers::default_unattended_cli`; an unavailable engine produces a clear

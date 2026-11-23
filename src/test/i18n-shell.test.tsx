@@ -15,15 +15,7 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
 
 function renderSidebar(activeView: "notes" | "settings" = "notes") {
   return render(
-    <Sidebar
-      notes={[]}
-      activeView={activeView}
-      onChangeView={vi.fn()}
-      onSelectNote={vi.fn()}
-      onNewAgentSession={vi.fn()}
-      onRenameAgentSession={vi.fn()}
-      onSelectAgentSession={vi.fn()}
-    />,
+    <Sidebar notes={[]} activeView={activeView} onChangeView={vi.fn()} onSelectNote={vi.fn()} />,
   );
 }
 
@@ -50,7 +42,7 @@ describe("shell i18n (English default)", () => {
   it("renders the sidebar and tab bar in English", () => {
     renderSidebar();
     expect(screen.getByRole("button", { name: "Meeting notes" })).toBeInTheDocument();
-    expect(screen.getByText("No sessions yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Today" })).toBeInTheDocument();
     renderTabBar();
     expect(screen.getByRole("button", { name: "New tab" })).toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeInTheDocument();
@@ -68,10 +60,8 @@ describe("shell i18n (pt-BR)", () => {
   it("renders the sidebar navigation in Portuguese", () => {
     renderSidebar();
     expect(screen.getByRole("button", { name: "Notas de reunião" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Nova sessão" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Início" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hoje" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Principal" })).toBeInTheDocument();
-    expect(screen.getByText("Nenhuma sessão ainda")).toBeInTheDocument();
     expect(screen.getByRole("searchbox", { name: "Buscar" })).toBeInTheDocument();
   });
 

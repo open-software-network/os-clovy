@@ -23,6 +23,7 @@ export type AgentAttentionContext = {
   viewingSession: boolean;
   captureActive: boolean;
   soundsEnabled: boolean;
+  routineResult?: boolean;
 };
 
 export type AgentAttentionDecision = {
@@ -133,7 +134,9 @@ async function deliverAgentAttention({
         title: copy.title,
         body: copy.body,
         group,
-        sessionId: detail.sessionId,
+        ...(context.routineResult
+          ? { routineSessionId: detail.sessionId }
+          : { sessionId: detail.sessionId }),
       });
       delivered = true;
     } catch {

@@ -7,8 +7,7 @@ import {
 import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
 import { isSameLocalDay } from "../../lib/date-format";
 
-/** Past runs of one or all routines: each row is a cron-sourced session,
- * opened in the agent view on click so the whole conversation is readable. */
+/** Past runs of one or all routines. Each row opens the run result. */
 export function RoutineRunList({
   runs,
   label,
@@ -41,7 +40,12 @@ function RunRow({
   const preview = run.preview?.trim() || (running ? t("routines.run.runningNow") : "");
   return (
     <li className="routines-run">
-      <button type="button" className="routines-run-button" onClick={onOpen}>
+      <button
+        id={`routine-run-${run.id}`}
+        type="button"
+        className="routines-run-button"
+        onClick={onOpen}
+      >
         <span className="routines-item-icon" aria-hidden>
           <IconZap size={14} />
         </span>

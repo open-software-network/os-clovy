@@ -225,7 +225,11 @@ pub(crate) async fn call(
             .create_note_checked(
                 &ctx.data.profile,
                 None,
-                Some((&binding.session_id, &binding.run_id, &binding.authority)),
+                Some(crate::db::repositories::McpMutation::Turn(
+                    &binding.session_id,
+                    &binding.run_id,
+                    &binding.authority,
+                )),
             )
             .await?;
         if let Some(app) = ctx.app {

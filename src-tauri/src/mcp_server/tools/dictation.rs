@@ -1,13 +1,15 @@
 //! Typed dictation management; the destination is always the calling
 //! conversation's Clovy composer, pinned before asking for approval.
 use super::{ToolCtx, ToolGroup};
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::db::repositories::McpMutation;
 use crate::dictation::{
     agent_dictation_control, agent_dictation_status, agent_dictation_target, AgentDictationAction,
 };
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
+use sqlx::row::Row;
 use tauri::Emitter;
 
 pub struct DictationTools;
@@ -88,11 +90,11 @@ impl ToolGroup for DictationTools {
             ctx.broker()?.request(&ApprovalTurn::from(binding), ApprovalRequest { tool:name.into(),call_id:Some(uuid::Uuid::new_v4().to_string()),kind:ApprovalKind::Approval { title: "Manage dictation".into(), description: if name == "start_dictation" { "Start a visible dictation and deliver its text to this conversation's composer. Transcription uses your configured provider.".into() } else { "Change the specified dictation in this conversation's data partition.".into() }, arguments: args.clone(),preview:target.as_ref().map(|target|serde_json::json!({"takeId":target.take_id,"conversationId":target.conversation_id,"window":target.window}).to_string()) } }).await.map_err(|error|AppError::new(error.code(),error.message()))?;
             ctx.revalidate().await?;
             if let Some(id) = id {
-                crate::dictation::delete_history_for_turn(
+                crate::dictation::delete_history_authorized(
                     &ctx.data.notes,
                     &ctx.data.profile,
                     &id,
-                    binding,
+                    McpMutation::Turn(&binding.session_id, &binding.run_id, &binding.authority),
                 )
                 .await?;
                 let _ = app.emit(
@@ -131,6 +133,47 @@ impl ToolGroup for DictationTools {
         })
     }
 }
+pub(super) async fn delete_external(
+    ctx: &ToolCtx<'_>,
+    scope: &ExternalCall<'_>,
+    args: &Value,
+) -> Result<Value, AppError> {
+    let id = required(args, "id")?;
+    let cutoff = crate::db::repositories::dictation_history_cutoff_timestamp();
+    let row =
+        super::notes::read_dictation(&ctx.data.notes, &ctx.data.profile, id, Some(&cutoff)).await?;
+    let text = row.get::<String, _>("text");
+    let target = json!({
+        "id": id,
+        "createdAt": row.get::<String, _>("created_at"),
+        "excerpt": text.chars().take(160).collect::<String>(),
+        "textLength": text.chars().count(),
+    });
+    let approval = scope
+        .approve(
+            "delete_dictation",
+            "Delete a dictation",
+            "Permanently delete this dictation from Clovy's history.",
+            args,
+            Some(&target),
+        )
+        .await?;
+    crate::dictation::delete_history_authorized(
+        &ctx.data.notes,
+        &ctx.data.profile,
+        id,
+        McpMutation::External(approval),
+    )
+    .await?;
+    if let Some(app) = ctx.app {
+        let _ = app.emit(
+            "clovy-data-changed",
+            json!({"profile":ctx.data.profile,"kind":"dictations","id":id,"deleted":true}),
+        );
+    }
+    Ok(json!({"success":true,"id":id}))
+}
+
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, AppError> {
     args.get(key)
         .and_then(Value::as_str)

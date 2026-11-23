@@ -11,7 +11,6 @@ import { initBrand } from "./lib/brand";
 import { initFontScale, installFontScaleShortcuts } from "./lib/font-scale";
 import { installExternalLinkOpener } from "./lib/external-links";
 import { initializeExperimentalFlags } from "./lib/experimental-flags";
-import { isMacLikePlatform, isWindowsPlatform } from "./lib/platform";
 import {
   prefetchRemainingWorkspacesAfterPaint,
   preloadInitialWorkspace,
@@ -42,27 +41,13 @@ initFontScale();
 installFontScaleShortcuts();
 installExternalLinkOpener();
 installNativeContextMenuGuard();
-// Intentionally await the default Agent workspace before mounting React. This
-// trades some first-paint parsing for a stable launch with no fallback flash;
-// JUN-391 owns the broader paint-first startup work. The remaining workspaces
-// are fetched after first paint below.
-await Promise.all([
-  initializeExperimentalFlags(),
-  isMacLikePlatform() || isWindowsPlatform()
-    ? preloadInitialWorkspace().catch(() => undefined)
-    : Promise.resolve(),
-]);
+// The Today route is allowed to depend on the entry chunk. Start loading it
+// early without blocking the entry module on that dependency.
+void preloadInitialWorkspace().catch(() => undefined);
+await initializeExperimentalFlags();
 
-// Console driver for the agent HUD overlay window: __agentHud("demo") etc.
-// from this window's devtools. Emits on the Tauri bus only, so fake demo
-// sessions never leak into the sidebar or menu bar. See lib/agent-hud-demo.ts.
 if (import.meta.env.DEV) {
-  void import("./lib/agent-hud-demo").then(({ registerAgentHudDemo }) => {
-    registerAgentHudDemo({ local: false });
-    // Composite visual check: __spinnerDemo() opens representative real
-    // spinner contexts, including this separately rendered HUD window.
-    void import("./lib/spinner-demo").then(({ registerSpinnerDemo }) => registerSpinnerDemo());
-  });
+  void import("./lib/spinner-demo").then(({ registerSpinnerDemo }) => registerSpinnerDemo());
   // Same pattern for the meeting-detection prompt: __meetingHud("detected")
   // drives the real dictation HUD window over the Tauri bus.
   void import("./lib/meeting-hud-demo").then(({ registerMeetingHudDemo }) =>
@@ -79,7 +64,7 @@ if (import.meta.env.DEV) {
   void import("./lib/recording-hud-demo").then(({ registerRecordingHudDemo }) =>
     registerRecordingHudDemo({ local: false }),
   );
-  // __emptyStates() forces every list view (Agents, Routines, Projects,
+  // __emptyStates() forces every list view (Routines, Projects,
   // Notes, Dictation, sidebar) into its empty rendering for design work;
   // call again or __emptyStates(false) to reset. Real data is untouched.
   void import("./lib/empty-states-demo").then(({ registerEmptyStatesDemo }) =>

@@ -4,7 +4,7 @@ use super::{ToolCtx, ToolGroup};
 #[cfg(test)]
 use crate::activity::settings::ActivitySettings;
 use crate::activity::ActivitySettingsPatch;
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest, ApprovalTurn};
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -139,6 +139,55 @@ impl ToolGroup for ActivityManagementTools {
         })
     }
 }
+pub(super) async fn call_external(
+    ctx: &ToolCtx<'_>,
+    scope: &ExternalCall<'_>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    let app = ctx.app.ok_or_else(|| {
+        AppError::new(
+            "activity_unavailable",
+            "The activity service is unavailable.",
+        )
+    })?;
+    if name == "get_activity_settings" {
+        return value(crate::activity::tool_status(app));
+    }
+    let patch = (name == "update_activity_settings")
+        .then(|| parse_patch(args))
+        .transpose()?;
+    let title = match name {
+        "pause_activity" => "Pause Activity capture",
+        "resume_activity" => "Resume Activity capture",
+        "update_activity_settings" => "Change Activity settings",
+        _ => return Err(AppError::new("mcp_tool_unknown", "Unknown activity tool.")),
+    };
+    let approval = scope
+        .approve(
+            name,
+            title,
+            "Apply this change to Activity capture on this installation.",
+            args,
+            None,
+        )
+        .await?;
+    if let Some(patch) = patch {
+        // The shared port invokes the guard after taking the settings lock.
+        value(crate::activity::tool_update_settings_checked(
+            app,
+            patch,
+            || approval.check(&ctx.data.profile),
+        )?)
+    } else {
+        approval.check(&ctx.data.profile)?;
+        value(crate::activity::tool_set_paused(
+            app,
+            name == "pause_activity",
+        )?)
+    }
+}
+
 fn invalid(message: &str) -> AppError {
     AppError::new("agent_tool_arguments_invalid", message)
 }

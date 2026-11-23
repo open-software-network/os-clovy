@@ -2,18 +2,16 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { CSSProperties } from "react";
 import { t } from "../i18n";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
-import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
-import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
 import { GlobalRecorderPill } from "../components/recorder/GlobalRecorderPill";
 import { PermissionBanner } from "../components/permissions/PermissionBanner";
+import { McpApprovalIndicator } from "../components/settings/McpApprovalIndicator";
 import { Sidebar } from "../components/sidebar/Sidebar";
 import { TabBar } from "../components/tabs/TabBar";
 import { ConnectorApprovalsTray } from "../components/connectors/ConnectorApprovalsTray";
 import { ComputerUseApprovalsTray } from "../components/agent/ComputerUseApprovalsTray";
 import { BrowserSessionsTray } from "../components/agent/BrowserSessionsTray";
 import { Dialog } from "../components/ui/Dialog";
-import { isMacLikePlatform, isWindowsPlatform } from "../lib/platform";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
+import { isWindowsPlatform } from "../lib/platform";
 import type { NoteListItemDto } from "../lib/tauri";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { handleSidebarResizeStart } from "./sidebar-resize";
@@ -35,13 +33,9 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     activateTab,
     activeTabId,
     activeView,
-    agentSessions,
-    agentSessionsListRef,
-    captureActive,
     changeSettingsTab,
     closeOtherTabs,
     closeTab,
-    completedSessions,
     confirmDeleteNote,
     detailScrollerActive,
     dispatch,
@@ -50,45 +44,30 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     handleDeleteNote,
     handleEnableAccessibility,
     handleKeepRecordingAfterInactivityPrompt,
-    handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
     handleRemoveNoteFromFolder,
-    handleRemoveSessionFromFolder,
-    handleRenameAgentSession,
     handleReorderTabs,
     handleSelectNote,
     handleSetNoteFolder,
-    handleSetSessionFolder,
-    handleToggleSessionCompleted,
-    homeStoredSessionId,
     mainPanelBodyRef,
     moveDialogNoteIds,
-    moveDialogSessionIds,
-    noteChat,
-    noteChatOpen,
     noteDetailScrollerActive,
     notesListRef,
-    openNewChatTab,
+    openNewTab,
     openSettings,
     openTab,
-    pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
     selectedNote,
-    sessionFolders,
     setAccessibilityBannerDismissed,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setConfirmDeleteNote,
     setFolderReturnTarget,
     setMoveDialogNoteIds,
-    setMoveDialogSessionIds,
-    setNoteChatOpen,
     setOriginAllNotes,
     setOriginFolderId,
     setSidebarCollapsed,
@@ -108,15 +87,9 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
     takeNewTabIntent,
     workspaceContent,
   } = dependencies;
-  const noteChatVisible = activeView === "meetings" && selectedNote !== undefined && noteChatOpen;
-
   return (
     <main
-      className={[
-        "app-shell",
-        activeView !== "settings" ? "app-shell-sidebar-default" : "",
-        noteChatVisible ? "app-shell-note-chat-open" : "",
-      ]
+      className={["app-shell", activeView !== "settings" ? "app-shell-sidebar-default" : ""]
         .filter(Boolean)
         .join(" ")}
       data-platform={isWindowsPlatform() ? "windows" : undefined}
@@ -158,8 +131,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
       <Sidebar
         notes={state.notes}
         activeView={activeView}
-        homeEnabled={isMacLikePlatform()}
-        homeStoredSessionId={homeStoredSessionId}
         settingsTab={settingsTab}
         onSettingsTabChange={changeSettingsTab}
         onChangeView={(view) => {
@@ -169,11 +140,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
           if (view === "settings") openSettings();
           else setActiveView(view);
-          setAgentOrigin(undefined);
-          if (view !== "agent") {
-            setActiveAgentSession(undefined);
-            pendingSessionProjectRef.current = null;
-          }
           if (view === "folders") {
             setFolderReturnTarget(undefined);
             dispatch({ type: "folderSelected", folderId: undefined });
@@ -192,34 +158,16 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           }
           void handleSelectNote(noteId);
         }}
-        onNewAgentSession={() => {
-          pendingSessionProjectRef.current = null;
-          setAgentOrigin(undefined);
-          setActiveAgentSession(undefined);
-          setActiveView("agent");
-        }}
-        onRenameAgentSession={handleRenameAgentSession}
-        onSelectAgentSession={(session) => {
-          if (takeNewTabIntent()) {
-            openTab({ view: "agent", agentSessionId: session.id });
-            return;
-          }
-          setAgentOrigin(undefined);
-          setActiveAgentSession(session);
-          setActiveView("agent");
-        }}
-        sessionFolderIds={sessionFolders}
-        completedSessionIds={completedSessions}
-        onToggleSessionCompleted={handleToggleSessionCompleted}
-        onOpenSessionMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
-        onRemoveSessionFromFolder={(sessionId, folderId) =>
-          void handleRemoveSessionFromFolder(sessionId, folderId)
-        }
         recordingStatus={sidebarRecorderStatus}
         recordingTitle={recordingNoteTitle}
         onOpenRecording={() => (pillIsDemo ? undefined : void handleOpenRecordingNote())}
         collapsed={sidebarCollapsed}
-        footerAccessory={<UpdateHub {...updateHub} />}
+        footerAccessory={
+          <>
+            {!sidebarCollapsed ? <McpApprovalIndicator onOpen={() => openSettings("mcp")} /> : null}
+            <UpdateHub {...updateHub} />
+          </>
+        }
       />
       <div
         className="sidebar-resize-handle"
@@ -261,16 +209,12 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
           onActivate={activateTab}
           onClose={closeTab}
           onCloseOthers={closeOtherTabs}
-          onNew={openNewChatTab}
+          onNew={openNewTab}
           onReorder={handleReorderTabs}
           layoutFrozen={sidebarResizing}
           onDragRegionPointerDown={handleTitlebarPointerDown}
         />
-        <section
-          className={`main-panel${
-            activeView === "agent" || activeView === "home" ? " main-panel-agent-view" : ""
-          }`}
-        >
+        <section className="main-panel">
           {accessibilityBlocked && !accessibilityBannerDismissed ? (
             <PermissionBanner
               onDismiss={() => setAccessibilityBannerDismissed(true)}
@@ -315,21 +259,6 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
             ) : null}
           </AnimatePresence>
         </section>
-        {noteChatVisible && selectedNote ? (
-          <NoteChatPanel
-            note={{ id: selectedNote.id, title: selectedNote.title }}
-            chat={noteChat}
-            recordingActive={captureActive}
-            onClose={() => setNoteChatOpen(false)}
-            onOpenInAgent={(sessionId) => {
-              setNoteChatOpen(false);
-              handleOpenNoteChatInAgent(
-                { id: selectedNote.id, title: selectedNote.title },
-                sessionId,
-              );
-            }}
-          />
-        ) : null}
         <ConfirmDialog
           open={confirmDeleteNote && !!selectedNote}
           onClose={() => setConfirmDeleteNote(false)}
@@ -392,30 +321,10 @@ export function renderAppLayout(dependencies: RenderAppLayoutDependencies) {
         }
         onMoved={() => notesListRef.current?.resetSelection()}
       />
-      <MoveSessionToProjectDialog
-        open={moveDialogSessionIds !== null}
-        onClose={() => setMoveDialogSessionIds(null)}
-        sessions={
-          moveDialogSessionIds
-            ? moveDialogSessionIds
-                .map((id) => agentSessions.find((s) => s.id === id))
-                .filter((session): session is AgentSessionDto => session !== undefined)
-            : []
-        }
-        sessionFolderIds={sessionFolders}
-        folders={state.folders}
-        onSetFolder={(sessionId, folderId) =>
-          handleSetSessionFolder(sessionId, folderId, { rethrow: true })
-        }
-        onCreateFolder={(name) => handleCreateFolder(name)}
-        onRemoveFolder={(sessionId, folderId) =>
-          handleRemoveSessionFromFolder(sessionId, folderId, { rethrow: true })
-        }
-        onMoved={() => agentSessionsListRef.current?.resetSelection()}
-      />
-      {/* Connector action approvals (approval trust mode) can arrive from a
-            routine or chat in any view, so the tray is mounted at the shell. */}
       <div className="shell-approvals-stack">
+        {sidebarCollapsed ? (
+          <McpApprovalIndicator floating onOpen={() => openSettings("mcp")} />
+        ) : null}
         <BrowserSessionsTray />
         <ComputerUseApprovalsTray />
         <ConnectorApprovalsTray />

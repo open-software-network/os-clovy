@@ -10,12 +10,13 @@ import {
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Switch } from "../ui/Switch";
 import { RuntimeLogo } from "../brand/RuntimeLogo";
+import { McpExternalApprovals } from "./McpExternalApprovals";
 
 type SnippetId = "claudeCodeCommand" | "claudeCodeConfig" | "cursorConfig";
 
 const COPIED_RESET_MS = 1600;
 
-/** Settings, Agent: the Clovy MCP server switch and the configuration to
+/** MCP settings: the Clovy server switch, external approvals and configuration to
  * paste into MCP clients. Hidden where the server is unsupported. */
 export function McpServerSection() {
   const t = useT();
@@ -74,80 +75,87 @@ export function McpServerSection() {
   );
 
   return (
-    <section className="settings-group" aria-labelledby="mcp-server-heading">
-      <h2 id="mcp-server-heading" className="settings-group-heading">
-        {t("mcpServer.heading")}
-      </h2>
-      <p className="settings-group-description">{t("mcpServer.description")}</p>
-      <div className="settings-card">
-        <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h3 className="settings-row-title">{t("mcpServer.toggleTitle")}</h3>
-              <p className="settings-row-description">
-                {status.enabled && status.running
-                  ? t("mcpServer.running")
-                  : t("mcpServer.toggleDescription")}
-              </p>
+    <>
+      {status.enabled ? <McpExternalApprovals /> : null}
+      <section className="settings-group" aria-labelledby="mcp-server-heading">
+        <h2 id="mcp-server-heading" className="settings-group-heading">
+          {t("mcpServer.heading")}
+        </h2>
+        <p className="settings-group-description">{t("mcpServer.description")}</p>
+        <div className="settings-card">
+          <div className="settings-rows">
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">{t("mcpServer.toggleTitle")}</h3>
+                <p className="settings-row-description">
+                  {status.enabled && status.running
+                    ? t("mcpServer.running")
+                    : t("mcpServer.toggleDescription")}
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={status.enabled}
+                  disabled={saving}
+                  onCheckedChange={(enabled) => void changeEnabled(enabled)}
+                  aria-label={t("mcpServer.toggleAria")}
+                />
+              </div>
             </div>
-            <div className="settings-row-control">
-              <Switch
-                checked={status.enabled}
-                disabled={saving}
-                onCheckedChange={(enabled) => void changeEnabled(enabled)}
-                aria-label={t("mcpServer.toggleAria")}
-              />
-            </div>
+            {status.enabled ? (
+              <>
+                <div className="settings-row settings-mcp-client">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title settings-row-title-with-mark">
+                      <RuntimeLogo id="claude" size={16} decorative />
+                      {t("mcpServer.claudeCode.title")}
+                    </h3>
+                    <p className="settings-row-description">
+                      {t("mcpServer.claudeCode.description")}
+                    </p>
+                    {snippet(
+                      "claudeCodeCommand",
+                      status.claudeCodeCommand,
+                      "mcpServer.copyCommand",
+                    )}
+                    {snippet(
+                      "claudeCodeConfig",
+                      status.claudeCodeConfig,
+                      "mcpServer.copyClaudeCodeConfig",
+                    )}
+                  </div>
+                </div>
+                <div className="settings-row settings-mcp-client">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title settings-row-title-with-mark">
+                      <RuntimeLogo id="cursor" size={16} decorative />
+                      {t("mcpServer.cursor.title")}
+                    </h3>
+                    <p className="settings-row-description">{t("mcpServer.cursor.description")}</p>
+                    {snippet("cursorConfig", status.cursorConfig, "mcpServer.copyCursorConfig")}
+                  </div>
+                </div>
+              </>
+            ) : null}
           </div>
-          {status.enabled ? (
-            <>
-              <div className="settings-row settings-mcp-client">
-                <div className="settings-row-info">
-                  <h3 className="settings-row-title settings-row-title-with-mark">
-                    <RuntimeLogo id="claude" size={16} decorative />
-                    {t("mcpServer.claudeCode.title")}
-                  </h3>
-                  <p className="settings-row-description">
-                    {t("mcpServer.claudeCode.description")}
-                  </p>
-                  {snippet("claudeCodeCommand", status.claudeCodeCommand, "mcpServer.copyCommand")}
-                  {snippet(
-                    "claudeCodeConfig",
-                    status.claudeCodeConfig,
-                    "mcpServer.copyClaudeCodeConfig",
-                  )}
-                </div>
-              </div>
-              <div className="settings-row settings-mcp-client">
-                <div className="settings-row-info">
-                  <h3 className="settings-row-title settings-row-title-with-mark">
-                    <RuntimeLogo id="cursor" size={16} decorative />
-                    {t("mcpServer.cursor.title")}
-                  </h3>
-                  <p className="settings-row-description">{t("mcpServer.cursor.description")}</p>
-                  {snippet("cursorConfig", status.cursorConfig, "mcpServer.copyCursorConfig")}
-                </div>
-              </div>
-            </>
-          ) : null}
         </div>
-      </div>
-      {status.enabled && !status.binaryFound ? (
-        <p className="settings-row-error" role="alert">
-          {t("mcpServer.binaryMissing")}
-        </p>
-      ) : null}
-      {status.error ? (
-        <p className="settings-row-error" role="alert">
-          {t("mcpServer.startError", { message: status.error })}
-        </p>
-      ) : null}
-      {error ? (
-        <p className="settings-row-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-    </section>
+        {status.enabled && !status.binaryFound ? (
+          <p className="settings-row-error" role="alert">
+            {t("mcpServer.binaryMissing")}
+          </p>
+        ) : null}
+        {status.error ? (
+          <p className="settings-row-error" role="alert">
+            {t("mcpServer.startError", { message: status.error })}
+          </p>
+        ) : null}
+        {error ? (
+          <p className="settings-row-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </section>
+    </>
   );
 }
 

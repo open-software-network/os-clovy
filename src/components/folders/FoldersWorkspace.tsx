@@ -1,6 +1,4 @@
 import { IconCheckmark2 } from "central-icons-filled/IconCheckmark2";
-import { IconBubble3 } from "central-icons/IconBubble3";
-import { IconBubbleAnnotation3 } from "central-icons/IconBubbleAnnotation3";
 import { IconCodeAssistant } from "central-icons/IconCodeAssistant";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -38,7 +36,6 @@ import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { EmptyState } from "../ui/EmptyState";
 import { AddNotesToFolderDialog } from "./AddNotesToFolderDialog";
-import { AddSessionsToProjectDialog } from "./AddSessionsToProjectDialog";
 import { CreateFolderDialog } from "./CreateFolderDialog";
 import { EditFolderDialog } from "./EditFolderDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
@@ -53,9 +50,7 @@ type FoldersWorkspaceProps = {
   folders: FolderDto[];
   notes: NoteListItemDto[];
   /** Agent sessions that can be filed into projects alongside notes. */
-  sessions: AgentSessionDto[];
   /** sessionId -> project (folder) ids the session is filed under. */
-  sessionFolderIds: Record<string, string[]>;
   selectedFolderId?: string;
   folderBackTarget?: {
     label: string;
@@ -68,17 +63,11 @@ type FoldersWorkspaceProps = {
   onFolderUpdated: (folder: FolderDto) => void;
   onDeleteFolder: (folderId: string, deleteNotes: boolean) => Promise<unknown> | void;
   onCreateNote: (folderId?: string) => void;
-  /** Start a fresh agent session that gets filed into this project. */
-  onCreateSession: (folderId: string) => void;
   onSelectNote: (noteId: string) => void;
   onAssignNoteToFolder: (noteId: string, folderId: string) => Promise<unknown>;
   onRemoveNoteFromFolder: (noteId: string, folderId: string) => void;
   onOpenMoveDialog: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
-  onSelectSession: (session: AgentSessionDto) => void;
-  onAssignSessionToFolder: (sessionId: string, folderId: string) => Promise<unknown>;
-  onRemoveSessionFromFolder: (sessionId: string, folderId: string) => void;
-  onOpenSessionMoveDialog: (sessionId: string) => void;
   /** Open the full Memory manager (Settings > Memory) filtered to a project. */
   onManageProjectMemory: (folderId: string) => void;
 };
@@ -130,8 +119,6 @@ const SORT_OPTIONS: { value: SortKey; readonly label: string }[] = [
 function FolderList({
   folders: allFolders,
   notes,
-  sessions,
-  sessionFolderIds,
   onSelectFolder,
   onCreateFolder,
   onFoldersImported,
@@ -195,10 +182,7 @@ function FolderList({
       }
     });
   }, [folders, normalizedQuery, sort]);
-  const folderItems = useMemo(
-    () => buildFolderItemIndex(notes, sessions, sessionFolderIds),
-    [notes, sessions, sessionFolderIds],
-  );
+  const folderItems = useMemo(() => buildFolderItemIndex(notes, [], {}), [notes]);
 
   const content: ReactNode =
     sortedAndFiltered.length > 0 ? (
@@ -208,7 +192,6 @@ function FolderList({
             key={folder.id}
             folder={folder}
             notes={folderItems.notesByFolderId.get(folder.id) ?? NO_FOLDER_NOTES}
-            sessions={folderItems.sessionsByFolderId.get(folder.id) ?? NO_FOLDER_SESSIONS}
             menuOpen={menu?.folderId === folder.id}
             onOpen={() => onSelectFolder(folder.id)}
             onDropNote={(noteId) => {
@@ -411,7 +394,6 @@ type MenuState = { folderId: string; right: number; top: number };
 function FolderCard({
   folder,
   notes,
-  sessions,
   menuOpen,
   onOpen,
   onOpenMenu,
@@ -419,7 +401,6 @@ function FolderCard({
 }: {
   folder: FolderDto;
   notes: readonly NoteListItemDto[];
-  sessions: readonly AgentSessionDto[];
   menuOpen: boolean;
   onOpen: () => void;
   onOpenMenu: (anchor: HTMLElement) => void;
@@ -519,17 +500,6 @@ function FolderCard({
             </span>
             {t("notes.projects.noteCount", { count: notes.length })}
           </span>
-          {sessions.length > 0 ? (
-            <>
-              <span className="metadata-dot" aria-hidden />
-              <span className="folder-card-footer-item">
-                <span className="folder-card-footer-icon" aria-hidden>
-                  <IconBubble3 size={11} />
-                </span>
-                {t("notes.projects.sessionCount", { count: sessions.length })}
-              </span>
-            </>
-          ) : null}
           <span className="metadata-dot" aria-hidden />
           <span>{t("notes.projects.updated", { when: formatRelative(lastUpdated) })}</span>
         </p>
@@ -613,23 +583,16 @@ function FolderDetail({
   folderBackTarget,
   folders,
   notes,
-  sessions,
-  sessionFolderIds,
   onSelectFolder,
   onRenameFolder,
   onFolderUpdated,
   onDeleteFolder,
   onCreateNote,
-  onCreateSession,
   onSelectNote,
   onAssignNoteToFolder,
   onRemoveNoteFromFolder,
   onOpenMoveDialog,
   onDeleteNote,
-  onSelectSession,
-  onAssignSessionToFolder,
-  onRemoveSessionFromFolder,
-  onOpenSessionMoveDialog,
   onManageProjectMemory,
 }: FoldersWorkspaceProps & { folder: FolderDto }) {
   const t = useT();
@@ -637,7 +600,6 @@ function FolderDetail({
   const [titleDraft, setTitleDraft] = useState(folder.name);
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [addSessionsOpen, setAddSessionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const titleRef = useRef<HTMLInputElement | null>(null);
@@ -681,20 +643,6 @@ function FolderDetail({
             .filter((note) => note.folderIds.includes(folder.id))
             .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     [notes, folder.id, forcedEmpty],
-  );
-
-  const folderSessions = useMemo(
-    () =>
-      forcedEmpty
-        ? []
-        : sessions
-            .filter((session) => (sessionFolderIds[session.id] ?? []).includes(folder.id))
-            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-    [sessions, sessionFolderIds, folder.id, forcedEmpty],
-  );
-
-  const hasSessionsElsewhere = sessions.some(
-    (session) => !(sessionFolderIds[session.id] ?? []).includes(folder.id),
   );
 
   const lastUpdated = folderNotes[0]?.updatedAt ?? folder.updatedAt;
@@ -750,12 +698,9 @@ function FolderDetail({
       <div className="folder-detail-content">
         <header className="folder-detail-header">
           <FolderAddMenu
-            onCreateSession={() => onCreateSession(folder.id)}
             onCreateNote={() => onCreateNote(folder.id)}
             onAddExisting={() => setAddOpen(true)}
-            onAddSessions={() => setAddSessionsOpen(true)}
             hasNotesElsewhere={notes.some((note) => !note.folderIds.includes(folder.id))}
-            hasSessionsElsewhere={hasSessionsElsewhere}
           />
           {editingTitle ? (
             <form
@@ -810,57 +755,27 @@ function FolderDetail({
               <IconNoteText size={12} />
             </span>
             {t("notes.projects.noteCount", { count: folderNotes.length })}
-            {folderSessions.length > 0 ? (
-              <>
-                <span className="metadata-dot" aria-hidden />
-                <span className="folder-detail-meta-pill" aria-hidden>
-                  <IconBubble3 size={12} />
-                </span>
-                {t("notes.projects.sessionCount", { count: folderSessions.length })}
-              </>
-            ) : null}
             <span className="metadata-dot" aria-hidden />
             {t("notes.projects.updated", { when: formatDate(lastUpdated) })}
           </p>
         </header>
 
-        {folderNotes.length > 0 || folderSessions.length > 0 ? (
+        {folderNotes.length > 0 ? (
           <>
-            {/* Agents lead the project; the add menu lives up in the
-                header, so the section rows are plain headings. */}
-            {folderSessions.length > 0 ? (
-              <>
-                <div className="folder-actions-row">
-                  <h2 className="folder-notes-title">{t("notes.projects.sessions")}</h2>
-                </div>
-                <FolderSessionList
-                  folder={folder}
-                  sessions={folderSessions}
-                  onSelectSession={onSelectSession}
-                  onOpenSessionMoveDialog={onOpenSessionMoveDialog}
-                  onRemoveSessionFromFolder={onRemoveSessionFromFolder}
-                />
-              </>
-            ) : null}
-            {folderNotes.length > 0 ? (
-              <>
-                <div className="folder-actions-row">
-                  <h2 className="folder-notes-title">{t("notes.list.title")}</h2>
-                </div>
-                <FolderNoteList
-                  folder={folder}
-                  notes={folderNotes}
-                  onSelectNote={onSelectNote}
-                  onOpenMoveDialog={onOpenMoveDialog}
-                  onRemoveNoteFromFolder={onRemoveNoteFromFolder}
-                  onDeleteNote={onDeleteNote}
-                />
-              </>
-            ) : null}
+            <div className="folder-actions-row">
+              <h2 className="folder-notes-title">{t("notes.list.title")}</h2>
+            </div>
+            <FolderNoteList
+              folder={folder}
+              notes={folderNotes}
+              onSelectNote={onSelectNote}
+              onOpenMoveDialog={onOpenMoveDialog}
+              onRemoveNoteFromFolder={onRemoveNoteFromFolder}
+              onDeleteNote={onDeleteNote}
+            />
           </>
         ) : (
           <FolderEmptyState
-            onCreateSession={() => onCreateSession(folder.id)}
             onCreateNote={() => onCreateNote(folder.id)}
             onOpenSettings={() => setSettingsOpen(true)}
           />
@@ -907,16 +822,6 @@ function FolderDetail({
         notes={notes}
         onAdd={async (noteId) => {
           await onAssignNoteToFolder(noteId, folder.id);
-        }}
-      />
-      <AddSessionsToProjectDialog
-        open={addSessionsOpen}
-        onClose={() => setAddSessionsOpen(false)}
-        folder={folder}
-        sessions={sessions}
-        sessionFolderIds={sessionFolderIds}
-        onAdd={async (sessionId) => {
-          await onAssignSessionToFolder(sessionId, folder.id);
         }}
       />
       <ConfirmDialog
@@ -973,158 +878,16 @@ function FolderNoteList({
   );
 }
 
-function FolderSessionList({
-  folder,
-  sessions,
-  onSelectSession,
-  onOpenSessionMoveDialog,
-  onRemoveSessionFromFolder,
-}: {
-  folder: FolderDto;
-  sessions: readonly AgentSessionDto[];
-  onSelectSession: (session: AgentSessionDto) => void;
-  onOpenSessionMoveDialog: (sessionId: string) => void;
-  onRemoveSessionFromFolder: (sessionId: string, folderId: string) => void;
-}) {
-  return (
-    <ul className="folder-notes" role="list">
-      {sessions.map((session) => (
-        <FolderSessionRow
-          key={session.id}
-          session={session}
-          onSelect={() => onSelectSession(session)}
-          onOpenMove={() => onOpenSessionMoveDialog(session.id)}
-          onRemoveFromFolder={() => onRemoveSessionFromFolder(session.id, folder.id)}
-        />
-      ))}
-    </ul>
-  );
-}
-
-function FolderSessionRow({
-  session,
-  onSelect,
-  onOpenMove,
-  onRemoveFromFolder,
-}: {
-  session: AgentSessionDto;
-  onSelect: () => void;
-  onOpenMove: () => void;
-  onRemoveFromFolder: () => void;
-}) {
-  const t = useT();
-  const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
-  const title = session.title.trim() || t("chat.session.untitled");
-
-  useEffect(() => {
-    if (!menu) return;
-    function close() {
-      setMenu(null);
-    }
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") close();
-    }
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
-
-  return (
-    <li>
-      <div className="folder-note-row" data-has-actions="true" data-menu-open={menu !== null}>
-        <button type="button" className="folder-note-main" onClick={onSelect}>
-          <span className="folder-note-icon" aria-hidden>
-            <IconBubble3 size={15} />
-          </span>
-          <span className="folder-note-body">
-            <span className="folder-note-title">{title}</span>
-            <span className="folder-note-subtitle">
-              {session.source === "legacy_routine"
-                ? t("notes.add.sessions.importedRoutine")
-                : t("notes.add.sessions.conversation")}
-            </span>
-          </span>
-        </button>
-        <span className="folder-note-time">{formatNoteTime(session.updatedAt)}</span>
-        <span className="folder-note-actions">
-          <button
-            type="button"
-            className="folder-note-menu"
-            aria-label={t("notes.list.actionsFor", { title })}
-            aria-haspopup="menu"
-            aria-expanded={menu !== null}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (menu) {
-                setMenu(null);
-                return;
-              }
-              const rect = event.currentTarget.getBoundingClientRect();
-              setMenu({
-                right: window.innerWidth - rect.right,
-                top: rect.bottom + 4,
-              });
-            }}
-          >
-            <IconDotGrid1x3Horizontal size={13} />
-          </button>
-        </span>
-        {menu ? (
-          <div
-            className="context-menu"
-            style={{ right: menu.right, top: menu.top }}
-            role="menu"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenu(null);
-                onOpenMove();
-              }}
-            >
-              <IconMoveFolder size={14} />
-              {t("notes.projects.changeProject")}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenu(null);
-                onRemoveFromFolder();
-              }}
-            >
-              <IconFolderDelete size={14} />
-              {t("notes.projects.removeFromProject")}
-            </button>
-          </div>
-        ) : null}
-      </div>
-    </li>
-  );
-}
-
 /** Single "+" up in the project header — one menu for everything that can
- * land in the project, mirroring the sidebar's new-session entry point. */
+ * land in the project. */
 function FolderAddMenu({
-  onCreateSession,
   onCreateNote,
   onAddExisting,
-  onAddSessions,
   hasNotesElsewhere,
-  hasSessionsElsewhere,
 }: {
-  onCreateSession: () => void;
   onCreateNote: () => void;
   onAddExisting: () => void;
-  onAddSessions: () => void;
   hasNotesElsewhere: boolean;
-  hasSessionsElsewhere: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -1171,40 +934,13 @@ function FolderAddMenu({
             role="menuitem"
             onClick={() => {
               setOpen(false);
-              onCreateSession();
-            }}
-          >
-            <IconBubble3 size={14} />
-            {t("notes.projects.newSession")}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
               onCreateNote();
             }}
           >
             <IconNoteText size={14} />
             {t("notes.projects.newMeetingNote")}
           </button>
-          {hasNotesElsewhere || hasSessionsElsewhere ? (
-            <div className="context-menu-separator" role="separator" />
-          ) : null}
-          {/* Session first, note second — matching the New items above. */}
-          {hasSessionsElsewhere ? (
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onAddSessions();
-              }}
-            >
-              <IconBubbleAnnotation3 size={14} />
-              {t("notes.projects.addExistingSession")}
-            </button>
-          ) : null}
+          {hasNotesElsewhere ? <div className="context-menu-separator" role="separator" /> : null}
           {hasNotesElsewhere ? (
             <button
               type="button"
@@ -1365,11 +1101,9 @@ function FolderNoteRow({
 }
 
 function FolderEmptyState({
-  onCreateSession,
   onCreateNote,
   onOpenSettings,
 }: {
-  onCreateSession: () => void;
   onCreateNote: () => void;
   onOpenSettings: () => void;
 }) {
@@ -1384,10 +1118,6 @@ function FolderEmptyState({
       action={
         <>
           <div className="folder-empty-cta">
-            <button type="button" className="primary-action" onClick={onCreateSession}>
-              <IconBubble3 size={13} />
-              {t("notes.projects.newSession")}
-            </button>
             <button type="button" className="primary-action primary-solid" onClick={onCreateNote}>
               <IconPlusMedium size={13} />
               {t("notes.projects.newMeetingNote")}

@@ -9,6 +9,7 @@ export type SettingsTab =
   | "audio"
   | "models"
   | "agent"
+  | "mcp"
   | "memory"
   | "connectors"
   | "about";
@@ -21,6 +22,7 @@ const SETTINGS_TAB_LABEL_KEYS: Record<SettingsTab, MessageKey> = {
   audio: "settings.tabs.audio",
   models: "settings.tabs.models",
   agent: "settings.tabs.agent",
+  mcp: "mcpServer.tab",
   memory: "settings.tabs.memory",
   connectors: "settings.tabs.connectors",
   about: "settings.tabs.about",
@@ -46,11 +48,14 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   settingsTab("audio"),
   settingsTab("models"),
   settingsTab("agent"),
+  settingsTab("mcp"),
   settingsTab("memory"),
   settingsTab("connectors"),
   settingsTab("about"),
 ];
 
 export function settingsTabsForPlatform(activitySupported: boolean) {
-  return SETTINGS_TABS.filter((tab) => activitySupported || tab.id !== "activity");
+  return SETTINGS_TABS.filter(
+    (tab) => activitySupported || (tab.id !== "activity" && tab.id !== "mcp"),
+  );
 }

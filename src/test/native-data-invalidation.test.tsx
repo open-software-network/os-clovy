@@ -102,24 +102,12 @@ function actionDependencies(
   overrides: Partial<CreateAppDomainActionsDependencies>,
 ): CreateAppDomainActionsDependencies {
   return {
-    agentSessions: [],
-    completedSessions: {},
     dispatch: vi.fn(),
     noteSaveController: new NoteSaveController({
       persist: async (id, patch) => ({ ...note("original"), id, ...patch }),
     }),
-    pendingSessionProjectRef: { current: null },
-    sessionCompletionTouchedRef: { current: new Set() },
-    sessionCompletionWritesRef: { current: new Map() },
-    sessionFolders: {},
-    sessionFolderEditsRef: { current: new Map() },
     folderChangesRef: { current: { notes: new Map(), deletedProjects: new Map() } },
-    setActiveAgentSession: vi.fn(),
-    setActiveView: vi.fn(),
-    setAgentOrigin: vi.fn(),
-    setCompletedSessions: vi.fn(),
     setError: vi.fn(),
-    setSessionFolders: vi.fn(),
     state: createInitialState(),
     ...overrides,
   };
@@ -217,47 +205,6 @@ describe("native mutation invalidation", () => {
     expect(row.title).toBe(contentPending ? "local title" : "native title");
     expect(row.preview).toBe(contentPending ? "old title" : "native preview");
     expect(row.processingStatus).toBe(contentPending ? "ready" : "failed");
-  });
-  it("deleting a project does not resurrect another project's removed association or a pending deleted-project member", async () => {
-    const pending = deferred<Array<{ sessionId: string; folderId: string }>>();
-    mocks.listSessionFolders.mockReturnValueOnce(pending.promise);
-    const { result } = renderHook(() => {
-      const [folders, setFolders] = useState<Record<string, string[]>>({ a: ["x"] });
-      const edits = useRef(new Map<string, number>());
-      const touched = useRef(new Set<string>());
-      const folderChangesRef = useRef({
-        notes: new Map<string, number>(),
-        deletedProjects: new Map<string, number>(),
-      });
-      useSessionMetadata({
-        appBlocked: false,
-        bootstrapped: false,
-        currentDataPartitionName: "default",
-        sessionFolderEditsRef: edits,
-        folderChangesRef,
-        sessionCompletionTouchedRef: touched,
-        setCompletedSessions: () => {},
-        setSessionFolders: setFolders,
-        setError: () => {},
-      });
-      const actions = createAppDomainActions(
-        actionDependencies({
-          sessionFolders: folders,
-          sessionFolderEditsRef: edits,
-          folderChangesRef,
-          setSessionFolders: setFolders,
-        }),
-      );
-      return { folders, setFolders, actions };
-    });
-    await emit({ profile: "default", kind: "projects" });
-    await waitFor(() => expect(mocks.listSessionFolders).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      result.current.setFolders((current) => ({ ...current, late: ["p"] }));
-      await result.current.actions.handleDeleteFolder("p");
-    });
-    await act(async () => pending.resolve([{ sessionId: "late", folderId: "p" }]));
-    await waitFor(() => expect(result.current.folders).toEqual({}));
   });
 
   it.each([

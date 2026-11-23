@@ -1,5 +1,9 @@
 # Home conversation
 
+> Registro histórico. A interface Início foi retirada em
+> [ADR-0075](adr/0075-desktop-opens-today-and-approves-external-mcp-actions.md).
+> Hoje recebe a navegação antiga. Os dados descritos abaixo permanecem gravados.
+
 Home is Clovy's persistent conversation on the home screen. Since
 [ADR-0064](adr/0064-home-runs-on-the-default-cli-engine.md) every Home message
 is a turn of the default CLI engine, in a hidden session, without a remote chat route.

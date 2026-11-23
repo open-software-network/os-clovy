@@ -154,9 +154,6 @@ describe("Sidebar primary navigation", () => {
         activeView="notes"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
       />,
     );
 
@@ -165,22 +162,11 @@ describe("Sidebar primary navigation", () => {
     expect(onChangeView).toHaveBeenCalledWith("notes");
     await user.click(screen.getByRole("button", { name: "Projects" }));
     expect(onChangeView).toHaveBeenCalledWith("folders");
-    // Hover-revealed view-all next to the Agent section title.
-    await user.click(screen.getByRole("button", { name: "View all" }));
-    expect(onChangeView).toHaveBeenCalledWith("agent-sessions");
   });
 
   it("opens the command prompt with Command-K", async () => {
     render(
-      <Sidebar
-        notes={notes}
-        activeView="notes"
-        onChangeView={vi.fn()}
-        onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
-      />,
+      <Sidebar notes={notes} activeView="notes" onChangeView={vi.fn()} onSelectNote={vi.fn()} />,
     );
 
     expect(screen.getByText("⌘K")).toBeInTheDocument();
@@ -191,12 +177,12 @@ describe("Sidebar primary navigation", () => {
     const search = within(prompt).getByRole("textbox", { name: "Search" });
     await waitFor(() => expect(search).toHaveFocus());
     expect(
-      within(prompt).getByPlaceholderText("Search meeting notes, sessions, or jump to..."),
+      within(prompt).getByPlaceholderText("Search meeting notes or jump to..."),
     ).toBeInTheDocument();
     expect(within(prompt).getByText("Recents")).toBeInTheDocument();
     expect(within(prompt).getByText("Roadmap")).toBeInTheDocument();
     expect(within(prompt).getByText("Quick actions")).toBeInTheDocument();
-    expect(within(prompt).getByText("New session")).toBeInTheDocument();
+    expect(within(prompt).queryByText("New session")).not.toBeInTheDocument();
 
     fireEvent.keyDown(search, { key: "Escape" });
 
@@ -211,9 +197,6 @@ describe("Sidebar primary navigation", () => {
         collapsed
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
       />,
     );
 
@@ -233,15 +216,7 @@ describe("Sidebar primary navigation", () => {
 
   it("closes the command prompt on Escape even when a result row is focused", async () => {
     render(
-      <Sidebar
-        notes={notes}
-        activeView="notes"
-        onChangeView={vi.fn()}
-        onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
-      />,
+      <Sidebar notes={notes} activeView="notes" onChangeView={vi.fn()} onSelectNote={vi.fn()} />,
     );
 
     fireEvent.keyDown(window, { key: "k", metaKey: true });
@@ -265,15 +240,7 @@ describe("Sidebar primary navigation", () => {
     );
     try {
       render(
-        <Sidebar
-          notes={notes}
-          activeView="notes"
-          onChangeView={vi.fn()}
-          onSelectNote={vi.fn()}
-          onNewAgentSession={vi.fn()}
-          onRenameAgentSession={vi.fn()}
-          onSelectAgentSession={vi.fn()}
-        />,
+        <Sidebar notes={notes} activeView="notes" onChangeView={vi.fn()} onSelectNote={vi.fn()} />,
       );
 
       expect(screen.getByText("Ctrl K")).toBeInTheDocument();
@@ -291,15 +258,7 @@ describe("Sidebar primary navigation", () => {
   it("opens the command prompt when clicking the sidebar search", async () => {
     const user = userEvent.setup();
     render(
-      <Sidebar
-        notes={notes}
-        activeView="notes"
-        onChangeView={vi.fn()}
-        onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
-      />,
+      <Sidebar notes={notes} activeView="notes" onChangeView={vi.fn()} onSelectNote={vi.fn()} />,
     );
 
     await user.click(screen.getByRole("searchbox", { name: "Search" }));
@@ -319,9 +278,6 @@ describe("Sidebar primary navigation", () => {
         activeView="notes"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
       />,
     );
 
@@ -342,9 +298,6 @@ describe("Sidebar primary navigation", () => {
         activeView="notes"
         onChangeView={onChangeView}
         onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
       />,
     );
 
@@ -365,9 +318,6 @@ describe("Sidebar primary navigation", () => {
         onExitSettings={onExitSettings}
         onChangeView={vi.fn()}
         onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
       />,
     );
 
@@ -595,14 +545,10 @@ describe("FoldersWorkspace — detail view", () => {
     expect(props.onCreateNote).toHaveBeenCalledWith("folder-1");
   });
 
-  it("starts a project session from the header add menu", async () => {
+  it("creates a project note from the header add menu", async () => {
     const user = userEvent.setup();
     const props = baseProps();
     render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
-
-    await user.click(screen.getByRole("button", { name: "Add to project" }));
-    await user.click(screen.getByRole("menuitem", { name: "New session" }));
-    expect(props.onCreateSession).toHaveBeenCalledWith("folder-2");
 
     await user.click(screen.getByRole("button", { name: "Add to project" }));
     await user.click(screen.getByRole("menuitem", { name: "New meeting note" }));

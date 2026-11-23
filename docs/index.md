@@ -85,6 +85,7 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0072](adr/0072-cli-chat-replaces-the-native-agent.md) - removes the native agent and endpoint chat engines; CLI turns use Clovy MCP tools and the local approval broker, while neutral session persistence preserves history
 - [adr/0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md) - remove the inference server and local token; direct user-key providers, independent text catalog, fal queue recovery, and no sharing/funding service
 - [adr/0074](adr/0074-local-transcription-uses-a-pinned-offline-helper.md) - optional Parakeet Ultra engine, explicit pinned installation, offline helper and no provider fallback
+- [adr/0075](adr/0075-desktop-opens-today-and-approves-external-mcp-actions.md) - Hoje como entrada do desktop, histórico de Rotinas e autoridade por operação para clientes MCP externos
 - [Browser private host](adr/browser-private-agent-host.md) - pinned private browser, profile custody, coherent observation and anonymous crash recovery with physical leases and terminal records
 
 ## Enforceable rules (spec/)
@@ -120,7 +121,7 @@ Per-repo config the engineering skills read before acting (see the
 
 ## Subsystems
 
-- [home-assistant.md](home-assistant.md) - persistent Home conversation on the default CLI engine, its hidden session, and the legacy history import
+- [home-assistant.md](home-assistant.md) - registro histórico da interface Início, sua sessão oculta e a importação antiga
 - [companion-protocol.md](companion-protocol.md) - versioned encrypted application protocol of the companion crates (the desktop companion and relay are removed; protocol crates remain historical)
 - [browser-computer-use-prd.md](browser-computer-use-prd.md) — PRD: Browser use + Computer use plugins (JUN-278); extension in the user's browser + routines-only managed browser, phase-2 computer use
 - [release-extension.md](release-extension.md) - browser extension store identity and local packaging checks (no automated store publication)
@@ -151,7 +152,7 @@ Per-repo config the engineering skills read before acting (see the
 - [activity-capture.md](activity-capture.md) - activity capture: capture loop and privacy rules, the encrypted `activity.sqlite3` schema, processing cursor, retention, and the store API later slices use
 - [activity-timeline.md](activity-timeline.md) - activity timeline: incremental ETL from frames to sessions and gaps, categorizer, day stats, FTS5 search, the "Today" view and its lane extension point, the `search_activity` / `get_activity_timeline` agent tools, and the query API for later slices
 - [day-intelligence.md](day-intelligence.md) - day intelligence: local distillation with on-device embeddings, hour reports with measured minutes, workstream fold, day summary and standup, daily schedule with wake recovery, notifications and quiet hours, schema and the read API for the MCP server
-- [mcp-server.md](mcp-server.md) - Clovy MCP server: the `clovy-mcp` relay, socket and secret handshake, turn binding for CLI chat turns, the approval broker for write tools, the read tools every client gets and the turn-bound tools (memory, media, recorder, Browser use, Computer use, vault and skills, routines, connectors, MCP gateway, interaction) with their limits, `clovy://` resources, client configuration snippets, and the launch API for CLI chat engines
+- [mcp-server.md](mcp-server.md) - relay autenticado `clovy-mcp`, configuração de clientes, aprovações externas, ferramentas de leitura e de turno, recursos e limites
 - [agent-note-tools.md](agent-note-tools.md) - in-app agent note tools: `search_june` returns ids plus bounded excerpts, `get_note` / `get_dictation` page the full text in 256 KiB character-safe chunks; owns these tool names
 - [coding-agent-sessions.md](coding-agent-sessions.md) - coding-agent session ingestion: read-only readers for seven local agents, block cutting and lifecycle, summaries by the agent's own CLI or the activity provider, the `coding_agent_blocks` schema (activity migration 3) and its query API, the "Today" view lane
 - [i18n.md](i18n.md) - interface language: catalogs, `useT`/`t`, plurals and formatting, what is never translated, coverage inventory, adding a language

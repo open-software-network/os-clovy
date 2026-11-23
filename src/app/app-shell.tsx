@@ -1,6 +1,4 @@
-import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconCalendarClock } from "central-icons/IconCalendarClock";
-import { IconHomeOpen } from "central-icons/IconHomeOpen";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { IconProjects } from "central-icons/IconProjects";
@@ -9,20 +7,11 @@ import { IconZap } from "central-icons/IconZap";
 import type { ReactNode } from "react";
 import { t } from "../i18n";
 import type { FolderDto, NoteDto, NoteListItemDto } from "../lib/tauri";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
-import { navEquals, type TabNav } from "./tabs/tabs";
+import { normalizeTabNav } from "./tabs/tabs";
 export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const SIDEBAR_MIN_WIDTH = 188;
 export const SIDEBAR_MAX_WIDTH = 320;
 export const SIDEBAR_COLLAPSE_WIDTH = 160;
-export const AGENT_MENU_BAR_SESSION_FETCH_LIMIT = 100;
-export const AGENT_MENU_BAR_SESSION_LIMIT = 6;
-export const AGENT_SESSION_STARTUP_RETRY_DELAYS_MS = [
-  250, 500, 1000, 2000, 4000, 8000, 16000, 32000,
-];
-// Matches the Routines view's run-history cadence; a routine notification a
-// few seconds late is fine, hammering the bridge is not.
-export const ROUTINE_RUN_NOTIFY_POLL_MS = 15000;
 export const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 export const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
@@ -69,39 +58,14 @@ export type AgentRecorderRequestPayload = {
   recoveryAction?: unknown;
 };
 
-export function agentSessionTabTitle(session?: AgentSessionDto): string | undefined {
-  return session?.title.trim() || undefined;
-}
-
-export function refreshedTabNav(current: TabNav, live: TabNav): TabNav | undefined {
-  if (!navEquals(current, live)) return live;
-  if (current.view !== "agent" || live.view !== "agent") return undefined;
-
-  const liveTitle = live.agentSessionTitle?.trim();
-  if (!liveTitle || current.agentSessionTitle?.trim() === liveTitle) {
-    return undefined;
-  }
-
-  return { ...current, agentSessionTitle: liveTitle };
-}
-
-// The icon + label a tab shows for a snapshot. Titles for entity views (note,
-// project, agent session) are looked up live from the loaded data, so a tab's
-// label tracks renames. Agent tabs also carry a fallback title so a newly
-// created session is identifiable before the session list hydrates.
 export function tabMeta(
-  nav: TabNav,
+  snapshot: Parameters<typeof normalizeTabNav>[0],
   notes: NoteListItemDto[],
   folders: FolderDto[],
-  sessions: AgentSessionDto[],
   settingsSectionLabel?: string,
 ): { title: string; icon: ReactNode } {
+  const nav = normalizeTabNav(snapshot);
   switch (nav.view) {
-    case "home":
-      return {
-        title: t("app.nav.home"),
-        icon: <IconHomeOpen size={TAB_ICON_SIZE} />,
-      };
     case "meetings": {
       const note = nav.noteId ? notes.find((n) => n.id === nav.noteId) : undefined;
       return {
@@ -116,21 +80,6 @@ export function tabMeta(
         icon: <IconProjects size={TAB_ICON_SIZE} />,
       };
     }
-    case "agent": {
-      const session = nav.agentSessionId
-        ? sessions.find((s) => s.id === nav.agentSessionId)
-        : undefined;
-      return {
-        title:
-          agentSessionTabTitle(session) || nav.agentSessionTitle?.trim() || t("app.newSession"),
-        icon: <IconBubble3 size={TAB_ICON_SIZE} />,
-      };
-    }
-    case "agent-sessions":
-      return {
-        title: t("app.nav.sessions"),
-        icon: <IconBubble3 size={TAB_ICON_SIZE} />,
-      };
     case "all-notes":
       return {
         title: t("app.nav.allNotes"),

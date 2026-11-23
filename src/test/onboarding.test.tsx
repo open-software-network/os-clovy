@@ -1,7 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CLOVY_EYES_PATH } from "../components/brand/ClovyLogo";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   applyOnboardingReplayFlag,
@@ -10,7 +9,6 @@ import {
   markOnboardingComplete,
   ONBOARDING_COMPLETED_EVENT,
   onboardingArea,
-  onboardingMood,
   onboardingResumeStep,
   resetOnboardingForReplay,
   setOnboardingResumeStep,
@@ -154,9 +152,6 @@ describe("OnboardingFlow", () => {
     await screen.findByRole("heading", { name: "Where could I help most?" });
     await userEvent.click(screen.getByRole("radio", { name: /Work/ }));
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await userEvent.click(screen.getByRole("radio", { name: /Strategic/ }));
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Let Clovy listen and type" });
     return onComplete;
   }
@@ -171,11 +166,17 @@ describe("OnboardingFlow", () => {
   }
 
   it("prefers the Clovy demo-step query parameter", async () => {
-    window.history.replaceState({}, "", "/?clovyDemoStep=mood&juneDemoStep=permissions");
+    window.history.replaceState({}, "", "/?clovyDemoStep=area&juneDemoStep=permissions");
 
     render(<OnboardingFlow {...flowProps()} />);
 
-    expect(await screen.findByRole("heading", { name: "Choose my personality" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Where could I help most?" })).toBeVisible();
+  });
+
+  it("resumes a legacy personality step at permissions", async () => {
+    setOnboardingResumeStep("mood");
+    render(<OnboardingFlow {...flowProps()} />);
+    expect(await screen.findByRole("heading", { name: "Let Clovy listen and type" })).toBeVisible();
   });
 
   it("accepts the June-era demo-step query parameter as a fallback", async () => {
@@ -227,19 +228,11 @@ describe("OnboardingFlow", () => {
     await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 
     expect(onboardingArea()).toBe("work");
-    expect(onboardingMood()).toBe("strategic");
-    expect(mocks.setClovyPersona).toHaveBeenCalledWith({
-      area: "work",
-      voice: 45,
-      detail: 90,
-      initiative: 75,
-      humor: 20,
-    });
     // Completion is the caller's job (App marks it), not the flow's.
     expect(isOnboardingComplete()).toBe(false);
   });
 
-  it("asks where Clovy should help before choosing a personality", async () => {
+  it("asks where Clovy should help before requesting permissions", async () => {
     const user = userEvent.setup();
     setOnboardingResumeStep("area");
     render(<OnboardingFlow {...flowProps()} />);
@@ -253,73 +246,6 @@ describe("OnboardingFlow", () => {
     await user.click(continueButton);
 
     expect(onboardingArea()).toBe("thinking");
-    await screen.findByRole("heading", { name: "Choose my personality" });
-  });
-
-  it("saves the selected mood before continuing to permissions", async () => {
-    const user = userEvent.setup();
-    setOnboardingResumeStep("mood");
-    const { container } = render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    const continueButton = screen.getByRole("button", { name: "Continue" });
-    expect(continueButton).toBeEnabled();
-    expect(continueButton).toHaveClass("primary-action", "primary-solid", "onboarding-continue");
-    expect(screen.getByRole("radio", { name: /Clearheaded/ })).toBeChecked();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Clearheaded tone. What should we make clearer first?",
-    );
-
-    // One canonical character on the stage; the options stay text-only.
-    const stage = container.querySelector(".onboarding-personality-stage");
-    expect(container.querySelectorAll(".onboarding-character")).toHaveLength(1);
-    expect(stage).toContainElement(
-      screen.getByRole("group", { name: "Choose Clovy's greeting mood" }),
-    );
-    expect(container.querySelector(".onboarding-personality-check")).toBeNull();
-    expect(stage).toHaveAttribute("data-mood", "clearheaded");
-    expect(stage).toHaveTextContent("What should we make clearer first?");
-    expect(stage?.querySelector(".onboarding-character-eyes-clearheaded path")).toHaveAttribute(
-      "d",
-      CLOVY_EYES_PATH,
-    );
-
-    // Rapid changes retarget the same single stage character.
-    await user.click(screen.getByRole("radio", { name: /Calm/ }));
-    expect(stage?.querySelector(".onboarding-character-eyes-calm path")).toHaveAttribute(
-      "transform",
-      "translate(91.9873 126)",
-    );
-    expect(stage?.querySelector(".onboarding-character-eyes-calm path")?.getAttribute("d")).toMatch(
-      /^M15\.6397 0/,
-    );
-    await user.click(screen.getByRole("radio", { name: /Quick-witted/ }));
-    expect(container.querySelectorAll(".onboarding-character")).toHaveLength(1);
-    expect(stage).toHaveAttribute("data-mood", "quick-witted");
-    expect(stage?.querySelector(".onboarding-character-eyes-quick > g")).toHaveAttribute(
-      "transform",
-      "translate(94 109)",
-    );
-    expect(stage?.querySelectorAll(".onboarding-character-eyes-quick path")).toHaveLength(2);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Quick-witted tone. All right, what's first?",
-    );
-    expect(stage).toHaveTextContent("All right, what's first?");
-
-    await user.click(screen.getByRole("radio", { name: /Strategic/ }));
-    expect(stage?.querySelector(".onboarding-character-eyes-strategic > g")).toHaveAttribute(
-      "transform",
-      "translate(80.14 96.37) scale(0.78)",
-    );
-    expect(stage?.querySelectorAll(".onboarding-character-eyes-strategic path")).toHaveLength(4);
-    expect(stage?.querySelector(".onboarding-character-eyes-strategic > g > g")).toHaveAttribute(
-      "transform",
-      "translate(62 0) scale(0.86 1) translate(-62 0)",
-    );
-    await user.click(screen.getByRole("radio", { name: /Quick-witted/ }));
-    await user.click(continueButton);
-
-    expect(onboardingMood()).toBe("quick-witted");
     await screen.findByRole("heading", { name: "Let Clovy listen and type" });
   });
 

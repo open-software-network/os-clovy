@@ -29,18 +29,77 @@ pub type TurnHandler = Arc<
         + Sync,
 >;
 
-/// What a listener answers with: either handler kind.
-pub struct Service(pub(super) TurnHandler);
+/// Host-issued connection identity for authenticated clients without a turn.
+/// The installation secret authenticates the local peer, not its product name
+/// or process ancestry. No identity supplied through JSON-RPC is trusted.
+#[derive(Clone)]
+pub struct ExternalConnection {
+    id: uuid::Uuid,
+    closed: watch::Receiver<bool>,
+    cancelled: watch::Receiver<bool>,
+}
+
+impl ExternalConnection {
+    pub(crate) fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        !*self.closed.borrow() && self.closed.has_changed().is_ok() && !*self.cancelled.borrow()
+    }
+
+    pub(crate) async fn closed(&self) {
+        let mut closed = self.closed.clone();
+        let mut cancelled = self.cancelled.clone();
+        tokio::select! {
+            _ = closed.wait_for(|closed| *closed) => {}
+            _ = cancelled.wait_for(|cancelled| *cancelled) => {}
+        }
+    }
+}
+
+pub enum Connection {
+    Turn(Arc<TurnBinding>),
+    External(ExternalConnection),
+}
+
+pub type AuthenticatedHandler = Arc<
+    dyn Fn(Value, Connection) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync,
+>;
+
+/// The authenticated handler receives host authority from the handshake.
+/// Legacy handlers keep their read-only or turn-only transport contract.
+#[derive(Clone)]
+pub struct Service {
+    turn: TurnHandler,
+    external: Option<AuthenticatedHandler>,
+}
+
+impl From<AuthenticatedHandler> for Service {
+    fn from(handler: AuthenticatedHandler) -> Self {
+        let turn = Arc::clone(&handler);
+        Self {
+            turn: Arc::new(move |message, binding| match binding {
+                Some(binding) => turn(message, Connection::Turn(binding)),
+                None => Box::pin(async { None }),
+            }),
+            external: Some(handler),
+        }
+    }
+}
 
 impl From<TurnHandler> for Service {
     fn from(handler: TurnHandler) -> Self {
-        Self(handler)
+        Self {
+            turn: handler,
+            external: None,
+        }
     }
 }
 
 impl From<Handler> for Service {
     fn from(handler: Handler) -> Self {
-        Self(Arc::new(move |message, _turn| handler(message)))
+        Self::from(Arc::new(move |message, _turn| handler(message)) as TurnHandler)
     }
 }
 
@@ -76,7 +135,7 @@ pub(super) async fn serve<S>(
     handshake: OwnedSemaphorePermit,
     slots: Arc<Semaphore>,
     turns: TurnRegistry,
-    handler: TurnHandler,
+    service: Service,
     mut shutdown: watch::Receiver<bool>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -145,6 +204,13 @@ pub(super) async fn serve<S>(
         return;
     }
 
+    if binding.is_none() {
+        if let Some(handler) = service.external {
+            serve_external(reader, write, handler, shutdown).await;
+            return;
+        }
+    }
+    let handler = service.turn;
     let (responses, mut outbox) = mpsc::channel::<Value>(MAX_IN_FLIGHT_PER_CONNECTION);
     let writer = tokio::spawn(async move {
         while let Some(response) = outbox.recv().await {
@@ -261,6 +327,152 @@ pub(super) async fn serve<S>(
     calls.abort_all();
     while calls.join_next().await.is_some() {}
     drop(slot);
+}
+
+/// Keep reading cancellation and EOF when all call slots await approval.
+/// Otherwise a disconnected client with four pending calls could retain its
+/// write grants until the first tool returned.
+async fn serve_external<R, W>(
+    mut reader: R,
+    mut write: W,
+    handler: AuthenticatedHandler,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use crate::mcp_server::protocol as rpc;
+    use std::collections::HashMap;
+    use tokio::task::{AbortHandle, JoinSet};
+
+    let (close, closed) = watch::channel(false);
+    let connection_id = uuid::Uuid::new_v4();
+    let (responses, mut outbox) = mpsc::channel::<Value>(MAX_IN_FLIGHT_PER_CONNECTION);
+    let mut writer = tokio::spawn(async move {
+        while let Some(response) = outbox.recv().await {
+            if write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = write.shutdown().await;
+    });
+    let mut calls = JoinSet::new();
+    let mut active = HashMap::<String, (AbortHandle, watch::Sender<bool>)>::new();
+    let mut writer_finished = false;
+    loop {
+        while calls.try_join_next().is_some() {}
+        active.retain(|_, (handle, _)| !handle.is_finished());
+        if *shutdown.borrow() {
+            break;
+        }
+        let line = tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            _ = &mut writer => { writer_finished = true; break; }
+            line = read_line(&mut reader) => line,
+        };
+        let Ok(Some(line)) = line else { break };
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let message = match serde_json::from_slice::<Value>(&line) {
+            Ok(message) => message,
+            Err(error) => {
+                if responses
+                    .try_send(rpc::error_response(
+                        Value::Null,
+                        rpc::PARSE_ERROR,
+                        error.to_string(),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+        };
+        let incoming = rpc::classify(&message);
+        if matches!(incoming, rpc::Incoming::Notification)
+            && rpc::method(&message) == Some(RELAY_EOF)
+        {
+            break;
+        }
+        if matches!(incoming, rpc::Incoming::Notification)
+            && rpc::method(&message) == Some("notifications/cancelled")
+        {
+            if let Some(id) = message.pointer("/params/requestId") {
+                if let Some((_, cancel)) = active.get(&id.to_string()) {
+                    let _ = cancel.send(true);
+                }
+            }
+            continue;
+        }
+        let id = match incoming {
+            rpc::Incoming::Request { id, .. } => id,
+            rpc::Incoming::Invalid { id, reason } => {
+                if responses
+                    .try_send(rpc::error_response(id, rpc::INVALID_REQUEST, reason))
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            rpc::Incoming::Notification | rpc::Incoming::Response => continue,
+        };
+        let key = id.to_string();
+        if active.contains_key(&key) {
+            // Ambiguous request IDs would let one cancellation refer to two
+            // effects. Close the connection and revoke both instead.
+            break;
+        }
+        if active.len() >= MAX_IN_FLIGHT_PER_CONNECTION {
+            if responses
+                .try_send(rpc::error_response(
+                    id,
+                    rpc::SERVER_UNAVAILABLE,
+                    "Too many active Clovy MCP requests.",
+                ))
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
+        let (cancel, cancelled) = watch::channel(false);
+        let connection = ExternalConnection {
+            id: connection_id,
+            closed: closed.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let operation = handler(message, Connection::External(connection));
+        let responses = responses.clone();
+        let task = calls.spawn(async move {
+            if let Some(response) = operation.await {
+                if !*cancelled.borrow() {
+                    let _ = responses.send(response).await;
+                }
+            }
+        });
+        active.insert(key, (task, cancel));
+    }
+    let _ = close.send(true);
+    drop(responses);
+    if !writer_finished
+        && tokio::time::timeout(REVOKE_GRACE, &mut writer)
+            .await
+            .is_err()
+    {
+        writer.abort();
+        let _ = writer.await;
+    }
+    // Revoked tools check authority before committing. A transaction that
+    // already committed must still finish its local cleanup and emit events.
+    while calls.join_next().await.is_some() {}
 }
 
 /// Resolves when the connection's turn is revoked; never for an unbound

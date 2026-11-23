@@ -1,11 +1,10 @@
 //! Shared note/dictation reads and paging. The legacy agent keeps byte offsets;
 //! MCP pages use character offsets and apply the MCP dictation retention floor.
 use super::{ToolCtx, ToolGroup};
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest};
 use crate::db::repositories::dictation_history_cutoff_timestamp;
-use crate::db::repositories::Repositories;
+use crate::db::repositories::{mcp_note_delete_target, mcp_project_target, Repositories};
 use crate::domain::types::AppError;
-use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use sqlx::{query::query, row::Row};
@@ -58,42 +57,54 @@ impl ToolGroup for NoteTools {
         name: &'a str,
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
-        Box::pin(async move {
-            let binding = ctx.binding.ok_or_else(|| {
-                AppError::new(TURN_REQUIRED, "Dictation reads require a Clovy turn.")
-            })?;
-            // Recheck at dispatch: a routine's toolsets may have changed
-            // since its CLI received the catalog.
-            if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
-                return Err(AppError::new(
-                    "routine_tool_not_enabled",
-                    "This tool is not enabled for the routine.",
-                ));
-            }
-            if name != GET_DICTATION {
-                return note_operation(ctx, name, arguments).await;
-            }
-            let id = arguments
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| AppError::new("agent_tool_arguments_invalid", "id is required."))?;
-            let offset = character_offset(arguments, "textOffset")?;
-            let cutoff = dictation_history_cutoff_timestamp();
-            let row = read_dictation(&ctx.data.notes, &ctx.data.profile, id, Some(&cutoff)).await?;
-            let text: String = row.get("text");
-            let (page, total, next) = character_page(&text, offset, DICTATION_PAGE_CHARS);
-            Ok(
-                json!({"id":row.get::<String,_>("id"),"language":row.get::<Option<String>,_>("language"),"createdAt":row.get::<String,_>("created_at"),"text":page,"textOffset":offset,"textTotalChars":total,"nextTextOffset":next}),
-            )
-        })
+        Box::pin(call_note_tool(ctx, None, name, arguments))
     }
 }
 
-async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, AppError> {
-    let binding = ctx
-        .binding
-        .ok_or_else(|| AppError::new(TURN_REQUIRED, "A bound turn is required."))?;
+pub(super) async fn call_note_tool(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    ctx.revalidate_local(external).await?;
+    ensure_routine_allowed(ctx, name).await?;
+    if name != GET_DICTATION {
+        return note_operation(ctx, external, name, arguments).await;
+    }
+    let id = arguments
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AppError::new("agent_tool_arguments_invalid", "id is required."))?;
+    let offset = character_offset(arguments, "textOffset")?;
+    let cutoff = dictation_history_cutoff_timestamp();
+    let row = read_dictation(&ctx.data.notes, &ctx.data.profile, id, Some(&cutoff)).await?;
+    let text: String = row.get("text");
+    let (page, total, next) = character_page(&text, offset, DICTATION_PAGE_CHARS);
+    Ok(
+        json!({"id":row.get::<String,_>("id"),"language":row.get::<Option<String>,_>("language"),"createdAt":row.get::<String,_>("created_at"),"text":page,"textOffset":offset,"textTotalChars":total,"nextTextOffset":next}),
+    )
+}
+
+async fn ensure_routine_allowed(ctx: &ToolCtx<'_>, name: &str) -> Result<(), AppError> {
+    if let Some(binding) = ctx.binding {
+        if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
+            return Err(AppError::new(
+                "routine_tool_not_enabled",
+                "This tool is not enabled for the routine.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn note_operation(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
     let repos = Repositories::new(ctx.data.notes.clone());
     let object = args.as_object().ok_or_else(|| {
         AppError::new(
@@ -174,9 +185,28 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
                 .ok_or_else(|| AppError::new("agent_tool_arguments_invalid", "id is required."))?,
         )
     };
-    if let Some(id) = id {
-        read_note(&ctx.data.notes, &ctx.data.profile, id).await?;
-    }
+    let target = if let Some(id) = id {
+        if external.is_some() && name == "delete_note" {
+            let mut tx = ctx.data.notes.begin().await?;
+            let target = mcp_note_delete_target(&mut tx, &ctx.data.profile, id).await?;
+            tx.commit().await?;
+            Some(target)
+        } else {
+            let row = read_note(&ctx.data.notes, &ctx.data.profile, id).await?;
+            external.map(|_| {
+                json!({
+                    "id": id,
+                    "title": row.get::<String, _>("title"),
+                    "revision": row.get::<i64, _>("revision"),
+                    "updatedAt": row.get::<String, _>("updated_at"),
+                })
+            })
+        }
+    } else if let (Some(_), Some(project)) = (external, project) {
+        Some(mcp_project_target(&ctx.data.notes, &ctx.data.profile, project).await?)
+    } else {
+        None
+    };
     let revision = if name == "update_note" {
         Some(
             args.get("expectedRevision")
@@ -201,9 +231,18 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
             "title or content is required.",
         ));
     }
-    ctx.broker()?
-        .request(
-            &ApprovalTurn::from(binding),
+    if external.is_some()
+        && name == "update_note"
+        && target.as_ref().and_then(|value| value["revision"].as_i64()) != revision
+    {
+        return Err(AppError::new(
+            "note_conflict",
+            "The note changed; read it again before updating.",
+        ));
+    }
+    let authority = ctx
+        .approve_local(
+            external,
             ApprovalRequest {
                 tool: name.into(),
                 call_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -214,42 +253,27 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
                         _ => "Delete a note",
                     }
                     .into(),
-                    description: "Change notes in the bound data partition.".into(),
+                    description: if name == "delete_note" {
+                        "Permanently delete this note and its recordings in the selected data partition."
+                    } else {
+                        "Change notes in the selected data partition."
+                    }.into(),
                     arguments: args.clone(),
                     preview: None,
                 },
             },
+            target.as_ref(),
         )
-        .await
-        .map_err(|e| AppError::new(e.code(), e.message()))?;
-    ctx.revalidate().await?;
-    let profile = ctx.data.profile.clone();
-    if profile != ctx.data.profile {
-        return Err(AppError::new(
-            "turn_expired",
-            "The bound data partition changed.",
-        ));
-    }
-    let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM agent_runs WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user')")
-        .bind(&binding.run_id).bind(&binding.session_id).fetch_one(&ctx.data.notes).await?;
-    if active == 0 {
-        return Err(AppError::new(
-            "turn_expired",
-            "The bound run is no longer active.",
-        ));
-    }
-    if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
-        return Err(AppError::new(
-            "routine_tool_not_enabled",
-            "This tool is not enabled for the routine.",
-        ));
-    }
+        .await?;
+    ctx.revalidate_local(external).await?;
+    ensure_routine_allowed(ctx, name).await?;
+    let profile = &ctx.data.profile;
     if let Some(project) = project {
         let exists: i64 = sqlx::query_scalar::query_scalar(
             "SELECT COUNT(*) FROM folders WHERE id = ? AND profile = ? AND deleted_at IS NULL",
         )
         .bind(project)
-        .bind(&profile)
+        .bind(profile)
         .fetch_one(&ctx.data.notes)
         .await?;
         if exists == 0 {
@@ -259,41 +283,28 @@ async fn note_operation(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<V
     let result = match name {
         "create_note" => serde_json::to_value(
             repos
-                .create_note_checked(
-                    &profile,
-                    project,
-                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
-                )
+                .create_note_checked(profile, project, Some(authority))
                 .await?,
         )
         .map_err(|e| AppError::new("agent_tool_response_invalid", e.to_string()))?,
         "update_note" => serde_json::to_value(
             repos
                 .update_note_if_revision(
-                    &profile,
+                    profile,
                     id.unwrap_or_default(),
                     revision.unwrap_or_default(),
                     args.get("title").and_then(Value::as_str),
                     args.get("content").and_then(Value::as_str),
-                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
+                    Some(authority),
                 )
                 .await?,
         )
         .map_err(|e| AppError::new("agent_tool_response_invalid", e.to_string()))?,
         "delete_note" => {
-            let app = ctx.app.ok_or_else(|| {
-                AppError::new("storage_unavailable", "Recording storage is unavailable.")
-            })?;
-            let data_dir = crate::app_paths::app_data_dir(app)
-                .map_err(|e| AppError::new("storage_unavailable", e.to_string()))?;
-            let paths = crate::app_paths::AppPaths::from_data_dir(data_dir)
+            let paths = crate::app_paths::AppPaths::from_data_dir(ctx.recording_data(external)?)
                 .map_err(|e| AppError::new("storage_unavailable", e.to_string()))?;
             let files = repos
-                .delete_note_in_profile(
-                    &profile,
-                    id.unwrap_or_default(),
-                    Some((&binding.session_id, &binding.run_id, &binding.authority)),
-                )
+                .delete_note_in_profile(profile, id.unwrap_or_default(), Some(authority))
                 .await?;
             let mut cleanup_failures = 0;
             for file in files {

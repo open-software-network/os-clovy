@@ -1,6 +1,4 @@
-import { invalidateAgentSessionDraft, isAgentSessionDeleted } from "../../lib/agent-session-drafts";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
-import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconRobot2 } from "central-icons/IconRobot2";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconAudio } from "central-icons/IconAudio";
@@ -8,26 +6,14 @@ import { IconBrain2 } from "central-icons/IconBrain2";
 import { IconBrainSideview } from "central-icons/IconBrainSideview";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconColorPalette } from "central-icons/IconColorPalette";
-import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
-import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
-import { IconFolderDelete } from "central-icons/IconFolderDelete";
-import { IconHomeOpen } from "central-icons/IconHomeOpen";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconMicrophoneSparkle } from "central-icons/IconMicrophoneSparkle";
-import { IconMoveFolder } from "central-icons/IconMoveFolder";
 import { IconNoteText } from "central-icons/IconNoteText";
-import { IconPencil } from "central-icons/IconPencil";
-import { IconPin } from "central-icons/IconPin";
-import { IconArchive } from "central-icons/IconArchive";
-import { IconArrowUndoUp } from "central-icons/IconArrowUndoUp";
 import { IconPlugin1 } from "central-icons/IconPlugin1";
-import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconShortcut } from "central-icons/IconShortcut";
-import { IconTrashCan } from "central-icons/IconTrashCan";
-import { IconUnpin } from "central-icons/IconUnpin";
 import { IconLiveActivity } from "central-icons/IconLiveActivity";
 import { IconZap } from "central-icons/IconZap";
 import { IconCalendarClock } from "central-icons/IconCalendarClock";
@@ -37,82 +23,23 @@ import {
   type RefObject,
   type ReactNode,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { markAgentNewSessionPending } from "../agent/session-persistence";
 import { ClovyWordmark } from "../brand/ClovyLogo";
-import {
-  AGENT_DELETE_SESSION_EVENT,
-  AGENT_NEW_SESSION_EVENT,
-  AGENT_SESSIONS_CHANGED_EVENT,
-  AGENT_SESSIONS_HYDRATED_EVENT,
-  AGENT_SESSION_RENAMED_EVENT,
-  type AgentSessionRenamedDetail,
-  type AgentSessionsChangedDetail,
-  type AgentSessionsHydratedDetail,
-} from "../../lib/agent-events";
-import { messageFromError } from "../../lib/errors";
-import { useDismiss } from "../../lib/use-dismiss";
 import { attachScrollThumbFade } from "../../lib/scroll-thumb-fade";
 import { useScrollFade } from "../../lib/use-scroll-fade";
-import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
 import { isPrimaryShortcut, primaryShortcutLabel } from "../../lib/platform";
 import type { NoteListItemDto, RecordingStatusDto } from "../../lib/tauri";
-import { deleteAgentSession, listSessionPartitions } from "../../lib/tauri";
-import type { AgentSessionDto } from "../../lib/agent-runtime-contract";
-import {
-  SIDEBAR_DEMO_SESSIONS_EVENT,
-  type SidebarDemoSessionsDetail,
-} from "../../lib/completed-sessions-demo-ids";
-import { useCurrentDataPartitionName } from "../../lib/data-partition";
-import {
-  sessionMatchesDataPartition,
-  sessionPartitionMap,
-  type SessionPartitionMap,
-} from "../../lib/session-partition-filter";
 import { isMacLikePlatform, isWindowsPlatform } from "../../lib/platform";
 import { settingsTabsForPlatform, type SettingsTab } from "../settings/settings-config";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { DotSpinner } from "../DotSpinner";
 import { combineSourceAudioLevels, Waveform } from "../recorder/Waveform";
-import { RenameSessionDialog } from "../agent/RenameSessionDialog";
-import {
-  DATE_FORMAT_CHANGED_EVENT,
-  formatCalendarDate,
-  getStoredDateFormat,
-  normalizeDateFormatPreference,
-  recentAge,
-  type DateFormatChangedDetail,
-  type DateFormatPreference,
-} from "../../lib/date-format";
-import { intlLocale, type MessageKey, type TFunction, useT } from "../../i18n";
-import { buildSidebarSessionLists } from "./sidebar-session-lists";
-import {
-  positionSidebarContextMenu,
-  sidebarContextMenuAnchorIsVisible,
-  sidebarContextMenuGeometryFromStyles,
-} from "./sidebar-context-menu";
-
-const NO_AGENT_SESSIONS: AgentSessionDto[] = [];
-
-/** Full session-to-data-partition map from the local store. Null when unavailable
- * (outside the Tauri shell, or a transient read failure) so callers keep the
- * last-known map instead of clearing it. */
-async function fetchSessionPartitionMap(): Promise<SessionPartitionMap | null> {
-  try {
-    return sessionPartitionMap(await listSessionPartitions());
-  } catch {
-    return null;
-  }
-}
+import { type MessageKey, useT } from "../../i18n";
 
 export type SidebarView =
-  | "home"
   | "notes"
   | "meetings"
   | "all-notes"
@@ -120,8 +47,6 @@ export type SidebarView =
   | "folders"
   | "dictation"
   | "routines"
-  | "agent"
-  | "agent-sessions"
   | "today";
 
 type SidebarProps = {
@@ -136,32 +61,12 @@ type SidebarProps = {
   // Notes when not wired, e.g. unit tests).
   onExitSettings?: () => void;
   onSelectNote: (noteId: string) => void;
-  onNewAgentSession: () => void;
-  /** Whether the persistent Home conversation is available on this platform. */
-  homeEnabled?: boolean;
-  /** The persistent Home conversation is not shown among focused sessions. */
-  homeStoredSessionId?: string;
-  /** stored session id (not the runtime session id). */
-  onRenameAgentSession: (sessionId: string, title: string) => void;
-  onSelectAgentSession: (session: AgentSessionDto) => void;
-  /** Project membership per stored session id; drives the session menu's
-   * project items (optional so tests can skip the plumbing). */
-  sessionFolderIds?: Record<string, string[]>;
-  /** stored session id -> completed_at ISO (JUN-203). "Archived" is the
-   * user-facing term; archived sessions leave the sidebar entirely and live
-   * under the sessions page's Archived status filter. */
-  completedSessionIds?: Record<string, string>;
-  onToggleSessionCompleted?: (sessionId: string, completed: boolean) => void;
-  onOpenSessionMoveDialog?: (sessionId: string) => void;
-  onRemoveSessionFromFolder?: (sessionId: string, folderId: string) => void;
   recordingStatus?: RecordingStatusDto | null;
   recordingTitle?: string;
   onOpenRecording?: () => void;
   collapsed?: boolean;
   footerAccessory?: ReactNode;
 };
-
-type MenuState = { kind: "agent-session"; sessionId: string; anchor: HTMLElement };
 
 type CommandPromptItem = {
   id: string;
@@ -175,49 +80,6 @@ type CommandPromptItem = {
 type CommandPromptGroup = {
   title: string;
   items: CommandPromptItem[];
-};
-
-const AGENT_SIDEBAR_SESSION_FETCH_LIMIT = 100;
-const AGENT_SIDEBAR_SESSION_LIMIT = 12;
-const PINNED_AGENT_SESSION_IDS_STORAGE_KEY = "clovy:pinned-agent-session-ids";
-const SIDEBAR_DEV_STATES_EVENT = "clovy:sidebar:dev-states";
-const SIDEBAR_DEV_SESSION_IDS = {
-  selected: "sidebar-state-selected",
-  working: "sidebar-state-working",
-  waiting: "sidebar-state-waiting",
-  unread: "sidebar-state-unread",
-  recent: "sidebar-state-recent",
-  older: "sidebar-state-older",
-  long: "sidebar-state-long",
-} as const;
-
-type SidebarDevStatesDetail = { show: boolean };
-
-let sidebarDevStatesDesired = false;
-
-if (import.meta.env.DEV && typeof window !== "undefined") {
-  (window as unknown as Record<string, unknown>).__sidebarStates = (show: boolean = true) => {
-    sidebarDevStatesDesired = show;
-    window.dispatchEvent(
-      new CustomEvent<SidebarDevStatesDetail>(SIDEBAR_DEV_STATES_EVENT, {
-        detail: { show },
-      }),
-    );
-    return show
-      ? "Sidebar state preview shown. Run __sidebarStates(false) to restore."
-      : "Sidebar state preview restored.";
-  };
-}
-
-type SidebarDevStateSnapshot = {
-  sessions: AgentSessionDto[];
-  selectedSessionId?: string;
-  workingSessionIds: Set<string>;
-  waitingSessionIds: Set<string>;
-  unreadSessionIds: Set<string>;
-  deletingSessionIds: Set<string>;
-  pinnedSessionIds: Set<string>;
-  query: string;
 };
 
 const SETTINGS_SIDEBAR_GROUPS: {
@@ -275,6 +137,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         icon: <IconBrainSideview size={16} />,
       },
       {
+        id: "mcp",
+        label: "mcpServer.tab",
+        icon: <IconPlugin1 size={16} />,
+      },
+      {
         id: "connectors",
         label: "shell.settingsNav.plugins",
         icon: <IconPlugin1 size={16} />,
@@ -307,16 +174,6 @@ export function Sidebar({
   onChangeView,
   onExitSettings,
   onSelectNote,
-  onNewAgentSession,
-  homeEnabled = true,
-  homeStoredSessionId,
-  onRenameAgentSession,
-  onSelectAgentSession,
-  sessionFolderIds,
-  completedSessionIds = {},
-  onToggleSessionCompleted,
-  onOpenSessionMoveDialog,
-  onRemoveSessionFromFolder,
   recordingStatus,
   recordingTitle,
   onOpenRecording,
@@ -324,12 +181,11 @@ export function Sidebar({
   footerAccessory,
 }: SidebarProps) {
   const t = useT();
-  const [query, setQuery] = useState("");
+  const sidebarSearchRef = useRef<HTMLInputElement>(null);
   const commandInputRef = useRef<HTMLInputElement>(null);
   const [commandPromptOpen, setCommandPromptOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandActiveIndex, setCommandActiveIndex] = useState(0);
-  const [menu, setMenu] = useState<MenuState | null>(null);
   const [activitySupported, setActivitySupported] = useState(
     () => isMacLikePlatform() || isWindowsPlatform(),
   );
@@ -340,109 +196,7 @@ export function Sidebar({
       .catch(() => {});
   }, []);
   const searchShortcut = primaryShortcutLabel("K");
-  const newSessionShortcut = primaryShortcutLabel("N");
   const inSettings = activeView === "settings";
-  const [allAgentSessions, setAgentSessions] = useState<AgentSessionDto[]>([]);
-  // Chats belong to the data partition they were created under (ADR 0031).
-  // The sidebar filters its list through the session-to-partition map and re-filters
-  // live when the data partition switches, without waiting for a re-fetch.
-  const [sessionPartitions, setSessionPartitions] = useState<SessionPartitionMap | null>(null);
-  const currentDataPartitionName = useCurrentDataPartitionName();
-  const dataPartitionAgentSessions = useMemo(
-    () =>
-      sessionPartitions === null
-        ? []
-        : allAgentSessions.filter((session) =>
-            sessionMatchesDataPartition(session, sessionPartitions, currentDataPartitionName),
-          ),
-    [allAgentSessions, sessionPartitions, currentDataPartitionName],
-  );
-  // __emptyStates() preview (dev console): the agent section renders its
-  // "No sessions yet" line as a fresh install would, real data untouched.
-  const agentSessions = useForcedEmptyStates()
-    ? NO_AGENT_SESSIONS
-    : dataPartitionAgentSessions.filter((session) => session.id !== homeStoredSessionId);
-  const [pinnedAgentSessionIds, setPinnedAgentSessionIds] = useState<Set<string>>(() =>
-    readPinnedAgentSessionIds(),
-  );
-  const [selectedAgentSessionId, setSelectedAgentSessionId] = useState<string>();
-  const [agentSessionToDelete, setAgentSessionToDelete] = useState<AgentSessionDto | null>(null);
-  const [agentSessionDeleteError, setAgentSessionDeleteError] = useState<string | null>(null);
-  const [renamingAgentSessionId, setRenamingAgentSessionId] = useState<string | null>(null);
-  const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
-  const [deletingAgentSessionIds, setDeletingAgentSessionIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [workingAgentSessionIds, setWorkingAgentSessionIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [waitingAgentSessionIds, setWaitingAgentSessionIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  // Sessions that finished a turn while the user wasn't looking — shown as a
-  // terracotta dot in place of the timestamp until the session is opened.
-  const [unreadAgentSessionIds, setUnreadAgentSessionIds] = useState<Set<string>>(() => new Set());
-  // Refs for the mount-once sessions-changed listener: the previous working
-  // set (to spot sessions that just finished) and which session is open in
-  // front of the user (those never go unread).
-  const workingAgentSessionIdsRef = useRef<Set<string>>(new Set());
-  const openAgentSessionIdRef = useRef<string | undefined>(undefined);
-  const sessionsChangedRequestRef = useRef(0);
-  const sidebarDevStateSnapshotRef = useRef<SidebarDevStateSnapshot | null>(null);
-
-  // formatSessionTime reads the clock at render time, so re-render once a
-  // minute to keep the relative timestamps ("5m", "3h") advancing instead of
-  // waiting for an unrelated session event.
-  const [, bumpTimeClock] = useState(0);
-  useEffect(() => {
-    const interval = window.setInterval(() => bumpTimeClock((tick) => tick + 1), 60_000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    writePinnedAgentSessionIds(pinnedAgentSessionIds);
-  }, [pinnedAgentSessionIds]);
-
-  useEffect(() => {
-    const handleDateFormatChanged = (event: Event) => {
-      const detail = (event as CustomEvent<Partial<DateFormatChangedDetail>>).detail;
-      setDateFormat(normalizeDateFormatPreference(detail?.preference));
-    };
-    window.addEventListener(DATE_FORMAT_CHANGED_EVENT, handleDateFormatChanged);
-    return () => window.removeEventListener(DATE_FORMAT_CHANGED_EVENT, handleDateFormatChanged);
-  }, []);
-
-  useEffect(() => {
-    const openId = activeView === "agent" ? selectedAgentSessionId : undefined;
-    openAgentSessionIdRef.current = openId;
-    if (!openId) return;
-    // Opening a session reads it.
-    setUnreadAgentSessionIds((current) => {
-      if (!current.has(openId)) return current;
-      const next = new Set(current);
-      next.delete(openId);
-      return next;
-    });
-  }, [activeView, selectedAgentSessionId]);
-  const filteredAgentSessions = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return agentSessions;
-    return agentSessions.filter((session) => session.title.toLowerCase().includes(normalized));
-  }, [agentSessions, query]);
-  const sidebarSessionLists = useMemo(
-    () =>
-      buildSidebarSessionLists(
-        filteredAgentSessions,
-        pinnedAgentSessionIds,
-        completedSessionIds,
-        AGENT_SIDEBAR_SESSION_LIMIT,
-      ),
-    [filteredAgentSessions, pinnedAgentSessionIds, completedSessionIds],
-  );
-  const pinnedAgentSessions = sidebarSessionLists.pinned;
-  const visibleAgentSessions = sidebarSessionLists.visible;
-  const hasMorePinnedAgentSessions = sidebarSessionLists.pinnedTotal > pinnedAgentSessions.length;
-
   const commandPromptGroups = useMemo<CommandPromptGroup[]>(() => {
     const normalized = normalizeCommandQuery(commandQuery);
     const matches = (item: CommandPromptItem) =>
@@ -460,48 +214,11 @@ export function Sidebar({
           action: () => onSelectNote(note.id),
         };
       }),
-      ...agentSessions
-        .filter((session) => !completedSessionIds[session.id])
-        .slice(0, 5)
-        .map((session) => {
-          const title = session.title.trim() || t("common.untitled");
-          return {
-            id: `agent:${session.id}`,
-            label: title,
-            meta: t("shell.command.session"),
-            icon: <IconBubble3 size={15} />,
-            searchText: normalizeCommandQuery(`${title} agent session`),
-            action: () => {
-              setSelectedAgentSessionId(session.id);
-              onSelectAgentSession(session);
-            },
-          };
-        }),
     ]
       .filter(matches)
       .slice(0, 6);
 
     const quickItems: CommandPromptItem[] = [
-      ...(homeEnabled
-        ? [
-            {
-              id: "quick:home",
-              label: t("shell.command.goHome"),
-              icon: <IconHomeOpen size={15} />,
-              searchText: normalizeCommandQuery(
-                `home clovy june personal assistant conversation ${t("shell.command.goHome")}`,
-              ),
-              action: () => onChangeView("home"),
-            } satisfies CommandPromptItem,
-          ]
-        : []),
-      {
-        id: "quick:new-session",
-        label: t("shell.sidebar.newSession"),
-        icon: <IconPlusMedium size={15} />,
-        searchText: normalizeCommandQuery(`new session agent ${t("shell.sidebar.newSession")}`),
-        action: handleNewAgentSession,
-      },
       // "Open recording" only makes sense while a recording is live, mirroring
       // the sidebar recording indicator that renders under the same condition.
       ...(onOpenRecording && recordingStatus
@@ -526,19 +243,15 @@ export function Sidebar({
         ),
         action: () => onChangeView("notes"),
       },
-      ...(activitySupported
-        ? [
-            {
-              id: "quick:today",
-              label: t("shell.command.goToday"),
-              icon: <IconCalendarClock size={15} />,
-              searchText: normalizeCommandQuery(
-                `today hoje activity timeline go to ${t("shell.command.goToday")}`,
-              ),
-              action: () => onChangeView("today"),
-            },
-          ]
-        : []),
+      {
+        id: "quick:today",
+        label: t("shell.command.goToday"),
+        icon: <IconCalendarClock size={15} />,
+        searchText: normalizeCommandQuery(
+          `today hoje activity timeline go to ${t("shell.command.goToday")}`,
+        ),
+        action: () => onChangeView("today"),
+      },
       {
         id: "quick:projects",
         label: t("shell.command.goProjects"),
@@ -612,14 +325,10 @@ export function Sidebar({
     ].filter((group) => group.items.length > 0);
   }, [
     activitySupported,
-    agentSessions,
     commandQuery,
-    completedSessionIds,
-    homeEnabled,
     notes,
     onChangeView,
     onOpenRecording,
-    onSelectAgentSession,
     onSelectNote,
     onSettingsTabChange,
     recordingStatus,
@@ -637,123 +346,7 @@ export function Sidebar({
     setCommandActiveIndex(Math.max(commandPromptItems.length - 1, 0));
   }, [commandActiveIndex, commandPromptItems.length]);
 
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-
-    function applySidebarDevStates(show: boolean) {
-      if (!show) {
-        const snapshot = sidebarDevStateSnapshotRef.current;
-        if (!snapshot) return;
-        setAgentSessions(snapshot.sessions);
-        setSelectedAgentSessionId(snapshot.selectedSessionId);
-        setWorkingAgentSessionIds(new Set(snapshot.workingSessionIds));
-        setWaitingAgentSessionIds(new Set(snapshot.waitingSessionIds));
-        setUnreadAgentSessionIds(new Set(snapshot.unreadSessionIds));
-        setDeletingAgentSessionIds(new Set(snapshot.deletingSessionIds));
-        setPinnedAgentSessionIds(new Set(snapshot.pinnedSessionIds));
-        workingAgentSessionIdsRef.current = new Set(snapshot.workingSessionIds);
-        setQuery(snapshot.query);
-        sidebarDevStateSnapshotRef.current = null;
-        return;
-      }
-
-      if (
-        sidebarDevStateSnapshotRef.current &&
-        allAgentSessions[0]?.id === SIDEBAR_DEV_SESSION_IDS.selected
-      ) {
-        return;
-      }
-
-      if (!sidebarDevStateSnapshotRef.current) {
-        sidebarDevStateSnapshotRef.current = {
-          sessions: allAgentSessions,
-          selectedSessionId: selectedAgentSessionId,
-          workingSessionIds: new Set(workingAgentSessionIds),
-          waitingSessionIds: new Set(waitingAgentSessionIds),
-          unreadSessionIds: new Set(unreadAgentSessionIds),
-          deletingSessionIds: new Set(deletingAgentSessionIds),
-          pinnedSessionIds: new Set(pinnedAgentSessionIds),
-          query,
-        };
-      }
-
-      setQuery("");
-      setMenu(null);
-      setCommandPromptOpen(false);
-      setAgentSessions(buildSidebarDevStateSessions());
-      setSelectedAgentSessionId(SIDEBAR_DEV_SESSION_IDS.selected);
-      setWorkingAgentSessionIds(new Set([SIDEBAR_DEV_SESSION_IDS.working]));
-      setWaitingAgentSessionIds(new Set([SIDEBAR_DEV_SESSION_IDS.waiting]));
-      setUnreadAgentSessionIds(new Set([SIDEBAR_DEV_SESSION_IDS.unread]));
-      setDeletingAgentSessionIds(new Set());
-      setPinnedAgentSessionIds(new Set([SIDEBAR_DEV_SESSION_IDS.selected]));
-      workingAgentSessionIdsRef.current = new Set([SIDEBAR_DEV_SESSION_IDS.working]);
-      onChangeView("agent");
-    }
-
-    const onDevStates = (event: Event) => {
-      const detail = (event as CustomEvent<SidebarDevStatesDetail>).detail;
-      applySidebarDevStates(Boolean(detail?.show));
-    };
-
-    applySidebarDevStates(sidebarDevStatesDesired);
-    window.addEventListener(SIDEBAR_DEV_STATES_EVENT, onDevStates);
-    return () => window.removeEventListener(SIDEBAR_DEV_STATES_EVENT, onDevStates);
-  }, [
-    allAgentSessions,
-    deletingAgentSessionIds,
-    onChangeView,
-    query,
-    pinnedAgentSessionIds,
-    selectedAgentSessionId,
-    unreadAgentSessionIds,
-    waitingAgentSessionIds,
-    workingAgentSessionIds,
-  ]);
-
-  // __completedDemo (lib/completed-sessions-demo.ts) seeds sessions here too,
-  // since the sidebar owns its local list. Unmapped demo ids resolve to the
-  // "default" partition, so a null partition map just becomes empty.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const onDemoSessions = (event: Event) => {
-      const detail = (event as CustomEvent<SidebarDemoSessionsDetail>).detail;
-      if (!detail?.clearPrefix) return;
-      setAgentSessions((current) => [
-        ...current.filter((session) => !session.id.startsWith(detail.clearPrefix)),
-        ...(detail.sessions ?? []),
-      ]);
-      if (detail.sessions?.length) setSessionPartitions((prev) => prev ?? {});
-    };
-    window.addEventListener(SIDEBAR_DEMO_SESSIONS_EVENT, onDemoSessions);
-    return () => window.removeEventListener(SIDEBAR_DEMO_SESSIONS_EVENT, onDemoSessions);
-  }, []);
-
-  function dispatchAgentEvent<T>(name: string, detail?: T) {
-    window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent(name, { detail }));
-    }, 0);
-  }
-
-  function handleNewAgentSession() {
-    setSelectedAgentSessionId(undefined);
-    markAgentNewSessionPending();
-    onNewAgentSession();
-    dispatchAgentEvent(AGENT_NEW_SESSION_EVENT);
-  }
-
-  function togglePinnedAgentSession(sessionId: string) {
-    setPinnedAgentSessionIds((current) => {
-      const ordered = Array.from(current).filter((id) => id !== sessionId);
-      if (!current.has(sessionId)) {
-        ordered.unshift(sessionId);
-      }
-      return new Set(ordered);
-    });
-  }
-
   function openCommandPrompt() {
-    setMenu(null);
     setCommandQuery("");
     setCommandActiveIndex(0);
     setCommandPromptOpen(true);
@@ -761,14 +354,13 @@ export function Sidebar({
 
   function closeCommandPrompt() {
     setCommandPromptOpen(false);
+    sidebarSearchRef.current?.focus();
   }
 
   function runCommandPromptItem(item: CommandPromptItem) {
     closeCommandPrompt();
     item.action();
   }
-
-  useDismiss(null, menu !== null, () => setMenu(null), { pointerEvent: "click" });
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -789,182 +381,6 @@ export function Sidebar({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [commandPromptOpen]);
-
-  // App loads the session list once at startup and hands it over here; a
-  // sessions-changed broadcast that arrived first wins.
-  useEffect(() => {
-    function handleSessionsHydrated(event: Event) {
-      const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
-      if (!detail) return;
-      if (!detail.replaceExisting && sessionsChangedRequestRef.current > 0) return;
-      if (detail.replaceExisting) sessionsChangedRequestRef.current += 1;
-      setSessionPartitions(detail.partitions);
-      setAgentSessions((current) =>
-        !detail.replaceExisting && current.length > 0
-          ? current
-          : detail.sessions.filter((session) => !isAgentSessionDeleted(session.id)),
-      );
-    }
-    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
-    return () => window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, handleSessionsHydrated);
-  }, []);
-
-  useEffect(() => {
-    function handleSessionsChanged(event: Event) {
-      const detail = (event as CustomEvent<AgentSessionsChangedDetail>).detail;
-      if (!detail) return;
-      // Refresh the session-to-partition map before applying the list so a session
-      // just stamped to a named partition does not flash out of the filtered
-      // list; a failed refresh keeps the last-known map.
-      // Only the latest broadcast applies its list: an older one whose map
-      // read resolves last must not overwrite it.
-      const request = ++sessionsChangedRequestRef.current;
-      void fetchSessionPartitionMap().then((partitions) => {
-        if (request !== sessionsChangedRequestRef.current) return;
-        if (partitions) setSessionPartitions(partitions);
-        setAgentSessions(
-          detail.sessions
-            .filter((session) => !isAgentSessionDeleted(session.id))
-            .slice(0, AGENT_SIDEBAR_SESSION_FETCH_LIMIT),
-        );
-      });
-      if (!detail.selectedSessionId || !isAgentSessionDeleted(detail.selectedSessionId)) {
-        setSelectedAgentSessionId(detail.selectedSessionId);
-      }
-      const nextWorking = new Set(
-        detail.workingSessionIds.filter((id) => !isAgentSessionDeleted(id)),
-      );
-      const nextWaiting = new Set(
-        (detail.waitingSessionIds ?? []).filter((id) => !isAgentSessionDeleted(id)),
-      );
-      // A session that left the working set without pausing for input just
-      // finished a turn — mark it unread unless it's open in front of the
-      // user.
-      const openId = openAgentSessionIdRef.current;
-      const finished = Array.from(workingAgentSessionIdsRef.current).filter(
-        (id) => !nextWorking.has(id) && !nextWaiting.has(id) && id !== openId,
-      );
-      workingAgentSessionIdsRef.current = nextWorking;
-      setUnreadAgentSessionIds((current) => {
-        let changed = false;
-        const next = new Set(current);
-        for (const id of finished) {
-          if (!next.has(id)) {
-            next.add(id);
-            changed = true;
-          }
-        }
-        // A session that starts a new turn (or pauses for input) before the
-        // user opened it drops its unread mark — the spinner / needs-you dot
-        // is the fresher signal, and the dot would double-signal beside it.
-        for (const id of Array.from(next)) {
-          if (nextWorking.has(id) || nextWaiting.has(id)) {
-            next.delete(id);
-            changed = true;
-          }
-        }
-        return changed ? next : current;
-      });
-      setWorkingAgentSessionIds(nextWorking);
-      setWaitingAgentSessionIds(nextWaiting);
-    }
-
-    function handleSessionRenamed(event: Event) {
-      const detail = (event as CustomEvent<AgentSessionRenamedDetail>).detail;
-      if (!detail?.sessionId) return;
-      setAgentSessions((current) =>
-        current.map((session) =>
-          session.id === detail.sessionId ? { ...session, title: detail.title } : session,
-        ),
-      );
-    }
-
-    function handleSessionDeleted(event: Event) {
-      const id = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
-      if (!id) return;
-      invalidateAgentSessionDraft(id);
-      sessionsChangedRequestRef.current += 1;
-      setAgentSessions((current) => current.filter((session) => session.id !== id));
-      setSelectedAgentSessionId((current) => (current === id ? undefined : current));
-      workingAgentSessionIdsRef.current.delete(id);
-      setWorkingAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
-      setWaitingAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
-      setUnreadAgentSessionIds((current) => new Set([...current].filter((item) => item !== id)));
-    }
-    window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleSessionDeleted);
-    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
-    window.addEventListener(AGENT_SESSION_RENAMED_EVENT, handleSessionRenamed);
-    return () => {
-      window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleSessionDeleted);
-      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
-      window.removeEventListener(AGENT_SESSION_RENAMED_EVENT, handleSessionRenamed);
-    };
-  }, []);
-
-  function openMenuForAgentSession(sessionId: string, anchor: HTMLElement) {
-    if (menu?.kind === "agent-session" && menu.sessionId === sessionId) {
-      setMenu(null);
-      return;
-    }
-    setMenu({
-      kind: "agent-session",
-      sessionId,
-      anchor,
-    });
-  }
-
-  async function handleDeleteAgentSession(session: AgentSessionDto) {
-    setDeletingAgentSessionIds((current) => {
-      const next = new Set(current);
-      next.add(session.id);
-      return next;
-    });
-    try {
-      await deleteAgentSession(session.id);
-      setAgentSessions((current) => current.filter((item) => item.id !== session.id));
-      setSelectedAgentSessionId((current) => (current === session.id ? undefined : current));
-      setWorkingAgentSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(session.id);
-        return next;
-      });
-      setWaitingAgentSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(session.id);
-        return next;
-      });
-      setUnreadAgentSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(session.id);
-        return next;
-      });
-      setPinnedAgentSessionIds((current) => {
-        if (!current.has(session.id)) return current;
-        const next = new Set(current);
-        next.delete(session.id);
-        return next;
-      });
-      dispatchAgentEvent(AGENT_DELETE_SESSION_EVENT, {
-        sessionId: session.id,
-      });
-      setAgentSessionDeleteError(null);
-    } catch (err) {
-      setAgentSessionDeleteError(messageFromError(err));
-      throw err;
-    } finally {
-      setDeletingAgentSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(session.id);
-        return next;
-      });
-    }
-  }
-
-  const menuAgentSession =
-    menu?.kind === "agent-session"
-      ? agentSessions.find((session) => session.id === menu.sessionId)
-      : undefined;
-  const newAgentSessionActive = activeView === "agent" && !selectedAgentSessionId;
 
   return (
     <aside
@@ -992,7 +408,7 @@ export function Sidebar({
           activeTab={settingsTab}
           activitySupported={activitySupported}
           onSelectTab={(tab) => onSettingsTabChange?.(tab)}
-          onBack={() => (onExitSettings ? onExitSettings() : onChangeView("notes"))}
+          onBack={() => (onExitSettings ? onExitSettings() : onChangeView("today"))}
         />
       ) : (
         <>
@@ -1006,8 +422,12 @@ export function Sidebar({
             <IconMagnifyingGlass size={15} />
             <input
               type="search"
-              value={query}
-              onChange={(event) => setQuery(event.currentTarget.value)}
+              ref={sidebarSearchRef}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                openCommandPrompt();
+              }}
               placeholder={t("common.search")}
               aria-label={t("common.search")}
               readOnly
@@ -1018,34 +438,17 @@ export function Sidebar({
           </label>
 
           <nav className="sidebar-nav" aria-label={t("shell.sidebar.primaryNav")}>
-            {homeEnabled ? (
-              <button
-                type="button"
-                className="sidebar-nav-item"
-                data-active={activeView === "home" || undefined}
-                aria-current={activeView === "home" ? "page" : undefined}
-                onClick={() => onChangeView("home")}
-              >
-                <span className="sidebar-nav-icon">
-                  <IconHomeOpen size={15} />
-                </span>
-                <span className="sidebar-nav-label">{t("shell.sidebar.home")}</span>
-              </button>
-            ) : null}
             <button
               type="button"
               className="sidebar-nav-item"
-              data-active={newAgentSessionActive || undefined}
-              aria-current={newAgentSessionActive ? "page" : undefined}
-              onClick={handleNewAgentSession}
+              data-active={activeView === "today"}
+              aria-current={activeView === "today" ? "page" : undefined}
+              onClick={() => onChangeView("today")}
             >
               <span className="sidebar-nav-icon">
-                <IconPlusMedium size={15} />
+                <IconCalendarClock size={15} />
               </span>
-              <span className="sidebar-nav-label">{t("shell.sidebar.newSession")}</span>
-              <kbd className="sidebar-nav-shortcut" aria-hidden="true">
-                {newSessionShortcut}
-              </kbd>
+              <span className="sidebar-nav-label">{t("shell.sidebar.today")}</span>
             </button>
             <button
               type="button"
@@ -1063,20 +466,6 @@ export function Sidebar({
               </span>
               <span className="sidebar-nav-label">{t("shell.sidebar.meetingNotes")}</span>
             </button>
-            {activitySupported ? (
-              <button
-                type="button"
-                className="sidebar-nav-item"
-                data-active={activeView === "today"}
-                aria-current={activeView === "today" ? "page" : undefined}
-                onClick={() => onChangeView("today")}
-              >
-                <span className="sidebar-nav-icon">
-                  <IconCalendarClock size={15} />
-                </span>
-                <span className="sidebar-nav-label">{t("shell.sidebar.today")}</span>
-              </button>
-            ) : null}
             <button
               type="button"
               className="sidebar-nav-item"
@@ -1114,111 +503,6 @@ export function Sidebar({
               <span className="sidebar-nav-label">{t("shell.sidebar.routines")}</span>
             </button>
           </nav>
-
-          {pinnedAgentSessions.length > 0 ? (
-            <section
-              className="sidebar-section sidebar-pinned-section"
-              aria-label={t("shell.sidebar.pinnedSessionsLabel")}
-            >
-              <div
-                className={`section-title${hasMorePinnedAgentSessions ? " section-title-with-action" : ""}`}
-              >
-                <span className="section-title-label">{t("shell.sidebar.pinned")}</span>
-                {hasMorePinnedAgentSessions ? (
-                  <button
-                    type="button"
-                    className="section-view-all"
-                    onClick={() => onChangeView("agent-sessions")}
-                  >
-                    {t("shell.sidebar.viewAll")}
-                  </button>
-                ) : null}
-              </div>
-              <div className="notes-nav sidebar-pinned-list">
-                {pinnedAgentSessions.map((session) => (
-                  <AgentSessionRow
-                    key={session.id}
-                    session={session}
-                    selected={activeView === "agent" && selectedAgentSessionId === session.id}
-                    working={workingAgentSessionIds.has(session.id)}
-                    waiting={waitingAgentSessionIds.has(session.id)}
-                    unread={unreadAgentSessionIds.has(session.id)}
-                    deleting={deletingAgentSessionIds.has(session.id)}
-                    renaming={renamingAgentSessionId === session.id}
-                    dateFormat={dateFormat}
-                    menuOpen={menu?.kind === "agent-session" && menu.sessionId === session.id}
-                    onSelect={() => {
-                      setSelectedAgentSessionId(session.id);
-                      onSelectAgentSession(session);
-                    }}
-                    onRename={(title) => onRenameAgentSession(session.id, title)}
-                    onRenameEnd={() => setRenamingAgentSessionId(null)}
-                    onOpenMenu={(anchor) => openMenuForAgentSession(session.id, anchor)}
-                  />
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          <section
-            className="sidebar-section sidebar-agent-section"
-            aria-label={t("shell.sidebar.sessions")}
-            data-active={activeView === "agent" || activeView === "agent-sessions"}
-          >
-            <div className="section-title section-title-with-action">
-              <button
-                type="button"
-                className="section-title-label section-title-open"
-                onClick={() => onChangeView("agent-sessions")}
-              >
-                {t("shell.sidebar.sessions")}
-              </button>
-              {/* Same destination as the header — the hover affordance just
-               * makes the "this opens a list" behavior legible. */}
-              <button
-                type="button"
-                className="section-view-all"
-                onClick={() => onChangeView("agent-sessions")}
-              >
-                {t("shell.sidebar.viewAll")}
-              </button>
-            </div>
-            <div className="notes-nav-wrap">
-              <div className="notes-nav">
-                {visibleAgentSessions.length > 0 ? (
-                  visibleAgentSessions.map((session) => (
-                    <AgentSessionRow
-                      key={session.id}
-                      session={session}
-                      selected={activeView === "agent" && selectedAgentSessionId === session.id}
-                      working={workingAgentSessionIds.has(session.id)}
-                      waiting={waitingAgentSessionIds.has(session.id)}
-                      unread={unreadAgentSessionIds.has(session.id)}
-                      deleting={deletingAgentSessionIds.has(session.id)}
-                      renaming={renamingAgentSessionId === session.id}
-                      dateFormat={dateFormat}
-                      menuOpen={menu?.kind === "agent-session" && menu.sessionId === session.id}
-                      onSelect={() => {
-                        setSelectedAgentSessionId(session.id);
-                        onSelectAgentSession(session);
-                      }}
-                      onRename={(title) => onRenameAgentSession(session.id, title)}
-                      onRenameEnd={() => setRenamingAgentSessionId(null)}
-                      onOpenMenu={(anchor) => openMenuForAgentSession(session.id, anchor)}
-                    />
-                  ))
-                ) : (
-                  <div className="sidebar-empty">
-                    {agentSessions.length === 0
-                      ? t("shell.sidebar.noSessions")
-                      : filteredAgentSessions.length === 0
-                        ? t("shell.sidebar.noMatches")
-                        : t("shell.sidebar.noOtherSessions")}
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
         </>
       )}
 
@@ -1227,39 +511,6 @@ export function Sidebar({
         <SidebarSettingsButton onOpenSettings={() => onChangeView("settings")} />
       </footer>
 
-      {menu?.kind === "agent-session" && menuAgentSession ? (
-        <AgentSessionContextMenu
-          pinned={pinnedAgentSessionIds.has(menuAgentSession.id)}
-          archived={Boolean(completedSessionIds[menuAgentSession.id])}
-          deleting={deletingAgentSessionIds.has(menuAgentSession.id)}
-          anchor={menu.anchor}
-          folderId={sessionFolderIds?.[menuAgentSession.id]?.[0]}
-          onTogglePinned={() => togglePinnedAgentSession(menuAgentSession.id)}
-          onToggleArchived={
-            onToggleSessionCompleted
-              ? () =>
-                  onToggleSessionCompleted(
-                    menuAgentSession.id,
-                    !completedSessionIds[menuAgentSession.id],
-                  )
-              : undefined
-          }
-          onRename={() => setRenamingAgentSessionId(menuAgentSession.id)}
-          onMoveToProject={
-            onOpenSessionMoveDialog ? () => onOpenSessionMoveDialog(menuAgentSession.id) : undefined
-          }
-          onRemoveFromProject={
-            onRemoveSessionFromFolder
-              ? (folderId) => onRemoveSessionFromFolder(menuAgentSession.id, folderId)
-              : undefined
-          }
-          onDelete={() => {
-            setAgentSessionDeleteError(null);
-            setAgentSessionToDelete(menuAgentSession);
-          }}
-          onClose={() => setMenu(null)}
-        />
-      ) : null}
       {commandPromptOpen ? (
         <CommandPrompt
           inputRef={commandInputRef}
@@ -1273,22 +524,6 @@ export function Sidebar({
           onSelect={runCommandPromptItem}
         />
       ) : null}
-      <ConfirmDialog
-        open={Boolean(agentSessionToDelete)}
-        onClose={() => {
-          setAgentSessionToDelete(null);
-          setAgentSessionDeleteError(null);
-        }}
-        onConfirm={() =>
-          agentSessionToDelete ? handleDeleteAgentSession(agentSessionToDelete) : undefined
-        }
-        title={t("shell.deleteSession.title", {
-          title: agentSessionToDelete?.title || t("shell.sidebar.untitledSession"),
-        })}
-        description={agentSessionDeleteError || t("shell.deleteSession.description")}
-        confirmLabel={t("shell.deleteSession.confirm")}
-        destructive
-      />
     </aside>
   );
 }
@@ -1327,73 +562,6 @@ function SidebarRecordingIndicator({
   );
 }
 
-function buildSidebarDevStateSessions(): AgentSessionDto[] {
-  const now = Date.now();
-  const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
-  const daysAgo = (days: number) => new Date(now - days * 24 * 60 * 60_000).toISOString();
-  const session = (
-    id: string,
-    title: string,
-    _preview: string,
-    lastActive: string,
-  ): AgentSessionDto => ({
-    id,
-    title,
-    source: "user",
-    status: "idle",
-    safetyMode: "sandboxed",
-    workspacePath: "",
-    model: "dev-preview",
-    createdAt: lastActive,
-    updatedAt: lastActive,
-  });
-
-  return [
-    session(
-      SIDEBAR_DEV_SESSION_IDS.selected,
-      "Selected session",
-      "Open conversation row with selected background.",
-      minutesAgo(2),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.working,
-      "Working spinner",
-      "Dot spinner in the trailing timestamp slot.",
-      minutesAgo(4),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.waiting,
-      "Needs you",
-      "Terracotta status dot with title emphasis.",
-      minutesAgo(8),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.unread,
-      "New reply",
-      "Unread reply dot in the trailing status slot.",
-      minutesAgo(16),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.recent,
-      "Recent timestamp",
-      "Compact relative time at the right edge.",
-      minutesAgo(43),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.older,
-      "Older timestamp",
-      "Calendar date instead of relative time.",
-      daysAgo(9),
-    ),
-    session(
-      SIDEBAR_DEV_SESSION_IDS.long,
-      "Very long session title that should truncate cleanly before the right edge state slot",
-      "Exercises title ellipsis and trailing slot spacing.",
-      minutesAgo(91),
-    ),
-  ];
-}
-
 function SettingsSidebarNav({
   activeTab,
   activitySupported,
@@ -1408,10 +576,11 @@ function SettingsSidebarNav({
   const t = useT();
   // Hide the admin-surfaces-PR tabs until stabilized. Empty groups drop out so
   // their headers don't render.
+  const supportedTabs = new Set(settingsTabsForPlatform(activitySupported).map((tab) => tab.id));
   const groups = SETTINGS_SIDEBAR_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter(
-      (item) => !HIDDEN_SETTINGS_TABS.has(item.id) && (activitySupported || item.id !== "activity"),
+      (item) => !HIDDEN_SETTINGS_TABS.has(item.id) && supportedTabs.has(item.id),
     ),
   })).filter((group) => group.items.length > 0);
 
@@ -1496,8 +665,7 @@ function CommandPrompt({
   // the clear button, or out to the background. A window listener (mounted only
   // while the prompt is open) guarantees there's no way to get stuck in here.
   // It runs in the capture phase and calls stopPropagation so the prompt claims
-  // Escape before any earlier-registered window handler (note chat panel, an
-  // active agent run) also reacts to it.
+  // Escape before an earlier-registered window handler also reacts to it.
   useEffect(() => {
     function onWindowKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -1655,393 +823,5 @@ function SidebarSettingsButton({ onOpenSettings }: { onOpenSettings: () => void 
         <span className="sidebar-nav-label">{t("common.settings")}</span>
       </button>
     </div>
-  );
-}
-
-function readPinnedAgentSessionIds() {
-  if (typeof window === "undefined") return new Set<string>();
-  try {
-    const raw = window.localStorage.getItem(PINNED_AGENT_SESSION_IDS_STORAGE_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return new Set<string>();
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function writePinnedAgentSessionIds(ids: ReadonlySet<string>) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      PINNED_AGENT_SESSION_IDS_STORAGE_KEY,
-      JSON.stringify(Array.from(ids)),
-    );
-  } catch {
-    // Private browsing / locked-down WebViews may reject storage writes.
-  }
-}
-
-function AgentSessionRow({
-  session,
-  selected,
-  working,
-  waiting,
-  unread,
-  deleting,
-  renaming,
-  dateFormat,
-  menuOpen,
-  onSelect,
-  onRename,
-  onRenameEnd,
-  onOpenMenu,
-}: {
-  session: AgentSessionDto;
-  selected: boolean;
-  working: boolean;
-  waiting: boolean;
-  unread: boolean;
-  deleting: boolean;
-  renaming: boolean;
-  dateFormat: DateFormatPreference;
-  menuOpen: boolean;
-  onSelect: () => void;
-  onRename: (title: string) => void;
-  onRenameEnd: () => void;
-  onOpenMenu: (anchor: HTMLElement) => void;
-}) {
-  const t = useT();
-  const title = session.title || t("shell.sidebar.untitledSession");
-  const status = waiting ? "waitingForUser" : working ? "running" : undefined;
-  const time = formatSessionTime(session.updatedAt, dateFormat, t);
-  const menuRef = useRef<HTMLButtonElement>(null);
-  const [menuFocused, setMenuFocused] = useState(false);
-
-  return (
-    <article
-      className={`note-row agent-sidebar-row${
-        menuFocused ? " agent-sidebar-row-menu-focused" : ""
-      }`}
-      data-selected={selected}
-      data-status={status}
-      data-menu-open={menuOpen || undefined}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (deleting) return;
-        if (menuRef.current) onOpenMenu(menuRef.current);
-      }}
-    >
-      <div
-        className="note-row-main"
-        role="button"
-        tabIndex={0}
-        onClick={onSelect}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onSelect();
-          }
-        }}
-      >
-        <span className="note-row-title">
-          <span className="note-row-title-text">{title}</span>
-        </span>
-      </div>
-      {waiting ? (
-        <span
-          className="agent-session-meta agent-session-status"
-          role="status"
-          aria-label={t("shell.session.needsYou")}
-        >
-          <span
-            className="agent-sidebar-working"
-            data-status="waitingForUser"
-            title={t("shell.session.needsYou")}
-          />
-        </span>
-      ) : working ? (
-        <span
-          className="agent-session-meta agent-session-status"
-          role="status"
-          aria-label={t("shell.session.working")}
-        >
-          <DotSpinner className="agent-sidebar-spinner" />
-        </span>
-      ) : unread ? (
-        <span
-          className="agent-session-meta agent-session-status"
-          role="status"
-          aria-label={t("shell.session.newReply")}
-        >
-          <span
-            className="agent-sidebar-working"
-            data-status="unread"
-            title={t("shell.session.newReply")}
-          />
-        </span>
-      ) : time ? (
-        <span className="agent-session-meta agent-session-time">{time}</span>
-      ) : null}
-      <span className="agent-session-actions">
-        <button
-          ref={menuRef}
-          type="button"
-          className="note-row-menu agent-session-row-menu"
-          aria-label={t("shell.sidebar.actionsFor", { title })}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          disabled={deleting}
-          onFocus={(event) => setMenuFocused(event.currentTarget.matches(":focus-visible"))}
-          onBlur={() => setMenuFocused(false)}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onOpenMenu(event.currentTarget);
-          }}
-        >
-          <IconDotGrid1x3Vertical size={14} />
-        </button>
-      </span>
-      <RenameSessionDialog
-        open={renaming}
-        currentName={title}
-        onClose={onRenameEnd}
-        onRename={onRename}
-      />
-    </article>
-  );
-}
-
-function AgentSessionContextMenu({
-  pinned,
-  archived,
-  deleting,
-  anchor,
-  folderId,
-  onTogglePinned,
-  onToggleArchived,
-  onRename,
-  onMoveToProject,
-  onRemoveFromProject,
-  onDelete,
-  onClose,
-}: {
-  pinned: boolean;
-  archived: boolean;
-  deleting: boolean;
-  anchor: HTMLElement;
-  folderId?: string;
-  onTogglePinned: () => void;
-  onToggleArchived?: () => void;
-  onRename: () => void;
-  onMoveToProject?: () => void;
-  onRemoveFromProject?: (folderId: string) => void;
-  onDelete: () => void;
-  onClose: () => void;
-}) {
-  const t = useT();
-  return (
-    <SidebarContextMenu anchor={anchor} onClose={onClose}>
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onRename();
-          onClose();
-        }}
-      >
-        <IconPencil size={14} />
-        {t("common.rename")}
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onTogglePinned();
-          onClose();
-        }}
-      >
-        {pinned ? <IconUnpin size={14} /> : <IconPin size={14} />}
-        {pinned ? t("shell.menu.unpin") : t("shell.menu.pin")}
-      </button>
-      {onMoveToProject ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onMoveToProject();
-            onClose();
-          }}
-        >
-          {folderId ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-          {folderId ? t("shell.menu.changeProject") : t("shell.menu.addToProject")}
-        </button>
-      ) : null}
-      {folderId && onRemoveFromProject ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onRemoveFromProject(folderId);
-            onClose();
-          }}
-        >
-          <IconFolderDelete size={14} />
-          {t("shell.menu.removeFromProject")}
-        </button>
-      ) : null}
-      {onToggleArchived ? (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onToggleArchived();
-            onClose();
-          }}
-        >
-          {archived ? <IconArrowUndoUp size={14} /> : <IconArchive size={14} />}
-          {archived ? t("shell.menu.unarchive") : t("shell.menu.archive")}
-        </button>
-      ) : null}
-      <div className="context-menu-separator" role="separator" />
-      <button
-        type="button"
-        role="menuitem"
-        className="destructive"
-        disabled={deleting}
-        onClick={() => {
-          onDelete();
-          onClose();
-        }}
-      >
-        <IconTrashCan size={14} />
-        {t("common.delete")}
-      </button>
-    </SidebarContextMenu>
-  );
-}
-
-// Compact trailing timestamp for agent session rows: "now", "5m", "3h", "2d"
-// while recent, then "May 2". sessionTimestamp falls back to the epoch when a
-// session has no dates at all, which we render as nothing rather than 1970.
-const SESSION_AGE_KEYS = {
-  now: "shell.time.now",
-  minutes: "shell.time.minutes",
-  hours: "shell.time.hours",
-  days: "shell.time.days",
-} as const;
-
-function formatSessionTime(iso: string, dateFormat: DateFormatPreference, t: TFunction): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
-  const age = recentAge(date);
-  if (age) return t(SESSION_AGE_KEYS[age.unit], { count: age.count });
-  return formatCalendarDate(date, dateFormat, intlLocale());
-}
-
-function SidebarContextMenu({
-  anchor,
-  children,
-  onClose,
-}: {
-  anchor: HTMLElement;
-  children: ReactNode;
-  onClose: () => void;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  const fade = useScrollFade(scrollerRef);
-  const [position, setPosition] = useState<{ right: number; top: number } | null>(null);
-
-  useLayoutEffect(() => {
-    const sidebar = anchor.closest<HTMLElement>(".sidebar");
-    const appShell = anchor.closest<HTMLElement>(".app-shell");
-
-    function updatePosition() {
-      const menu = menuRef.current;
-      if (!menu) return;
-      if (
-        !anchor.isConnected ||
-        sidebar?.dataset.collapsed === "true" ||
-        appShell?.dataset.sidebar === "collapsed" ||
-        appShell?.dataset.sidebarPreview === "collapsed"
-      ) {
-        onClose();
-        return;
-      }
-      const viewport = { width: window.innerWidth, height: window.innerHeight };
-      const anchorRect = anchor.getBoundingClientRect();
-      const scrollport = anchor.closest<HTMLElement>(".notes-nav");
-      const clippingBoundaries = scrollport ? [scrollport.getBoundingClientRect()] : [];
-      if (!sidebarContextMenuAnchorIsVisible(anchorRect, viewport, clippingBoundaries)) {
-        onClose();
-        return;
-      }
-      const { width, height } = menu.getBoundingClientRect();
-      const geometry = sidebarContextMenuGeometryFromStyles(
-        window.getComputedStyle(document.documentElement),
-      );
-      const next = positionSidebarContextMenu(anchorRect, { width, height }, viewport, geometry);
-      setPosition((current) =>
-        current?.right === next.right && current.top === next.top ? current : next,
-      );
-    }
-
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-    const ownerObserver = new MutationObserver(updatePosition);
-    if (sidebar) {
-      ownerObserver.observe(sidebar, {
-        attributes: true,
-        attributeFilter: ["data-collapsed"],
-        childList: true,
-        subtree: true,
-      });
-    }
-    if (appShell) {
-      ownerObserver.observe(appShell, {
-        attributes: true,
-        attributeFilter: ["data-sidebar", "data-sidebar-preview", "style"],
-      });
-    }
-    const resizeObserver =
-      typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updatePosition);
-    if (sidebar) resizeObserver?.observe(sidebar);
-    return () => {
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-      ownerObserver.disconnect();
-      resizeObserver?.disconnect();
-    };
-  }, [anchor, onClose]);
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      className="context-menu sidebar-context-menu scroll-fade"
-      role="menu"
-      {...fade.props}
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
-      }}
-      style={
-        position
-          ? { right: position.right, top: position.top }
-          : {
-              right: 0,
-              top: 0,
-              visibility: "hidden",
-            }
-      }
-    >
-      <div ref={scrollerRef} className="sidebar-context-menu-scroll">
-        {children}
-      </div>
-    </div>,
-    document.body,
   );
 }

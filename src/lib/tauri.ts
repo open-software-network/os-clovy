@@ -986,6 +986,7 @@ export async function sendAppNotification(input: {
   sound?: string;
   group?: string;
   sessionId?: string;
+  routineSessionId?: string;
 }) {
   return invoke<void>("send_app_notification", { request: input });
 }
@@ -997,6 +998,10 @@ export async function sendAppNotification(input: {
  */
 export async function agentOpenReady() {
   return invoke<string | null>("agent_open_ready");
+}
+
+export async function routineOpenReady() {
+  return invoke<string | null>("routine_open_ready");
 }
 
 export type PendingMeetingStartRequest = {

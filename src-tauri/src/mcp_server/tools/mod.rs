@@ -22,6 +22,7 @@ mod conversations;
 #[cfg(test)]
 mod conversations_tests;
 mod dictation;
+mod external;
 mod gateway;
 #[cfg(test)]
 mod gateway_tests;
@@ -59,7 +60,9 @@ use tauri::AppHandle;
 
 use crate::activity::settings::ActivitySettings;
 use crate::activity::store::ActivityStore;
+use crate::approval_broker::external::ExternalCall;
 use crate::approval_broker::ApprovalBroker;
+use crate::db::repositories::McpMutation;
 use crate::domain::types::AppError;
 
 pub use super::turns::TurnBinding;
@@ -143,6 +146,75 @@ pub struct ToolCtx<'a> {
 }
 
 impl<'a> ToolCtx<'a> {
+    pub(crate) fn recording_data(
+        &self,
+        external: Option<&ExternalCall<'_>>,
+    ) -> Result<std::path::PathBuf, AppError> {
+        if let Some(external) = external {
+            return external
+                .recording_data()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| {
+                    AppError::new("storage_unavailable", "Recording storage is unavailable.")
+                });
+        }
+        let app = self.app.ok_or_else(|| {
+            AppError::new("storage_unavailable", "Recording storage is unavailable.")
+        })?;
+        crate::app_paths::app_data_dir(app)
+            .map_err(|error| AppError::new("storage_unavailable", error.to_string()))
+    }
+
+    pub(crate) async fn revalidate_local(
+        &self,
+        external: Option<&ExternalCall<'_>>,
+    ) -> Result<(), AppError> {
+        match external {
+            Some(call) => call.check_live(),
+            None => self.revalidate().await,
+        }
+    }
+
+    pub(crate) async fn approve_local<'b>(
+        &'b self,
+        external: Option<&'b ExternalCall<'b>>,
+        request: crate::approval_broker::ApprovalRequest,
+        target: Option<&'b Value>,
+    ) -> Result<McpMutation<'b>, AppError> {
+        use crate::approval_broker::{ApprovalKind, ApprovalTurn};
+        if let Some(external) = external {
+            let ApprovalKind::Approval {
+                title,
+                description,
+                arguments,
+                ..
+            } = &request.kind
+            else {
+                return Err(AppError::new(
+                    TURN_REQUIRED,
+                    "This operation requires a Clovy turn.",
+                ));
+            };
+            return Ok(McpMutation::External(
+                external
+                    .approve(&request.tool, title, description, arguments, target)
+                    .await?,
+            ));
+        }
+        let binding = self
+            .binding
+            .ok_or_else(|| AppError::new(TURN_REQUIRED, "A bound Clovy turn is required."))?;
+        self.broker()?
+            .request(&ApprovalTurn::from(binding), request)
+            .await
+            .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
+        Ok(McpMutation::Turn(
+            &binding.session_id,
+            &binding.run_id,
+            &binding.authority,
+        ))
+    }
+
     /// Revalidate host ownership immediately before an effect, including
     /// after approval. UI partition changes cannot redirect this context.
     pub(crate) async fn revalidate(&self) -> Result<(), AppError> {
@@ -177,6 +249,8 @@ impl<'a> ToolCtx<'a> {
         })
     }
 }
+
+pub(super) use external::{call_external, external_descriptors};
 
 /// Domain ports use this after their own settings/single-flight locks, before
 /// provider dispatch. The binding is supplied by the host, never model fields.

@@ -235,86 +235,18 @@ impl MenuStrings {
     pub fn open_clovy(&self) -> &'static str {
         self.pick("Open Clovy", "Abrir o Clovy")
     }
-    pub fn new_session(&self) -> &'static str {
-        self.pick("New session...", "Nova sessão...")
-    }
-    pub fn hide_sessions_hud(&self) -> &'static str {
-        self.pick("Hide sessions HUD", "Ocultar HUD de sessões")
-    }
-    pub fn show_sessions_hud(&self) -> &'static str {
-        self.pick("Show sessions HUD", "Mostrar HUD de sessões")
-    }
     pub fn quit_clovy(&self) -> &'static str {
         self.pick("Quit Clovy", "Encerrar Clovy")
     }
-    pub fn untitled_session(&self) -> &'static str {
-        self.pick("Untitled session", "Sessão sem título")
-    }
-    pub fn no_active_sessions(&self) -> &'static str {
-        self.pick("No active sessions", "Nenhuma sessão ativa")
-    }
-    pub fn session_prefix_needs_approval(&self) -> &'static str {
-        self.pick("Needs Approval - ", "Precisa de aprovação - ")
-    }
-    pub fn session_prefix_working(&self) -> &'static str {
-        self.pick("Working - ", "Trabalhando - ")
-    }
     pub fn activity(&self, recording: bool, dictating: bool) -> &'static str {
         match (recording, dictating) {
-            (true, true) => self.pick("Recording and dictating - ", "Gravando e ditando - "),
-            (true, false) => self.pick("Recording - ", "Gravando - "),
-            (false, true) => self.pick("Dictating - ", "Ditando - "),
+            (true, true) => self.pick("Recording and dictating", "Gravando e ditando"),
+            (true, false) => self.pick("Recording", "Gravando"),
+            (false, true) => self.pick("Dictating", "Ditando"),
             (false, false) => "",
         }
     }
 
-    pub fn sessions(&self, count: usize) -> String {
-        match (self.locale, count) {
-            (UiLocale::En, 1) => "1 session".to_string(),
-            (UiLocale::En, n) => format!("{n} sessions"),
-            (UiLocale::PtBr, 1) => "1 sessão".to_string(),
-            (UiLocale::PtBr, n) => format!("{n} sessões"),
-        }
-    }
-
-    pub fn needs_approval(&self, count: usize) -> &'static str {
-        match (self.locale, count) {
-            (UiLocale::En, 1) => "needs approval",
-            (UiLocale::En, _) => "need approval",
-            (UiLocale::PtBr, 1) => "precisa de aprovação",
-            (UiLocale::PtBr, _) => "precisam de aprovação",
-        }
-    }
-
-    pub fn working(&self, count: usize) -> String {
-        let sessions = self.sessions(count);
-        match self.locale {
-            UiLocale::En => format!("{sessions} working"),
-            UiLocale::PtBr => format!("{sessions} trabalhando"),
-        }
-    }
-
-    pub fn last(&self, detail: &str) -> String {
-        match self.locale {
-            UiLocale::En => format!("Last: {detail}"),
-            UiLocale::PtBr => format!("Última: {detail}"),
-        }
-    }
-
-    pub fn readable_status(&self, status: &str) -> &'static str {
-        match status {
-            "received" => self.pick("Received", "Recebida"),
-            "starting" => self.pick("Starting", "Iniciando"),
-            "running" => self.pick("Working", "Trabalhando"),
-            "waitingForUser" => self.pick("Needs Approval", "Precisa de aprovação"),
-            "completed" => self.pick("Completed", "Concluída"),
-            "failed" => self.pick("Failed", "Falhou"),
-            "cancelled" => self.pick("Cancelled", "Cancelada"),
-            _ => self.pick("Updated", "Atualizada"),
-        }
-    }
-
-    // Activity capture (menu bar).
     pub fn activity_status(&self, state: &crate::activity::schedule::CaptureState) -> String {
         use crate::activity::schedule::CaptureState;
         use crate::activity::store::PauseReason;
@@ -439,15 +371,5 @@ mod tests {
         let pt = strings(UiLocale::PtBr);
         assert_eq!(pt.predefined(PredefinedLabel::Quit), Some("Encerrar Clovy"));
         assert_eq!(pt.settings(), "Configurações...");
-    }
-
-    #[test]
-    fn pluralizes_session_counts() {
-        let pt = strings(UiLocale::PtBr);
-        assert_eq!(pt.sessions(1), "1 sessão");
-        assert_eq!(pt.sessions(3), "3 sessões");
-        assert_eq!(pt.needs_approval(2), "precisam de aprovação");
-        let en = strings(UiLocale::En);
-        assert_eq!(en.working(2), "2 sessions working");
     }
 }

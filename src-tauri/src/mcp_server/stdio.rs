@@ -7,7 +7,7 @@
 //! the same message.
 //!
 //! Usage: `clovy-mcp --dir "<app data dir>/mcp"` (the configuration snippets
-//! in Settings, Agent carry the right directory). A Clovy CLI chat turn adds
+//! in Settings, MCP carry the right directory). A Clovy CLI chat turn adds
 //! `--turn <token>`: the connection is then bound to that turn
 //! (`super::turns`), and once the turn ends every call answers that it has.
 
@@ -18,9 +18,10 @@ use serde_json::{json, Value};
 
 use super::protocol;
 
-pub const OFF_MESSAGE: &str = "The Clovy MCP server is off or Clovy is not open. Open Clovy and turn on the MCP server in Settings, Agent.";
-pub const NEVER_ENABLED_MESSAGE: &str = "The Clovy MCP server has not been turned on yet. Open Clovy and turn it on in Settings, Agent.";
-pub const REFUSED_MESSAGE: &str = "Clovy refused the connection because the installation secret did not match. Copy the configuration again from Clovy Settings, Agent.";
+pub const OFF_MESSAGE: &str = "The Clovy MCP server is off or Clovy is not open. Open Clovy and turn on the MCP server in Settings, MCP.";
+pub const NEVER_ENABLED_MESSAGE: &str =
+    "The Clovy MCP server has not been turned on yet. Open Clovy and turn it on in Settings, MCP.";
+pub const REFUSED_MESSAGE: &str = "Clovy refused the connection because the installation secret did not match. Copy the configuration again from Clovy Settings, MCP.";
 pub const BUSY_MESSAGE: &str = "Clovy is already serving as many MCP connections as it allows. Close another MCP client, then try again.";
 pub const DROPPED_MESSAGE: &str =
     "Clovy closed the connection before answering (the MCP server was turned off or Clovy quit).";
@@ -43,7 +44,7 @@ pub fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
                 .ok_or_else(|| "--dir needs a directory".to_string());
         }
     }
-    Err("usage: clovy-mcp --dir <Clovy data directory>/mcp (copy the configuration from Clovy Settings, Agent)".to_string())
+    Err("usage: clovy-mcp --dir <Clovy data directory>/mcp (copy the configuration from Clovy Settings, MCP)".to_string())
 }
 
 /// The `--turn` argument, when given.
@@ -309,6 +310,7 @@ mod local {
     /// An authenticated connection and the requests still waiting on it.
     struct Connection {
         stream: channel::SyncStream,
+        external: bool,
         reader: Option<std::thread::JoinHandle<()>>,
         alive: Arc<AtomicBool>,
         pending: Arc<Mutex<HashMap<String, Value>>>,
@@ -373,6 +375,7 @@ mod local {
             });
             Ok(Self {
                 stream,
+                external: turn.is_none(),
                 reader: Some(reader),
                 alive,
                 pending,
@@ -390,6 +393,16 @@ mod local {
                     drop(pending);
                     // The caller only reconnects before starting a write.
                     return false;
+                }
+                if protocol::method(message) == Some("notifications/cancelled")
+                    && matches!(
+                        protocol::classify(message),
+                        protocol::Incoming::Notification
+                    )
+                {
+                    if let Some(id) = message.pointer("/params/requestId") {
+                        pending.remove(&id.to_string());
+                    }
                 }
                 if let Some(id) = protocol::request_id(message) {
                     pending.insert(id.to_string(), message.clone());
@@ -412,6 +425,13 @@ mod local {
         }
 
         fn finish(&mut self) {
+            if self.external {
+                let _ = self
+                    .stream
+                    .set_write_timeout(Some(std::time::Duration::from_millis(250)));
+                let message = json!({"jsonrpc": "2.0", "method": channel::RELAY_EOF});
+                let _ = writeln!(self.stream, "{message}");
+            }
             #[cfg(unix)]
             let _ = self.stream.shutdown(std::net::Shutdown::Write);
             // stdin EOF allows a bounded drain of receipts before closing IO.

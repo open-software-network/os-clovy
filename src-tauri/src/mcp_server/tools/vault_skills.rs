@@ -3,7 +3,7 @@
 use super::{ToolCtx, ToolGroup};
 use crate::agent_sessions::skill_identity::canonical_skill_id;
 use crate::agent_sessions::AgentRepository;
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest, ApprovalTurn};
 use crate::domain::types::AppError;
 use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
@@ -45,28 +45,7 @@ impl ToolGroup for VaultSkillTools {
         name: &'a str,
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
-        Box::pin(async move {
-            require_tool(ctx, name).await?;
-            let app = ctx.app.ok_or_else(|| {
-                AppError::new(
-                    "mcp_app_unavailable",
-                    "Clovy's vault and skill directories are unavailable.",
-                )
-            })?;
-            if name == "get_obsidian_vault" {
-                return vault_result(crate::obsidian::discovery_for_app(app));
-            }
-            let roots = crate::agent_sessions::skills::skill_roots(app);
-            // Dropping the managed root after a path-resolution failure must
-            // never promote the remaining global root to editable storage.
-            if roots.first().map_or(true, |(_, managed)| !managed) {
-                return Err(AppError::new(
-                    "agent_skill_write_failed",
-                    "Managed skill storage is unavailable.",
-                ));
-            }
-            call_with_roots(ctx, name, arguments, &skill_roots(app)).await
-        })
+        Box::pin(dispatch(ctx, None, name, arguments))
     }
 
     fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Vec<Value>> {
@@ -83,6 +62,49 @@ impl ToolGroup for VaultSkillTools {
     }
 }
 
+pub(super) async fn dispatch(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    if external.is_none() {
+        require_tool(ctx, name).await?;
+    }
+    let app = ctx.app.ok_or_else(|| {
+        AppError::new(
+            "mcp_app_unavailable",
+            "Clovy's vault and skill directories are unavailable.",
+        )
+    })?;
+    if name == "get_obsidian_vault" {
+        return vault_result(crate::obsidian::discovery_for_app(app));
+    }
+    let roots = crate::agent_sessions::skills::skill_roots(app);
+    // Dropping the managed root after a path-resolution failure must
+    // never promote the remaining global root to editable storage.
+    if roots.first().map_or(true, |(_, managed)| !managed) {
+        return Err(AppError::new(
+            "agent_skill_write_failed",
+            "Managed skill storage is unavailable.",
+        ));
+    }
+    let mut value = call_scoped(ctx, external, name, arguments, &skill_roots(app)).await?;
+    if external.is_some() {
+        fn remove_path(object: &mut Value) {
+            if let Some(fields) = object.as_object_mut() {
+                fields.remove("path");
+                fields.remove("localPath");
+            }
+        }
+        remove_path(&mut value);
+        if let Some(skills) = value.get_mut("skills").and_then(Value::as_array_mut) {
+            skills.iter_mut().for_each(remove_path);
+        }
+    }
+    Ok(value)
+}
+
 pub(crate) fn vault_result(
     discovery: Result<crate::obsidian::ObsidianDiscovery, AppError>,
 ) -> Result<Value, AppError> {
@@ -90,14 +112,32 @@ pub(crate) fn vault_result(
         .map_err(|error| AppError::new("agent_tool_response_invalid", error.to_string()))
 }
 
+#[cfg(test)]
 pub(super) async fn call_with_roots(
     ctx: &ToolCtx<'_>,
     name: &str,
     arguments: &Value,
     roots: &[PathBuf],
 ) -> Result<Value, AppError> {
-    require_tool(ctx, name).await?;
-    ctx.revalidate().await?;
+    call_scoped(ctx, None, name, arguments, roots).await
+}
+
+async fn call_scoped(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    arguments: &Value,
+    roots: &[PathBuf],
+) -> Result<Value, AppError> {
+    if external.is_none() {
+        require_tool(ctx, name).await?;
+    } else if !matches!(name, "list_skills" | "load_skill") {
+        return Err(AppError::new(
+            TURN_REQUIRED,
+            "This skill operation requires a Clovy turn.",
+        ));
+    }
+    ctx.revalidate_local(external).await?;
     let requested = if !matches!(name, "list_skills" | "list_skill_settings") {
         let requested = arguments
             .get("name")

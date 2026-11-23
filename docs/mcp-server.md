@@ -1,13 +1,13 @@
 # Clovy MCP server
 
-Local MCP clients (Claude Code, Cursor, and the CLI chat engines) read the
+Local MCP clients read the
 current data partition's notes, dictations, and memories, and the
 installation's activity, through a stdio MCP server, `clovy-mcp`. It is on by
-default (the switch in Settings, Agent turns it off, and the choice survives
-restarts) and answers only while Clovy is open. A client outside a Clovy chat
-turn (Cursor, `claude mcp add`) gets the read-only tools only. A CLI chat turn
-(Claude Code, Codex, or Copilot started by Clovy) connects with a **turn
-binding** and also gets turn-bound tools in its saved policy. Domain mutations
+default (the switch in Settings → MCP turns it off, and the choice survives
+restarts) and answers only while Clovy is open. Authenticated external clients
+also get the applicable tools described in [Aprovações externas](#aprovações-externas).
+Internal CLI consumers use a **turn binding** and get turn-bound tools in their
+saved policy. Bound domain mutations
 use the in-app **approval broker** and revalidate the host binding after waits.
 Media generation keeps its direct-provider charging policy without an extra
 broker card; Browser use input follows the same broker and its own browser guards.
@@ -38,7 +38,8 @@ writer waits. Metadata updates cannot fill or replace these authority fields.
 Unprofiled sessions explicitly snapshot `default`; routines use their own
 persisted session origin, never the visible app view or its bypass policy.
 Bound context resources and prompt dispatch revalidate the same snapshot.
-External reads retain the current-view scope.
+External reads retain the current-view scope. Additional external tools use
+the data partition captured by the host for the operation.
 Projects organize data; IDs never grant access across partitions. Stop revokes
 the host binding; every bound dispatch and post-approval mutation checks it.
 
@@ -54,12 +55,12 @@ the host binding; every bound dispatch and post-approval mutation checks it.
 | `src-tauri/src/mcp_server/tools/mod.rs` | `ToolGroup`, `ToolCtx`, the group registry, `tools/list` and `tools/call` dispatch |
 | `src-tauri/src/mcp_server/tools/read.rs` | The read tools every client gets, and their limits |
 | `src-tauri/src/mcp_server/tools/` | One file per turn-bound group (`notes`, `memory`, `media`, `recorder`, `browser`, `computer_use`, `vault_skills`, `routines`, `connectors`, `gateway`, `interaction`), each with its `*_tests.rs` |
-| `src-tauri/src/approval_broker/` | The approval broker: cards, wait with timeout, single decision, cancellation, startup cleanup |
+| `src-tauri/src/approval_broker/` | Aprovações de turno e fila externa com prazo, decisão única, cancelamento e invalidação |
 | `src-tauri/src/chat_engine/policy.rs` | The flags each CLI turn gets (safety mode, attended, tool timeout) |
 | `src-tauri/src/bin/clovy_mcp.rs` | Binary entry point |
 | `src-tauri/bundle-clovy-mcp.sh` | macOS `beforeBundleCommand` step: copies and signs the binary into `.tauri-helper/` |
 | `scripts/prepare-windows-mcp.mjs` | Builds the Cargo-reported Windows relay, signs it and stages its source/target/profile/digest manifest for the installer |
-| `src/components/settings/McpServerSection.tsx`, `src/lib/mcp-server.ts` | Settings, Agent section and its bindings |
+| `src/components/settings/McpServerSection.tsx`, `src/components/settings/McpExternalApprovals.tsx`, `src/lib/mcp-server.ts` | Configurações MCP, pedidos de aprovação externa e bindings |
 
 Tests: `cargo test mcp_server` (protocol against test databases, the relay
 through a real socket, refusal without the secret, connection and request
@@ -132,8 +133,9 @@ and retention as the agent tools and the "Today" view.
     closed as soon as they are accepted, before any read;
   - at most 8 authenticated connections; the next gets `"busy"`;
   - at most 4 requests of one connection being answered at once; the app
-    stops reading that connection until one finishes, so a fast client waits
-    in its own socket buffer instead of growing the app's memory;
+    applies backpressure to bound turns. For authenticated external connections,
+    an additional request gets a busy error. The relay keeps reading to detect
+    cancellation or disconnect while all four requests wait for approval;
   - persistent `accept` errors (out of descriptors) back off 100 ms.
 - Unix socket paths are limited to 104 bytes on macOS; a data dir deeper than
   that makes the server fail to start with the error shown in Settings.
@@ -145,6 +147,10 @@ and retention as the agent tools and the "Today" view.
   uses a zero-byte write as a native-write completion barrier, under the common
   drain deadline; it never calls blocking `FlushFileBuffers`. These details
   rely on the locked Tokio 1.52.3 / Mio 1.2.1 implementations.
+- O relay externo informa ao host o fim da entrada stdio antes de drenar as
+  respostas. O host revoga pedidos pendentes também no named pipe do Windows,
+  que mantém a conexão aberta por um curto período para entregar recibos.
+
 
 ## Turn binding
 
@@ -162,7 +168,8 @@ routines `false`), and the surface (`chat` or `routine`).
   `ps`, which can already read the installation secret, and it opens nothing
   without that secret.
 - The handshake carries it as the additive `turn` field; the protocol
-  version stays `1`. `turn` absent or `null` is an unbound connection; an
+  version stays `1`. `turn` absent or `null` is an external connection after
+  local authentication; an
   unknown or revoked token, or a value that is not a string, gets
   `"error": "turn_expired"`. The token is checked only after the secret and
   the user id. An older relay without `--turn`, or an older app that ignores
@@ -238,6 +245,43 @@ with `kind: "clarification"`, `question`, and `choices`; the answer is the
 tool's result.
 Browser use asks this same broker for every click, fill and key press. Its session
 controls manage takeover, resume and Stop; they do not issue approvals.
+
+### Aprovações externas
+
+O host atribui uma identidade à conexão externa após o handshake autenticado.
+As consultas existentes continuam disponíveis com os mesmos parâmetros e filtros.
+Sem uma identidade externa validada, somente as ferramentas de leitura originais
+estão disponíveis. IDs de sessão, turno ou workspace fornecidos pelo cliente
+jamais concedem autoridade interna.
+
+A barra lateral indica pedidos pendentes. Em Configurações → MCP, cada pedido
+mostra a ferramenta, o conjunto de dados e a prévia da operação e do alvo. A
+decisão autoriza uma chamada exata, ou a nega. O cliente recebe o resultado da
+ferramenta pela mesma conexão. O prazo máximo é de 10 minutos. Desconexão,
+cancelamento, desativação do servidor ou perda do conjunto de dados invalidam o
+pedido. O host revalida autoridade e alvo antes do efeito. O perfil ativo desta
+versão é `default`.
+
+Além das consultas originais, o catálogo externo inclui `get_dictation`,
+`list_notes`, `list_projects`, `get_project`, `list_routines` e
+`list_routine_runs`. `search_memories` depende da configuração de memória.
+`list_skills` e `load_skill` dependem de um diretório gerenciado de skills.
+Resultados externos omitem os IDs internos de conversa e de turno e os caminhos
+locais de projetos e skills. A disponibilidade das ferramentas de Atividade
+depende do suporte a suas configurações na instalação.
+
+Os handlers externos podem criar, editar e excluir notas, memórias e projetos,
+vincular e desvincular notas de projetos, apagar ditados retidos e atualizar ou
+pausar a captura de Atividade quando aplicável. Cada mudança exige aprovação.
+Prévia grande demais para exibir por inteiro impede a solicitação. Os handlers
+aplicam as regras de retenção, escopo, configuração de memória e revisões de
+nota. Ferramentas de conector, mídia, Browser use, Computer use e controle de
+gravação que exigem autoridade interna permanecem sujeitas ao contexto de
+seus próprios handlers.
+
+O shell lista pedidos por `mcp_external_approvals`, decide por
+`mcp_external_approval_decide` e atualiza o conteúdo no evento
+`mcp-external-approvals-changed`. O evento carrega apenas a invalidação.
 
 ## The relay while Clovy is unreachable
 
@@ -317,7 +361,9 @@ requires an attended turn. Missing or revoked routine authorization hides tools
 and denies calls; configuration does not create grants. Enabled toolsets never
 make an unattended mutation self-authorizing.
 
-Listed and callable only on a connection bound to a turn. "Listed to" says
+This table describes visibility on connections bound to a turn. The separate
+external catalog reuses applicable handlers listed under
+[Aprovações externas](#aprovações-externas). "Listed to" says
 which turns see the tool: `every turn`, `attended turns` (chat; never
 routines), or `Claude turns`. A `Claude turns` tool is listed for Claude Code
 itself, not for the model: every Claude turn with Clovy's server, attended or

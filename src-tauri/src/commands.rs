@@ -795,6 +795,27 @@ pub(crate) async fn create_memory_with_settings_for_turn(
     source: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
+    create_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        folder_id,
+        content,
+        source,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn create_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    folder_id: Option<&str>,
+    content: &str,
+    source: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<MemoryDto, AppError> {
     // Every write path (Tauri command AND the loopback proxy) takes the
     // settings lock across the enabled check and the insert, so a save that
     // read "enabled" can never commit after a concurrent toggle-off persists.
@@ -809,7 +830,7 @@ pub(crate) async fn create_memory_with_settings_for_turn(
         ));
     }
     repos
-        .create_memory_for_turn(profile, folder_id, content, source, turn)
+        .create_memory_authorized(profile, folder_id, content, source, authority)
         .await
 }
 
@@ -826,6 +847,7 @@ pub(crate) async fn forget_memory_with_settings(
     repos.forget_memory(profile, id).await
 }
 
+#[cfg(test)]
 pub(crate) async fn forget_memory_with_settings_for_turn(
     repos: &Repositories,
     settings_path: &Path,
@@ -833,12 +855,29 @@ pub(crate) async fn forget_memory_with_settings_for_turn(
     id: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<(), AppError> {
-    if turn.is_none() {
+    forget_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn forget_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<(), AppError> {
+    if authority.is_none() {
         return forget_memory_with_settings(repos, settings_path, profile, id).await;
     }
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
-    repos.forget_memory_for_turn(profile, id, turn).await
+    repos.forget_memory_authorized(profile, id, authority).await
 }
 
 pub(crate) async fn update_memory_with_settings(
@@ -859,12 +898,31 @@ pub(crate) async fn update_memory_with_settings_for_turn(
     content: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
+    update_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        content,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn update_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    content: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<MemoryDto, AppError> {
     // Same lock discipline as create: check + write under the settings lock.
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
     let content = validated_memory_content(content)?;
     repos
-        .update_memory_for_turn(profile, id, content, turn)
+        .update_memory_authorized(profile, id, content, authority)
         .await
 }
 
@@ -973,7 +1031,7 @@ fn persist_memory_settings(path: &Path, settings: &MemorySettingsDto) -> Result<
     })
 }
 
-fn validated_memory_content(content: &str) -> Result<&str, AppError> {
+pub(crate) fn validated_memory_content(content: &str) -> Result<&str, AppError> {
     let content = content.trim();
     if content.is_empty() {
         return Err(AppError::new(

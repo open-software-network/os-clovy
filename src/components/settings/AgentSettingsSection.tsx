@@ -9,15 +9,6 @@ import {
   type FolderDto,
 } from "../../lib/tauri";
 import {
-  AGENT_HUD_VISIBILITY_CHANGED_EVENT,
-  getAgentHudEnabled,
-  getAgentHudPlacement,
-  setAgentHudEnabled,
-  setAgentHudPlacement,
-  type AgentHudPlacement,
-  type AgentHudVisibilityChangedDetail,
-} from "../../lib/agent-hud-settings";
-import {
   AGENT_SOUNDS_CHANGED_EVENT,
   getAgentSoundsEnabled,
   setAgentSoundsEnabled,
@@ -25,11 +16,8 @@ import {
 } from "../../lib/agent-sound-settings";
 import { t as translate, useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
-import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsPageHeader } from "./AppSettings";
-import { ClovyPersonalitySettingsSection } from "./ClovyPersonalitySettingsSection";
-import { McpServerSection } from "./McpServerSection";
 
 /** Settings owned by Clovy's local agent harness. Messaging compatibility,
  * raw runtime diagnostics, and the legacy filesystem browser are
@@ -45,8 +33,6 @@ export function AgentSettingsSection({
   onFoldersImported?: (folders: FolderDto[]) => void;
 } = {}) {
   const t = useT();
-  const [hudEnabled, setHudEnabledState] = useState(getAgentHudEnabled);
-  const [hudPlacement, setHudPlacementState] = useState(getAgentHudPlacement);
   const [soundsEnabled, setSoundsEnabledState] = useState(getAgentSoundsEnabled);
   const [skills, setSkills] = useState<AgentSkillDto[]>();
   const [savingSkillId, setSavingSkillId] = useState<string>();
@@ -106,31 +92,15 @@ export function AgentSettingsSection({
   }
 
   useEffect(() => {
-    const handleHud = (event: Event) => {
-      const detail = (event as CustomEvent<AgentHudVisibilityChangedDetail>).detail;
-      if (detail) setHudEnabledState(detail.enabled);
-    };
     const handleSounds = (event: Event) => {
       const detail = (event as CustomEvent<AgentSoundsChangedDetail>).detail;
       if (detail) setSoundsEnabledState(detail.enabled);
     };
-    window.addEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleHud);
     window.addEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
     return () => {
-      window.removeEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleHud);
       window.removeEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
     };
   }, []);
-
-  function changeHud(enabled: boolean) {
-    setHudEnabledState(enabled);
-    setAgentHudEnabled(enabled);
-  }
-
-  function changeHudPlacement(placement: AgentHudPlacement) {
-    setHudPlacementState(placement);
-    setAgentHudPlacement(placement);
-  }
 
   async function changeSkill(skill: AgentSkillDto, enabled: boolean) {
     setSavingSkillId(skill.id);
@@ -188,7 +158,6 @@ export function AgentSettingsSection({
           title={t("settingsPanels.agent.title")}
           blurb={t("settingsPanels.agent.blurb")}
         />
-        <ClovyPersonalitySettingsSection />
       </section>
 
       <section className="settings-group" aria-labelledby="agent-experience-heading">
@@ -200,45 +169,6 @@ export function AgentSettingsSection({
         </p>
         <div className="settings-card">
           <div className="settings-rows">
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">{t("settingsPanels.agent.hudTitle")}</h3>
-                <p className="settings-row-description">
-                  {t("settingsPanels.agent.hudDescription")}
-                </p>
-              </div>
-              <div className="settings-row-control">
-                <Switch
-                  checked={hudEnabled}
-                  onCheckedChange={changeHud}
-                  aria-label={t("settingsPanels.agent.hudShow")}
-                />
-              </div>
-            </div>
-            {hudEnabled ? (
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <h3 className="settings-row-title">{t("settingsPanels.agent.hudPosition")}</h3>
-                  <p className="settings-row-description">
-                    {t("settingsPanels.agent.hudPositionDescription")}
-                  </p>
-                </div>
-                <div className="settings-row-control">
-                  <Select
-                    value={hudPlacement}
-                    options={[
-                      { value: "top-left", label: t("settingsPanels.agent.topLeft") },
-                      { value: "top-right", label: t("settingsPanels.agent.topRight") },
-                      { value: "bottom-left", label: t("settingsPanels.agent.bottomLeft") },
-                      { value: "bottom-right", label: t("settingsPanels.agent.bottomRight") },
-                    ]}
-                    placeholder={t("settingsPanels.agent.topRight")}
-                    ariaLabel={t("settingsPanels.agent.hudPositionAria")}
-                    onChange={(value) => changeHudPlacement(value as AgentHudPlacement)}
-                  />
-                </div>
-              </div>
-            ) : null}
             <div className="settings-row">
               <div className="settings-row-info">
                 <h3 className="settings-row-title">{t("settingsPanels.agent.sounds")}</h3>
@@ -308,7 +238,6 @@ export function AgentSettingsSection({
           </p>
         ) : null}
       </section>
-      <McpServerSection />
       <Dialog
         open={Boolean(editingSkill)}
         onClose={() => setEditingSkill(undefined)}

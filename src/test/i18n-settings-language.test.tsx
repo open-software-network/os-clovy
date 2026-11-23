@@ -15,7 +15,6 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { AppSettings } from "../components/settings/AppSettings";
-import { APP_BACKGROUND_STORAGE_KEY } from "../lib/app-background";
 import {
   applyInterfaceLocale,
   getInterfaceLocale,
@@ -53,22 +52,6 @@ afterEach(() => {
 });
 
 describe("interface language setting", () => {
-  it("offers Drift and None in Appearance and persists the selection in either language", async () => {
-    localStorage.removeItem(APP_BACKGROUND_STORAGE_KEY);
-    const user = userEvent.setup();
-    renderAppearance();
-    expect(screen.getByRole("heading", { name: "Background" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Drift" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(screen.getByRole("button", { name: "None" }));
-    expect(localStorage.getItem(APP_BACKGROUND_STORAGE_KEY)).toBe("none");
-    act(() => applyInterfaceLocale("pt-BR"));
-    expect(screen.getByRole("heading", { name: "Fundo" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Nenhum" })).toHaveAttribute("aria-pressed", "true");
-    await user.click(screen.getByRole("button", { name: "Drift" }));
-    expect(localStorage.getItem(APP_BACKGROUND_STORAGE_KEY)).toBe("drift");
-    localStorage.removeItem(APP_BACKGROUND_STORAGE_KEY);
-  });
-
   it("switches the interface to Português (Brasil), persists it, and can switch back", async () => {
     const user = userEvent.setup();
     const keysBefore = new Set(Object.keys(window.localStorage));

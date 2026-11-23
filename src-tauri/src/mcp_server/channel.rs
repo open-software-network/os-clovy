@@ -28,6 +28,9 @@ pub const DIR_NAME: &str = "mcp";
 pub const SOCKET_FILE: &str = "clovy.sock";
 pub const SECRET_FILE: &str = "secret";
 pub const HANDSHAKE_VERSION: u64 = 1;
+/// A relay whose stdin closes can revoke its external authority while it
+/// drains responses on transports without a write-only shutdown.
+pub(super) const RELAY_EOF: &str = "notifications/clovy/relayEof";
 /// Longest accepted line, in bytes (a JSON-RPC message).
 pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// Accepted connections still in the handshake at once.
@@ -103,7 +106,10 @@ pub fn read_secret(dir: &Path) -> std::io::Result<String> {
 #[path = "channel/common.rs"]
 mod common;
 #[cfg(any(unix, windows))]
-pub use common::{ClientError, Handler, Service, TurnHandler};
+pub use common::{
+    AuthenticatedHandler, ClientError, Connection, ExternalConnection, Handler, Service,
+    TurnHandler,
+};
 #[cfg(unix)]
 #[path = "channel/unix.rs"]
 mod unix;

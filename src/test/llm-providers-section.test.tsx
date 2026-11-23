@@ -188,7 +188,7 @@ describe("LlmProvidersSection", () => {
     // Non-installed CLI reasons
     expect(screen.getAllByText("Not found on your PATH.").length).toBeGreaterThan(0);
     // Usage select checks
-    const chatSelect = screen.getByRole("combobox", { name: "Chat" });
+    const chatSelect = screen.getByRole("combobox", { name: "Default agent CLI" });
     const installedOption = chatSelect.querySelector(
       'option[value="cli:claude"]',
     ) as HTMLOptionElement;
@@ -221,7 +221,7 @@ describe("LlmProvidersSection", () => {
         .getByRole("combobox", { name })
         .querySelector(`option[value="cli:${id}"]`) as HTMLOptionElement;
     for (const id of ["codex", "agy"]) {
-      for (const name of ["Chat", "Notes", "Activity"]) {
+      for (const name of ["Default agent CLI", "Notes", "Activity"]) {
         expect(option(name, id).disabled, `${id} ${name}`).toBe(false);
       }
     }
@@ -230,7 +230,7 @@ describe("LlmProvidersSection", () => {
     expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(3);
   });
 
-  it("offers a CLI whose tools stay on for chat only, never for content uses, and does not test it", async () => {
+  it("offers a CLI whose tools stay on for the default agent, but not for notes or activity, and does not test it", async () => {
     mocks.llmDetectClis.mockResolvedValue(
       sampleClis.map((cli) =>
         cli.id === "cursor-agent"
@@ -245,14 +245,14 @@ describe("LlmProvidersSection", () => {
       screen
         .getByRole("combobox", { name })
         .querySelector('option[value="cli:cursor-agent"]') as HTMLOptionElement;
-    expect(option("Chat").disabled).toBe(false);
+    expect(option("Default agent CLI").disabled).toBe(false);
     // Dictation cleanup never runs on a CLI or endpoint, so it has no row.
     expect(screen.queryByRole("combobox", { name: "Dictation cleanup" })).toBeNull();
     for (const name of ["Notes", "Activity"]) {
       expect(option(name).disabled, name).toBe(true);
       expect(option(name).textContent).toBe("Cursor Agent (tools can't be turned off)");
     }
-    expect(screen.getAllByText(/Its tools can't be turned off/).length).toBe(2);
+    expect(screen.getAllByText(/This CLI keeps its tools enabled/).length).toBe(2);
     // Only Claude Code (installed, one-shot capable) has a test button.
     expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(1);
   });
@@ -473,7 +473,7 @@ describe("LlmProvidersSection", () => {
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
 
-    const chatSelect = screen.getByRole("combobox", { name: "Chat" });
+    const chatSelect = screen.getByRole("combobox", { name: "Default agent CLI" });
     await user.selectOptions(chatSelect, "cli:claude");
 
     expect(
@@ -487,7 +487,9 @@ describe("LlmProvidersSection", () => {
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
 
-    const chatSelect = screen.getByRole("combobox", { name: "Chat" }) as HTMLSelectElement;
+    const chatSelect = screen.getByRole("combobox", {
+      name: "Default agent CLI",
+    }) as HTMLSelectElement;
     const values = Array.from(chatSelect.options).map((option) => option.value);
     expect(values).toEqual([
       "cli:claude",
@@ -507,7 +509,7 @@ describe("LlmProvidersSection", () => {
     mocks.llmProviders.mockResolvedValue(sampleProviders);
     mocks.llmDetectClis.mockResolvedValue(sampleClis.map((cli) => ({ ...cli, installed: false })));
     render(<LlmProvidersSection />);
-    const chatSelect = await screen.findByRole("combobox", { name: "Chat" });
+    const chatSelect = await screen.findByRole("combobox", { name: "Default agent CLI" });
     expect(chatSelect).toHaveValue("cli:claude");
     expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
   });
@@ -529,7 +531,7 @@ describe("LlmProvidersSection", () => {
     });
     render(<LlmProvidersSection />);
     const chatSelect = (await screen.findByRole("combobox", {
-      name: "Chat",
+      name: "Default agent CLI",
     })) as HTMLSelectElement;
     await waitFor(() => expect(chatSelect.value).toBe("cli:claude"));
 

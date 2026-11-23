@@ -86,10 +86,6 @@ export function isAccessibilityBlocked(state?: string) {
   return state !== undefined && state !== "granted";
 }
 
-export function isNewSessionShortcut(event: KeyboardEvent) {
-  return event.key.toLowerCase() === "n" && isPrimaryShortcut(event);
-}
-
 export function isCreateNoteShortcut(event: KeyboardEvent) {
   // Primary modifier + Shift + N. isPrimaryShortcut rejects Shift, so check
   // the primary modifier with Shift masked off, then require Shift on top.

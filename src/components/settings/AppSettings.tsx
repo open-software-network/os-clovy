@@ -1,5 +1,4 @@
 import { LocalTranscriptionSettings } from "./LocalTranscriptionSettings";
-import { BackgroundSettings } from "./BackgroundSettings";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -111,6 +110,7 @@ import {
 } from "../../lib/experimental-flags";
 import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
+import { McpServerSection } from "./McpServerSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
@@ -121,12 +121,6 @@ import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { activityStatus } from "../../lib/activity-capture";
 import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
-import {
-  getStoredDateFormat,
-  setStoredDateFormat,
-  type DateFormatPreference,
-} from "../../lib/date-format";
-
 function themeOptions(t: TFunction): readonly {
   value: ThemePreference;
   label: ReactNode;
@@ -185,14 +179,6 @@ function fontScaleOptions(t: TFunction): readonly {
       ariaLabel: t("settings.textSize.optionAria", { size: label }),
     };
   });
-}
-
-function dateFormatOptions(t: TFunction) {
-  return [
-    { value: "system", label: t("settings.dateFormat.system") },
-    { value: "month-first", label: t("settings.dateFormat.monthFirst") },
-    { value: "day-first", label: t("settings.dateFormat.dayFirst") },
-  ] satisfies { value: DateFormatPreference; label: string }[];
 }
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
@@ -356,8 +342,6 @@ type AppSettingsProps = {
   // data-note-detail-scroller on .main-panel-body and the detail owns its own
   // scroll region under a pinned breadcrumb bar.
   onDetailPinnedChange?: (pinned: boolean) => void;
-  // Opens a new agent session that runs a skill bundle's slash command.
-  onStartBundleChat?: (prompt: string) => void;
   activitySupported?: boolean;
   // Runs the updater's manual check. Absent in a development build, which
   // never checks, so the Updates section does not render.
@@ -382,7 +366,6 @@ export function AppSettings({
   activeTab: controlledTab,
   onTabChange,
   onDetailPinnedChange,
-  onStartBundleChat,
   onCheckForUpdates,
   checkingForUpdates = false,
   activitySupported: activitySupportedProp,
@@ -424,7 +407,6 @@ export function AppSettings({
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
-  const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
   const experimentalFlags = useExperimentalFlags();
   const experimentalUnlockClicksRef = useRef({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
@@ -1434,7 +1416,6 @@ export function AppSettings({
                     />
                   </div>
                 </div>
-                <BackgroundSettings />
                 <div className="settings-row">
                   <div className="settings-row-info">
                     <h3 className="settings-row-title">{t("settings.textSize.title")}</h3>
@@ -1473,31 +1454,6 @@ export function AppSettings({
                       onChange={(id) => {
                         setBrand(id as BrandId);
                         setStoredBrand(id as BrandId);
-                      }}
-                    />
-                  </div>
-                </div>
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">{t("settings.dateFormat.title")}</h3>
-                    <p className="settings-row-description">
-                      {t("settings.dateFormat.description")}
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <Select
-                      value={dateFormat}
-                      options={dateFormatOptions(t)}
-                      placeholder={t("settings.dateFormat.system")}
-                      ariaLabel={t("settings.dateFormat.aria", {
-                        format:
-                          dateFormatOptions(t).find((option) => option.value === dateFormat)
-                            ?.label ?? t("settings.dateFormat.system"),
-                      })}
-                      onChange={(value) => {
-                        const next = value as DateFormatPreference;
-                        setDateFormat(next);
-                        setStoredDateFormat(next);
                       }}
                     />
                   </div>
@@ -2152,6 +2108,13 @@ export function AppSettings({
 
         {activeTab === "agent" ? (
           <AgentSettingsSection folders={folders} onFoldersImported={onFoldersImported} />
+        ) : null}
+
+        {activeTab === "mcp" ? (
+          <>
+            <SettingsPageHeader title={t("mcpServer.tab")} />
+            <McpServerSection />
+          </>
         ) : null}
 
         {activeTab === "memory" ? (

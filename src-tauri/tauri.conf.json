@@ -42,23 +42,6 @@
         "visible": false
       },
       {
-        "label": "agent-hud",
-        "url": "/agent-hud.html",
-        "title": "Clovy Agents",
-        "width": 240,
-        "height": 48,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "backgroundColor": "#00000000",
-        "alwaysOnTop": true,
-        "visibleOnAllWorkspaces": true,
-        "focusable": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": false
-      },
-      {
         "label": "meeting-hud",
         "url": "/meeting-hud.html",
         "title": "Clovy Recording",
@@ -88,7 +71,6 @@
       "capabilities": [
         "main",
         "hud",
-        "agent-hud",
         "meeting-hud"
       ]
     }

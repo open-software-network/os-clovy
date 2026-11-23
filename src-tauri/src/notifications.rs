@@ -25,6 +25,8 @@ use tauri::AppHandle;
 const MAIN_WINDOW_LABEL: &str = "main";
 #[cfg(target_os = "macos")]
 const AGENT_OPEN_EVENT: &str = "clovy:agent:open";
+#[cfg(target_os = "macos")]
+const ROUTINE_OPEN_EVENT: &str = "clovy:routine:open";
 /// Opens the "Today" view at a day's summary (activity notifications).
 const TODAY_OPEN_EVENT: &str = "clovy:today:open";
 
@@ -34,6 +36,7 @@ const TODAY_OPEN_EVENT: &str = "clovy:today:open";
 static NOTIFICATION_APP: OnceLock<AppHandle> = OnceLock::new();
 
 static AGENT_OPEN_QUEUE: Mutex<AgentOpenQueue> = Mutex::new(AgentOpenQueue::new());
+static ROUTINE_OPEN_QUEUE: Mutex<AgentOpenQueue> = Mutex::new(AgentOpenQueue::new());
 /// Same handshake for activity notifications; the queued value is the day.
 static TODAY_OPEN_QUEUE: Mutex<AgentOpenQueue> = Mutex::new(AgentOpenQueue::new());
 
@@ -64,6 +67,9 @@ pub struct AppNotificationRequest {
     /// Agent session to open when the user clicks the notification.
     #[serde(default)]
     session_id: Option<String>,
+    /// Stored session of the routine result to open.
+    #[serde(default)]
+    routine_session_id: Option<String>,
 }
 
 /// Decides whether a notification click can be delivered to the webview now
@@ -119,6 +125,12 @@ pub fn agent_open_ready() -> Option<String> {
     lock_queue().mark_ready()
 }
 
+/// Recovers a routine result clicked before the webview was ready.
+#[tauri::command]
+pub fn routine_open_ready() -> Option<String> {
+    lock_routine_queue().mark_ready()
+}
+
 /// Marks the webview ready for `clovy:today:open` events and returns the day
 /// of an activity notification clicked before that.
 #[tauri::command]
@@ -145,12 +157,13 @@ pub fn send_today_notification(
             sound: None,
             group: Some(format!("clovy-today-{}", notification.kind)),
             session_id: None,
+            routine_session_id: None,
         },
     )
 }
 
-/// Posts a notification. On macOS the native path attaches the session id so
-/// a click deep-links into the chat; elsewhere (and when the native center is
+/// Posts a notification. The macOS native path can link to a routine result.
+/// Elsewhere (and when the native center is
 /// unavailable) the plugin posts it without click-through.
 #[tauri::command]
 pub fn send_app_notification(
@@ -187,6 +200,12 @@ fn lock_queue() -> std::sync::MutexGuard<'static, AgentOpenQueue> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_routine_queue() -> std::sync::MutexGuard<'static, AgentOpenQueue> {
+    ROUTINE_OPEN_QUEUE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn lock_today_queue() -> std::sync::MutexGuard<'static, AgentOpenQueue> {
     TODAY_OPEN_QUEUE
         .lock()
@@ -217,12 +236,26 @@ fn handle_today_activation(day: String, kind: String, snooze: bool) {
 /// Runs on a notification click: focus the app, then route the session id to
 /// the webview (or queue it until the frontend is ready). A notification
 /// without a session id keeps the old behavior of just opening the app.
-fn handle_notification_activation(session_id: Option<String>) {
+fn handle_notification_activation(session_id: Option<String>, routine_session_id: Option<String>) {
     let Some(app) = NOTIFICATION_APP.get() else {
         return;
     };
     crate::main_window::show(app);
-    if let Some(session_id) = lock_queue().on_activation(session_id) {
+    let legacy = lock_queue().on_activation(session_id);
+    let routine = lock_routine_queue().on_activation(routine_session_id);
+    if let Some(session_id) = routine {
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::Emitter;
+            let _ = app.emit_to(
+                MAIN_WINDOW_LABEL,
+                ROUTINE_OPEN_EVENT,
+                serde_json::json!({ "sessionId": session_id }),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = session_id;
+    } else if let Some(session_id) = legacy {
         #[cfg(target_os = "macos")]
         {
             use tauri::Emitter;
@@ -252,6 +285,7 @@ mod macos {
     /// `userInfo` keys carrying the agent session on Clovy's own notifications.
     const SESSION_ID_KEY: &str = "clovyAgentSessionId";
     const LEGACY_SESSION_ID_KEY: &str = "juneAgentSessionId";
+    const ROUTINE_SESSION_ID_KEY: &str = "clovyRoutineSessionId";
     /// `userInfo` keys of activity notifications (day and notice kind).
     const TODAY_DAY_KEY: &str = "clovyTodayDay";
     const TODAY_KIND_KEY: &str = "clovyTodayKind";
@@ -343,13 +377,16 @@ mod macos {
                 let sound = NSString::from_str(sound);
                 let _: () = msg_send![notification, setSoundName: &*sound];
             }
-            if let Some(session_id) = &request.session_id {
+            let destination = request
+                .routine_session_id
+                .as_ref()
+                .map(|id| (ROUTINE_SESSION_ID_KEY, id))
+                .or_else(|| request.session_id.as_ref().map(|id| (SESSION_ID_KEY, id)));
+            if let Some((key, session_id)) = destination {
                 if let Some(dictionary_class) = AnyClass::get(c"NSMutableDictionary") {
-                    let key = NSString::from_str(SESSION_ID_KEY);
-                    let legacy_key = NSString::from_str(LEGACY_SESSION_ID_KEY);
+                    let key = NSString::from_str(key);
                     let value = NSString::from_str(session_id);
                     let user_info: *mut AnyObject = msg_send![dictionary_class, dictionary];
-                    let _: () = msg_send![user_info, setObject: &*value, forKey: &*legacy_key];
                     let _: () = msg_send![user_info, setObject: &*value, forKey: &*key];
                     let _: () = msg_send![notification, setUserInfo: user_info];
                 }
@@ -464,7 +501,9 @@ mod macos {
         }
         let session_id =
             unsafe { user_info_string(notification, &[SESSION_ID_KEY, LEGACY_SESSION_ID_KEY]) };
-        handle_notification_activation(session_id);
+        let routine_session_id =
+            unsafe { user_info_string(notification, &[ROUTINE_SESSION_ID_KEY]) };
+        handle_notification_activation(session_id, routine_session_id);
     }
 
     fn delegate_class() -> Option<&'static AnyClass> {

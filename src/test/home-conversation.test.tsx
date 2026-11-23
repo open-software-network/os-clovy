@@ -32,8 +32,6 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 import { AgentWorkspace } from "../components/agent/AgentWorkspace";
-import { Sidebar } from "../components/sidebar/Sidebar";
-import { AGENT_SESSIONS_HYDRATED_EVENT } from "../lib/agent-events";
 import { resetAgentSessionDraftsForTests } from "../lib/agent-session-drafts";
 import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
 
@@ -404,34 +402,5 @@ describe("Home conversation on the default CLI engine", () => {
     expect(JSON.parse(window.localStorage.getItem("clovy:home:task-handoffs:v1") ?? "{}")).toEqual(
       JSON.parse(handoffStorage),
     );
-  });
-
-  it("keeps the Home session out of the sidebar sessions", async () => {
-    const other = { ...homeSession, id: "other-session", title: "Wine research", model: CLAUDE };
-    render(
-      <Sidebar
-        notes={[]}
-        activeView="notes"
-        onChangeView={vi.fn()}
-        onSelectNote={vi.fn()}
-        onNewAgentSession={vi.fn()}
-        onRenameAgentSession={vi.fn()}
-        onSelectAgentSession={vi.fn()}
-        homeStoredSessionId={homeSession.id}
-      />,
-    );
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_SESSIONS_HYDRATED_EVENT, {
-          detail: {
-            sessions: [{ ...homeSession, title: "Home thread", model: CLAUDE }, other],
-            partitions: {},
-          },
-        }),
-      );
-    });
-
-    expect(await screen.findByText("Wine research")).toBeVisible();
-    expect(screen.queryByText("Home thread")).not.toBeInTheDocument();
   });
 });

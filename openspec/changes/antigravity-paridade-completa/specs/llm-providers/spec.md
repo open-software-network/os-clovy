@@ -7,46 +7,38 @@ O Clovy SHALL funcionar com apenas Claude Code, apenas Codex ou apenas Antigravi
 
 #### Scenario: Um único motor instalado
 - **WHEN** somente um dos três motores está instalado
-- **THEN** novas sessões, chats de nota e rotinas elegíveis usam esse motor sem iniciar nem exigir os outros dois
+- **THEN** rotinas, geração de notas e Atividade usam esse motor nos usos elegíveis, sem iniciar nem exigir os outros dois
 
 #### Scenario: Escolha explícita preservada
 - **WHEN** o usuário já escolheu um dos três motores e muda a lista de instalados
 - **THEN** a escolha é mantida e uma eventual indisponibilidade é explicada sem troca silenciosa
 
 ### Requirement: Perfil Antigravity e autenticação gerenciados pelo app
-O Clovy SHALL usar um único contexto de perfil Antigravity próprio para chat, notas, atividade, teste de provedor e entrada de autenticação nativa. O ambiente pessoal do app e a ingestão de sessões MUST permanecer independentes. Instalação ou versão do binário MUST NOT ser apresentadas como prova de autenticação desse perfil; o app MUST NOT copiar credenciais, usar outro motor ou aceitar consentimento nativo em nome da pessoa.
+O Clovy SHALL usar um único contexto de perfil Antigravity próprio para rotinas, notas, atividade, teste de provedor e entrada de autenticação nativa. O ambiente pessoal do app e a ingestão de sessões MUST permanecer independentes. Instalação ou versão do binário MUST NOT ser apresentadas como prova de autenticação desse perfil; o app MUST NOT copiar credenciais, usar outro motor ou aceitar consentimento nativo em nome da pessoa.
 
 #### Scenario: Primeira autenticação no Clovy
 - **WHEN** o usuário inicia a autenticação do Antigravity nos ajustes do Clovy
 - **THEN** o app abre o fluxo nativo no perfil próprio, sem prompt de tarefa e sem alterar o HOME do processo principal ou o perfil pessoal
 
 #### Scenario: Teste e execução compartilham a origem
-- **WHEN** o usuário testa o provedor e depois executa chat, nota ou resumo com Antigravity
+- **WHEN** o usuário testa o provedor e depois executa rotina, geração de nota ou resumo com Antigravity
 - **THEN** essas operações usam o mesmo perfil gerenciado; falta de login é explicada sem tomar o login pessoal ou outro runtime como substituto
 
-#### Scenario: Continuidade após adoção do perfil próprio
-- **WHEN** uma sessão contém identificador Antigravity criado no HOME anterior ou de origem desconhecida
-- **THEN** o app preserva sua história e inicia a conversa nativa no perfil atual com replay canônico autorizado, sem tentar retomar o identificador incompatível ou copiar dados do SDK
+#### Scenario: Preservação de dados após adoção do perfil próprio
+- **WHEN** existe um identificador Antigravity criado no HOME anterior ou de origem desconhecida
+- **THEN** o app preserva os dados e seus limites de acesso, sem assumir o identificador como autoridade do perfil atual
 
 
 ### Requirement: Pool único das ferramentas do Clovy
-Claude Code, Codex e Antigravity SHALL receber do mesmo gateway o catálogo autorizado das ferramentas do Clovy e de seus conectores. O alcance MUST depender da superfície, do vínculo e da política do app, não do motor. Credenciais, efeitos, aprovações e clarificações MUST permanecer sob a autoridade do Clovy, sem catálogos ou autorizações paralelos por runtime.
+Claude Code, Codex e Antigravity SHALL receber do mesmo gateway o catálogo autorizado das ferramentas do Clovy e de seus conectores. O alcance MUST depender da superfície, do vínculo e da política do app, não do motor. Credenciais, efeitos e aprovações MUST permanecer sob a autoridade do Clovy, sem catálogos ou autorizações paralelos por runtime. Clientes externos seguem o contrato de `retirar-chat-do-clovy`.
 
-#### Scenario: Contexto e ação aprovados
-- **WHEN** uma conversa em qualquer um dos três motores referencia uma nota e solicita uma alteração com aprovação
-- **THEN** a leitura usa o gateway do Clovy, a alteração aguarda a decisão no app e a aprovação produz exatamente um efeito e o resultado correspondente, com os mesmos contratos nos três motores
+#### Scenario: Acesso a nota de uma rotina
+- **WHEN** uma rotina em qualquer um dos três motores referencia uma nota autorizada e solicita leitura
+- **THEN** a leitura usa o gateway do Clovy e retorna o resultado com o mesmo contrato nos três motores
 
-#### Scenario: Negação e cancelamento
-- **WHEN** o usuário nega ou cancela enquanto uma ferramenta aguarda aprovação
-- **THEN** a ferramenta não recebe autorização, a autoridade é revogada e o histórico termina sem indicador de execução permanente nem resultado fabricado
-
-#### Scenario: Continuidade e histórico
-- **WHEN** duas mensagens são enviadas e a conversa é reaberta
-- **THEN** a segunda execução retoma a conversa do motor atual e os itens reais mantêm identidade, ordem e resultado
-
-#### Scenario: Alternância preserva contexto e alcance
-- **WHEN** o usuário alterna Claude Code, Codex e Antigravity entre mensagens da mesma conversa, inclusive retornando ao primeiro motor
-- **THEN** o novo turno recebe a continuidade do contexto autorizado a partir do histórico persistido, usa o mesmo pool e não retoma uma conversa interna desatualizada nem reutiliza aprovações ou vínculos do motor anterior
+#### Scenario: Ação protegida ou execução cancelada
+- **WHEN** uma rotina pede uma ação protegida sem autorização ou sua execução é cancelada
+- **THEN** a ação sem autorização é recusada e a execução cancelada perde o vínculo, com estado e resultado verdadeiros no histórico
 
 #### Scenario: Conector e ferramenta com pré-requisito
 - **WHEN** uma ferramenta do gateway depende de conector, credencial, permissão nativa ou provedor de mídia
@@ -69,4 +61,4 @@ Antigravity SHALL poder executar a geração de notas e os recursos de atividade
 
 #### Scenario: Leitura de sessões é independente
 - **WHEN** o usuário liga a leitura de sessões Antigravity
-- **THEN** isso não altera por si só o provedor do chat ou da atividade, não modifica os arquivos originais e não reingere chamadas marcadas do próprio Clovy
+- **THEN** o provedor selecionado para Atividade e os demais usos permanece o mesmo, os arquivos originais são preservados e as chamadas marcadas do próprio Clovy são excluídas da ingestão

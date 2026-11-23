@@ -12,7 +12,7 @@ export type UseAppTabEventsDependencies = {
   closeTab: (id: string) => void;
   cycleTab: (delta: number) => void;
   dispatch: React.Dispatch<NotesAction>;
-  openNewChatTab: () => void;
+  openNewTab: () => void;
   pendingCalendarContextAdoptionsRef: React.MutableRefObject<Set<string>>;
   setTabs: React.Dispatch<React.SetStateAction<Tab[]>>;
   tabs: Tab[];

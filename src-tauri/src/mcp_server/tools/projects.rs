@@ -1,6 +1,7 @@
 //! Projects are plural folder associations within the host-bound partition.
 use super::{ToolCtx, ToolGroup};
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest};
+use crate::db::repositories::McpMutation;
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -57,7 +58,7 @@ impl ToolGroup for ProjectTools {
         name: &'a str,
         args: &'a Value,
     ) -> BoxFuture<'a, Result<Value, AppError>> {
-        Box::pin(async move { dispatch(ctx, name, args).await })
+        Box::pin(async move { dispatch(ctx, None, name, args).await })
     }
 }
 fn invalid(message: &str) -> AppError {
@@ -180,25 +181,22 @@ async fn ensure_object(
     }
     Ok(())
 }
-async fn dispatch(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, AppError> {
-    let binding = ctx
-        .binding
-        .ok_or_else(|| AppError::new("turn_required", "A bound turn is required."))?;
-    ctx.revalidate().await?;
+pub(super) async fn dispatch(
+    ctx: &ToolCtx<'_>,
+    external: Option<&ExternalCall<'_>>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    ctx.revalidate_local(external).await?;
     validate(name, args)?;
-    if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
-        return Err(AppError::new(
-            "routine_tool_not_enabled",
-            "This tool is not enabled for the routine.",
-        ));
-    }
+    ensure_routine_allowed(ctx, name).await?;
     let profile = &ctx.data.profile;
     if name == "list_projects" {
         let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20);
         let offset = args.get("offset").and_then(Value::as_i64).unwrap_or(0);
         let rows=query("SELECT id,name,description,instructions,memory_disabled,local_path,created_at,updated_at FROM folders WHERE profile=? AND deleted_at IS NULL ORDER BY created_at,id LIMIT ? OFFSET ?").bind(profile).bind(limit+1).bind(offset).fetch_all(&ctx.data.notes).await?;
         return Ok(
-            json!({"items":rows.iter().take(limit as usize).map(project).collect::<Vec<_>>(),"nextOffset":if rows.len()>limit as usize {Some(offset.saturating_add(limit))}else{None}}),
+            json!({"items":rows.iter().take(limit as usize).map(|row| project_projection(project(row), external.is_some())).collect::<Vec<_>>(),"nextOffset":if rows.len()>limit as usize {Some(offset.saturating_add(limit))}else{None}}),
         );
     }
     let id = if name == "create_project" {
@@ -214,22 +212,37 @@ async fn dispatch(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, 
     };
     if name == "get_project" {
         let mut result = old.unwrap();
-        for (field, table) in [
-            ("noteCount", "note_folders"),
-            ("conversationCount", "session_folders"),
-            ("memoryCount", "memories"),
-        ] {
-            // Table names are host constants, never input.
-            let count: i64 = sqlx::query_scalar::query_scalar(&format!(
-                "SELECT COUNT(*) FROM {table} WHERE folder_id=?"
-            ))
+        if external.is_some() {
+            let note_count: i64 = sqlx::query_scalar::query_scalar(
+                "SELECT COUNT(*) FROM note_folders nf JOIN notes n ON n.id = nf.note_id WHERE nf.folder_id = ? AND n.profile = ?",
+            ).bind(&id).bind(profile).fetch_one(&mut *tx).await?;
+            let memory_count: i64 = sqlx::query_scalar::query_scalar(
+                "SELECT COUNT(*) FROM memories WHERE folder_id = ? AND profile = ?",
+            )
             .bind(&id)
+            .bind(profile)
             .fetch_one(&mut *tx)
             .await?;
-            result[field] = json!(count);
+            result["noteCount"] = json!(note_count);
+            result["memoryCount"] = json!(memory_count);
+        } else {
+            for (field, table) in [
+                ("noteCount", "note_folders"),
+                ("conversationCount", "session_folders"),
+                ("memoryCount", "memories"),
+            ] {
+                // Table names are host constants, never input.
+                let count: i64 = sqlx::query_scalar::query_scalar(&format!(
+                    "SELECT COUNT(*) FROM {table} WHERE folder_id=?"
+                ))
+                .bind(&id)
+                .fetch_one(&mut *tx)
+                .await?;
+                result[field] = json!(count);
+            }
         }
         tx.commit().await?;
-        return Ok(result);
+        return Ok(project_projection(result, external.is_some()));
     }
     if name.contains("_project") && (name.starts_with("assign_") || name.starts_with("remove_")) {
         ensure_object(&mut tx, profile, name, args).await?;
@@ -239,26 +252,22 @@ async fn dispatch(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, 
     } else {
         None
     };
-    tx.commit().await?;
-    let preview=delete_snapshot.as_ref().map(|notes|json!({"project":old,"deleteNotes":args["deleteNotes"],"noteCount":notes.len(),"notes":notes.iter().take(100).map(|(id,title)|json!({"id":id,"title":title})).collect::<Vec<_>>(),"previewTruncated":notes.len()>100,"conversationsPreserved":true,"projectMemoriesDeleted":true}).to_string());
-    // Resolve storage before approval and before any database effect.
-    let cleanup_paths = if name == "delete_project" && args["deleteNotes"] == true {
-        let app = ctx.app.ok_or_else(|| {
-            AppError::new("storage_unavailable", "Recording storage is unavailable.")
-        })?;
-        Some(
-            crate::app_paths::AppPaths::from_data_dir(
-                crate::app_paths::app_data_dir(app)
-                    .map_err(|e| AppError::new("storage_unavailable", e.to_string()))?,
-            )
-            .map_err(|e| AppError::new("storage_unavailable", e.to_string()))?,
-        )
+    let target = if external.is_some() {
+        external_target(&mut tx, name, args, &id, profile, old.as_ref()).await?
     } else {
         None
     };
-    ctx.broker()?
-        .request(
-            &ApprovalTurn::from(binding),
+    tx.commit().await?;
+    let preview=delete_snapshot.as_ref().map(|notes|json!({"project":old,"deleteNotes":args["deleteNotes"],"noteCount":notes.len(),"notes":notes.iter().take(100).map(|(id,title)|json!({"id":id,"title":title})).collect::<Vec<_>>(),"previewTruncated":notes.len()>100,"conversationsPreserved":true,"projectMemoriesDeleted":true}).to_string());
+    // Resolve storage before approval and before any database effect.
+    let recording_data = if name == "delete_project" && args["deleteNotes"] == true {
+        Some(ctx.recording_data(external)?)
+    } else {
+        None
+    };
+    let authority = ctx
+        .approve_local(
+            external,
             ApprovalRequest {
                 tool: name.into(),
                 call_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -270,23 +279,30 @@ async fn dispatch(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, 
                         _ => "Change a project association",
                     }
                     .into(),
-                    description: "Change projects in the bound data partition.".into(),
+                    description: if name == "delete_project" {
+                        "Permanently remove this project, its listed note associations and its listed memories. Delete the listed notes and recordings only when deleteNotes is true."
+                    } else {
+                        "Change projects in the selected data partition."
+                    }.into(),
                     arguments: args.clone(),
                     preview,
                 },
             },
+            target.as_ref(),
         )
-        .await
-        .map_err(|e| AppError::new(e.code(), e.message()))?;
-    ctx.revalidate().await?;
-    if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
-        return Err(AppError::new(
-            "routine_tool_not_enabled",
-            "This tool is not enabled for the routine.",
-        ));
-    }
+        .await?;
+    ctx.revalidate_local(external).await?;
+    ensure_routine_allowed(ctx, name).await?;
+    let cleanup_paths = recording_data
+        .map(crate::app_paths::AppPaths::from_data_dir)
+        .transpose()
+        .map_err(|e| AppError::new("storage_unavailable", e.to_string()))?;
     let result = apply(
-        project_turn(ctx)?,
+        ProjectMutation {
+            pool: &ctx.data.notes,
+            profile,
+            authority,
+        },
         name,
         args,
         &id,
@@ -329,53 +345,126 @@ async fn dispatch(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, 
     if name == "delete_project" {
         value["audioCleanupFailures"] = json!(cleanup_failures);
     }
-    Ok(value)
+    Ok(project_projection(value, external.is_some()))
+}
+
+async fn ensure_routine_allowed(ctx: &ToolCtx<'_>, name: &str) -> Result<(), AppError> {
+    if let Some(binding) = ctx.binding {
+        if !super::routine_tool_allowed(&ctx.data.notes, binding, name).await? {
+            return Err(AppError::new(
+                "routine_tool_not_enabled",
+                "This tool is not enabled for the routine.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn project_projection(mut value: Value, external: bool) -> Value {
+    if external {
+        if let Some(object) = value.as_object_mut() {
+            // A project ID is not a filesystem or conversation grant.
+            object.remove("localPath");
+            object.remove("conversationCount");
+        }
+    }
+    value
+}
+
+async fn external_target(
+    tx: &mut Transaction<'_, Sqlite>,
+    name: &str,
+    args: &Value,
+    id: &str,
+    profile: &str,
+    project: Option<&Value>,
+) -> Result<Option<Value>, AppError> {
+    let Some(project) = project else {
+        return Ok(None);
+    };
+    let mut target = json!({"project":project_projection(project.clone(), true)});
+    if matches!(name, "assign_note_project" | "remove_note_project") {
+        let row = query("SELECT id, title, revision FROM notes WHERE id = ? AND profile = ?")
+            .bind(required(args, "noteId")?)
+            .bind(profile)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| AppError::new("note_not_found", "The note was not found."))?;
+        target["note"] = json!({"id":row.get::<String,_>("id"),"title":row.get::<String,_>("title"),"revision":row.get::<i64,_>("revision")});
+    }
+    if name == "delete_project" {
+        let notes = query("SELECT n.id,n.title,n.revision,n.updated_at FROM notes n JOIN note_folders nf ON nf.note_id=n.id WHERE nf.folder_id=? AND n.profile=? ORDER BY n.id LIMIT 101").bind(id).bind(profile).fetch_all(&mut **tx).await?;
+        let memories = query("SELECT id,content,updated_at FROM memories WHERE folder_id=? AND profile=? ORDER BY id LIMIT 101").bind(id).bind(profile).fetch_all(&mut **tx).await?;
+        if notes.len() > 100 || memories.len() > 100 {
+            return Err(AppError::new(
+                "mcp_external_preview_too_large",
+                "Clovy could not preview the entire project deletion for approval.",
+            ));
+        }
+        let mut approved_notes = Vec::with_capacity(notes.len());
+        for row in notes {
+            let note_id: String = row.get("id");
+            let preview = if args["deleteNotes"] == true {
+                crate::db::repositories::mcp_note_delete_target(tx, profile, &note_id).await?
+            } else {
+                json!({"id":note_id,"title":row.get::<String,_>("title"),"revision":row.get::<i64,_>("revision"),"updatedAt":row.get::<String,_>("updated_at")})
+            };
+            approved_notes.push(preview);
+        }
+        target["notes"] = json!(approved_notes);
+        target["memories"] = json!(memories.iter().map(|row| json!({"id":row.get::<String,_>("id"),"content":row.get::<String,_>("content"),"updatedAt":row.get::<String,_>("updated_at")})).collect::<Vec<_>>());
+    }
+    Ok(Some(target))
 }
 
 #[derive(Clone, Copy)]
-struct ProjectTurn<'a> {
+struct ProjectMutation<'a> {
     pool: &'a sqlx_sqlite::SqlitePool,
     profile: &'a str,
-    session_id: &'a str,
-    run_id: &'a str,
-    authority: &'a crate::domain::turn_authority::TurnAuthority,
+    authority: McpMutation<'a>,
 }
-fn project_turn<'a>(ctx: &'a ToolCtx<'_>) -> Result<ProjectTurn<'a>, AppError> {
+
+#[cfg(test)]
+fn project_turn<'a>(ctx: &'a ToolCtx<'_>) -> Result<ProjectMutation<'a>, AppError> {
     let binding = ctx
         .binding
         .ok_or_else(|| AppError::new("turn_required", "A bound turn is required."))?;
-    Ok(ProjectTurn {
+    Ok(ProjectMutation {
         pool: &ctx.data.notes,
         profile: &ctx.data.profile,
-        session_id: &binding.session_id,
-        run_id: &binding.run_id,
-        authority: &binding.authority,
+        authority: McpMutation::Turn(&binding.session_id, &binding.run_id, &binding.authority),
     })
 }
 
 /// The production write boundary is also directly exercised by database tests.
 async fn apply(
-    turn: ProjectTurn<'_>,
+    mutation: ProjectMutation<'_>,
     name: &str,
     args: &Value,
     id: &str,
     snapshot: Option<&[(String, String)]>,
 ) -> Result<(Value, Vec<String>), AppError> {
-    let profile = turn.profile;
-    let mut tx = turn.pool.begin().await?;
-    crate::db::repositories::guard_bound_turn(
-        &mut tx,
-        profile,
-        turn.session_id,
-        turn.run_id,
-        turn.authority,
-    )
-    .await?;
+    let profile = mutation.profile;
+    let mut tx = if matches!(mutation.authority, McpMutation::External(_)) {
+        mutation.pool.begin_with("BEGIN IMMEDIATE").await?
+    } else {
+        mutation.pool.begin().await?
+    };
+    mutation.authority.guard(&mut tx, profile).await?;
     let old = if name != "create_project" {
         Some(ensure_project(&mut tx, profile, id).await?)
     } else {
         None
     };
+    if let Some(expected) = mutation.authority.external_target() {
+        let current = external_target(&mut tx, name, args, id, profile, old.as_ref()).await?;
+        if current.as_ref() != Some(expected) {
+            return Err(AppError::new(
+                "project_conflict",
+                "The project or its approved target changed while the approval was pending.",
+            ));
+        }
+    }
     let now = crate::db::repositories::timestamp();
     let mut files = Vec::new();
     match name {
@@ -408,24 +497,40 @@ async fn apply(
                             "Stop the recording before deleting its note.",
                         ));
                     }
-                    let paths:Vec<String>=sqlx::query_scalar::query_scalar("SELECT path FROM audio_artifacts WHERE note_id=? UNION SELECT partial_path FROM audio_artifacts WHERE note_id=? AND partial_path IS NOT NULL UNION SELECT final_path FROM recording_sessions WHERE note_id=? AND final_path IS NOT NULL UNION SELECT partial_path FROM recording_sessions WHERE note_id=? AND partial_path IS NOT NULL").bind(note).bind(note).bind(note).bind(note).fetch_all(&mut *tx).await?;
-                    files.extend(paths);
+                    let paths =
+                        crate::db::repositories::note_artifact_paths_for_deletion(&mut tx, note)
+                            .await?;
+                    files.extend(crate::db::repositories::with_video_capture_metadata(paths));
                     crate::db::repositories::delete_note_records(&mut tx, note).await?;
                 }
             }
-            query("DELETE FROM note_folders WHERE folder_id=?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            query("DELETE FROM session_folders WHERE folder_id=?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            query("INSERT OR REPLACE INTO memory_tombstones (id,deleted_at) SELECT id,? FROM memories WHERE folder_id=?").bind(&now).bind(id).execute(&mut *tx).await?;
-            query("DELETE FROM memories WHERE folder_id=?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            if matches!(mutation.authority, McpMutation::External(_)) {
+                // Keep historical conversation memberships and any legacy
+                // cross-partition links outside this external approval.
+                query("DELETE FROM note_folders WHERE folder_id=? AND note_id IN (SELECT id FROM notes WHERE profile=?)")
+                    .bind(id).bind(profile).execute(&mut *tx).await?;
+                query("INSERT OR REPLACE INTO memory_tombstones (id,deleted_at) SELECT id,? FROM memories WHERE folder_id=? AND profile=?")
+                    .bind(&now).bind(id).bind(profile).execute(&mut *tx).await?;
+                query("DELETE FROM memories WHERE folder_id=? AND profile=?")
+                    .bind(id)
+                    .bind(profile)
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                query("DELETE FROM note_folders WHERE folder_id=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                query("DELETE FROM session_folders WHERE folder_id=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                query("INSERT OR REPLACE INTO memory_tombstones (id,deleted_at) SELECT id,? FROM memories WHERE folder_id=?").bind(&now).bind(id).execute(&mut *tx).await?;
+                query("DELETE FROM memories WHERE folder_id=?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             query("UPDATE folders SET deleted_at=?,updated_at=? WHERE id=? AND profile=?")
                 .bind(&now)
                 .bind(&now)
@@ -466,6 +571,7 @@ async fn apply(
     } else {
         ensure_project(&mut tx, profile, id).await?
     };
+    mutation.authority.before_commit(profile)?;
     tx.commit().await?;
     Ok((result, files))
 }

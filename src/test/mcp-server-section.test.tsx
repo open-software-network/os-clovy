@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   writeClipboardText: vi.fn(),
+  listen: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -16,6 +17,8 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: mocks.writeClipboardText,
 }));
+
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 import { McpServerSection } from "../components/settings/McpServerSection";
 import { applyInterfaceLocale } from "../i18n/locale";
@@ -50,12 +53,21 @@ function status(overrides: Partial<McpServerStatusDto> = {}): McpServerStatusDto
 
 describe("McpServerSection", () => {
   let current: McpServerStatusDto;
+  let pending: unknown[];
 
   beforeEach(() => {
     current = status();
+    pending = [];
+    mocks.listen.mockResolvedValue(vi.fn());
     mocks.writeClipboardText.mockResolvedValue(undefined);
     mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
       if (command === "mcp_server_status") return current;
+      if (command === "mcp_external_approvals") return pending;
+      if (command === "mcp_external_approval_decide") {
+        const { id } = args as { id: string };
+        pending = pending.filter((request) => (request as { id: string }).id !== id);
+        return;
+      }
       if (command === "mcp_server_set_enabled") {
         const { request } = args as { request: { enabled: boolean } };
         current = { ...current, enabled: request.enabled, running: request.enabled };
@@ -163,5 +175,54 @@ describe("McpServerSection", () => {
     expect(
       screen.getByRole("button", { name: "Copiar configuração do Claude Code" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows the exact pending request as text and submits one decision", async () => {
+    current = status({ enabled: true, running: true });
+    pending = [
+      {
+        id: "memory-request",
+        tool: "save_memory",
+        title: "Save memory",
+        profile: "Fixture profile",
+        preview: "<button>Untrusted fixture content</button>",
+      },
+    ];
+    const user = userEvent.setup();
+    render(<McpServerSection />);
+    expect(await screen.findByText("Save memory")).toBeInTheDocument();
+    expect(screen.getByText("Fixture profile")).toBeInTheDocument();
+    expect(screen.getByText("<button>Untrusted fixture content</button>")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Untrusted fixture content" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Approve once" }));
+    expect(mocks.invoke).toHaveBeenCalledWith("mcp_external_approval_decide", {
+      id: "memory-request",
+      approve: true,
+    });
+    expect(await screen.findByText("Request approved.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+  });
+
+  it("removes a cancelled request after the host invalidates the list", async () => {
+    current = status({ enabled: true, running: true });
+    pending = [
+      {
+        id: "cancelled-request",
+        tool: "save_memory",
+        title: "Save memory",
+        profile: "Fixture profile",
+        preview: "Synthetic memory",
+      },
+    ];
+    render(<McpServerSection />);
+    expect(await screen.findByRole("button", { name: "Deny" })).toBeInTheDocument();
+    const refresh = mocks.listen.mock.calls.find(
+      ([event]) => event === "mcp-external-approvals-changed",
+    )?.[1];
+    expect(refresh).toBeTypeOf("function");
+    pending = [];
+    refresh?.();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Deny" })).toBeNull());
   });
 });

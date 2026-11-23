@@ -60,7 +60,7 @@ impl Listener {
         handler: impl Into<Service>,
         turns: TurnRegistry,
     ) -> std::io::Result<Self> {
-        let Service(handler) = handler.into();
+        let service = handler.into();
         let secret: Arc<str> = load_or_create_secret(dir)?.into();
         let socket = socket_path(dir);
         if let Ok(metadata) = std::fs::symlink_metadata(&socket) {
@@ -113,7 +113,7 @@ impl Listener {
                             handshake,
                             Arc::clone(&slots),
                             turns.clone(),
-                            Arc::clone(&handler),
+                            service.clone(),
                             connections.clone(),
                         ));
                     }

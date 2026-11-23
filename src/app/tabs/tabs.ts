@@ -1,9 +1,5 @@
 import type { SidebarView } from "../../components/sidebar/Sidebar";
 
-// Where an agent session was drilled into from — mirrors the live `agentOrigin`
-// state in App so a restored agent tab rebuilds the same breadcrumb chrome.
-export type AgentOrigin = { kind: "project"; folderId: string } | { kind: "routines" };
-
 // A navigation snapshot: everything needed to re-render a view exactly as the
 // user left it. Each open tab owns one of these. Fields are gated by `view`
 // (a note id is meaningless on the Routines view), which keeps `navEquals`
@@ -16,10 +12,6 @@ export type TabNav = {
   originAllNotes?: boolean;
   // view === "folders"
   folderId?: string;
-  // view === "agent"
-  agentSessionId?: string;
-  agentSessionTitle?: string;
-  agentOrigin?: AgentOrigin;
 };
 
 export type Tab = {
@@ -27,11 +19,20 @@ export type Tab = {
   nav: TabNav;
 };
 
-// A fresh tab lands on the agent hero — a new chat. The caller arms the
-// new-session handshake so the workspace opens on the hero rather than
-// restoring the last conversation.
+type LegacyChatView = "home" | "agent" | "agent-sessions";
+type LegacyChatTabNav = {
+  [View in LegacyChatView]: { view: View; agentSessionId?: string };
+}[LegacyChatView];
+
 export function defaultNav(): TabNav {
-  return { view: "agent" };
+  return { view: "today" };
+}
+
+export function normalizeTabNav(nav: TabNav | LegacyChatTabNav): TabNav {
+  if (nav.view === "home" || nav.view === "agent" || nav.view === "agent-sessions") {
+    return defaultNav();
+  }
+  return nav;
 }
 
 export function makeTabId(): string {
@@ -75,16 +76,6 @@ export function invalidateNoteTabs(tabs: Tab[], noteIds: ReadonlySet<string>): T
   return changed ? next : tabs;
 }
 
-function agentOriginEquals(a?: AgentOrigin, b?: AgentOrigin): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "project" && b.kind === "project") {
-    return a.folderId === b.folderId;
-  }
-  return true;
-}
-
 // Equality scoped to the fields that matter for the given view, so the capture
 // effect doesn't churn the active tab when irrelevant live state shifts.
 export function navEquals(a: TabNav, b: TabNav): boolean {
@@ -98,10 +89,6 @@ export function navEquals(a: TabNav, b: TabNav): boolean {
       );
     case "folders":
       return a.folderId === b.folderId;
-    case "agent":
-      return (
-        a.agentSessionId === b.agentSessionId && agentOriginEquals(a.agentOrigin, b.agentOrigin)
-      );
     default:
       return true;
   }

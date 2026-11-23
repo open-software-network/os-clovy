@@ -3,9 +3,7 @@ import { defineMessages } from "../define";
 export default defineMessages({
   en: {
     // Tab titles and breadcrumb roots
-    "app.nav.home": "Home",
     "app.nav.projects": "Projects",
-    "app.nav.sessions": "Sessions",
     "app.nav.allNotes": "All notes",
     "app.nav.routines": "Routines",
     "app.nav.dictation": "Dictation",
@@ -13,10 +11,7 @@ export default defineMessages({
     "app.nav.meetingNotes": "Meeting notes",
     "app.nav.today": "Today",
     "app.newNote": "New note",
-    "app.newSession": "New session",
     "app.breadcrumb.backTo": "Back to {name}",
-    "app.breadcrumb.backToRoutines": "Back to routines",
-    "app.breadcrumb.backToSessions": "Back to sessions",
     "app.breadcrumb.backToMeetingNotes": "Back to meeting notes",
 
     // Recording
@@ -79,13 +74,10 @@ export default defineMessages({
     "app.audio.downloaded": "Audio downloaded",
     "app.audio.showFile": "Show file",
     "app.session.renameFailed": "Could not save the session name. It may revert after a restart.",
-    "app.session.starting": "Clovy is starting.",
     "app.projects.added": { one: "{count} project added", other: "{count} projects added" },
   },
   "pt-BR": {
-    "app.nav.home": "Início",
     "app.nav.projects": "Projetos",
-    "app.nav.sessions": "Sessões",
     "app.nav.allNotes": "Todas as notas",
     "app.nav.routines": "Rotinas",
     "app.nav.dictation": "Ditado",
@@ -93,10 +85,7 @@ export default defineMessages({
     "app.nav.meetingNotes": "Notas de reunião",
     "app.nav.today": "Hoje",
     "app.newNote": "Nova nota",
-    "app.newSession": "Nova sessão",
     "app.breadcrumb.backTo": "Voltar para {name}",
-    "app.breadcrumb.backToRoutines": "Voltar para rotinas",
-    "app.breadcrumb.backToSessions": "Voltar para sessões",
     "app.breadcrumb.backToMeetingNotes": "Voltar para notas de reunião",
 
     "app.recording.startExpired":
@@ -157,7 +146,6 @@ export default defineMessages({
     "app.audio.showFile": "Mostrar arquivo",
     "app.session.renameFailed":
       "Não foi possível salvar o nome da sessão. Ele pode voltar ao anterior depois de reiniciar.",
-    "app.session.starting": "O Clovy está iniciando.",
     "app.projects.added": {
       one: "{count} projeto adicionado",
       other: "{count} projetos adicionados",

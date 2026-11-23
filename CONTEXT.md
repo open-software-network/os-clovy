@@ -335,11 +335,9 @@ focus target.
 ### Agent sessions
 
 **Home conversation**:
-Clovy's persistent conversation on the home screen. Each message is a turn of
-the default CLI engine in the Home backing session, with the same tools,
-approvals, and errors as other CLI sessions. Each data partition has at most
-one Home backing session, omitted from focused-session lists. Task cards from
-older builds still open the focused **agent session** they started.
+The retired conversation surface of the desktop app. Its backing session,
+items, artifacts, and legacy local storage are historical data. Today is the
+desktop entry point, including when a legacy chat destination is opened.
 _Avoid_: dashboard, default agent session, Hermes Home.
 
 **Agent sessions**:
@@ -838,14 +836,13 @@ idle/personal. No model is called.
 _Avoid_: tag, label, classification by AI.
 
 **Today view**:
-The first-level sidebar view showing one day's activity timeline (sessions,
+The desktop entry point and first-level sidebar view showing one day's activity timeline (sessions,
 gaps, stats, search) and, in its "Day summary" section, the day's
 intelligence. "Today" is its name even when another day is selected.
 _Avoid_: dashboard, journal.
 
 **Clovy MCP server** (`clovy-mcp`):
-The stdio MCP server that lets MCP clients outside Clovy (Claude Code,
-Cursor, CLI chat engines) read the current **data partition**'s notes,
+The stdio MCP server that lets local clients read the current **data partition**'s notes,
 dictations, and memories, and the installation's activity (activity has no
 partition, [ADR-0059](docs/adr/0059-activity-is-per-installation-not-per-data-partition.md)).
 The binary relays to the running app over an authenticated local channel
@@ -853,13 +850,18 @@ The binary relays to the running app over an authenticated local channel
 answers only while Clovy is open with the server on, which it is by default
 until the user turns it off (see [docs/mcp-server.md](docs/mcp-server.md)). It
 is independent of **activity capture**: with capture off it still serves notes,
-dictations, and memories, without activity. Clients outside a Clovy chat
-turn get read-only tools; a CLI chat turn connects with a **turn binding** and
-also gets Clovy's turn-bound tools, whose writes go through the **approval
-broker** ([ADR-0063](docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
-There is no legacy native agent; CLI turns reach Clovy tools through this relay.
+dictations, and memories, without activity. Authenticated clients can request
+applicable actions through an **external MCP approval**. Hosted CLI consumers
+continue to use **turn bindings** and their own policy.
 _Avoid_: Clovy-managed MCP server (the retired in-loop `june_*` servers), MCP
 bridge, plugin.
+
+**External MCP approval** (OpenSpec: _aprovação externa_):
+A one-shot decision in Settings → MCP for an exact operation requested on an
+authenticated local MCP connection. The host binds the request to its connection
+and data partition. The request expires if authority is lost before the effect.
+The preview shows the operation and its target, and the client gets the result.
+_Avoid_: session approval, permission grant.
 
 **Turn binding** (OpenSpec: _vínculo de turno_):
 The link between one Clovy MCP server connection and the CLI chat turn that

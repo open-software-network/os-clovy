@@ -12,10 +12,9 @@ import { dictationSettings, setDictationShortcut } from "../../lib/tauri";
 import type { DictationShortcutSetting } from "../../lib/tauri";
 import { PermissionsStep } from "./steps/PermissionSteps";
 import { AreaStep } from "./steps/AreaStep";
-import { MoodStep } from "./steps/MoodStep";
 import { usePermissionStatuses, useSystemAudioStatus } from "./use-permission-status";
 
-type StepId = "area" | "mood" | "permissions";
+type StepId = "area" | "permissions";
 
 // The product default: bare fn, mirroring DictationShortcutSetting::bare_fn()
 // on the Rust side.
@@ -45,7 +44,7 @@ function isFactoryDefaultShortcut(shortcut: DictationShortcutSetting) {
   );
 }
 
-const ONBOARDING_STEPS: StepId[] = ["area", "mood", "permissions"];
+const ONBOARDING_STEPS: StepId[] = ["area", "permissions"];
 
 type Props = {
   onComplete: () => void;
@@ -60,7 +59,7 @@ function initialStepIndex(steps: StepId[]): number {
   const saved = onboardingResumeStep();
   if (!saved) return 0;
   if (saved === "usage-intent") return Math.max(0, steps.indexOf("area"));
-  if (saved === "personality") return Math.max(0, steps.indexOf("mood"));
+  if (saved === "personality" || saved === "mood") return steps.indexOf("permissions");
   if (saved === "dictation-practice") return Math.max(0, steps.indexOf("permissions"));
   const index = steps.indexOf(saved as StepId);
   return index === -1 ? 0 : index;
@@ -70,7 +69,8 @@ function browserOnboardingDemoStep(): StepId | null {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const params = new URLSearchParams(window.location.search);
   const step = params.get("clovyDemoStep") ?? params.get("juneDemoStep");
-  return step === "area" || step === "mood" || step === "permissions" ? step : null;
+  if (step === "mood") return "permissions";
+  return step === "area" || step === "permissions" ? step : null;
 }
 
 export function OnboardingFlow({ onComplete }: Props) {
@@ -160,8 +160,6 @@ export function OnboardingFlow({ onComplete }: Props) {
               goNext();
             }}
           />
-        ) : stepId === "mood" ? (
-          <MoodStep area={area} onContinue={goNext} />
         ) : stepId === "permissions" ? (
           <PermissionsStep
             area={area}

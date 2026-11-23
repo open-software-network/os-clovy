@@ -1,16 +1,10 @@
-import { useAgentDictationDelivery } from "./use-agent-dictation-delivery";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  markAgentNewSessionPending,
-  type AgentNewSessionDetail,
-} from "../components/agent/session-persistence";
 import { NoteHeaderActions } from "../components/note-editor/NoteHeaderActions";
 import { toast } from "../components/ui/Toaster";
 import { t, useLocale } from "../i18n";
 import { exportNoteAsPdf } from "../lib/note-pdf";
-import { useNoteChat } from "../components/note-chat/useNoteChat";
 import { SETTINGS_TABS } from "../components/settings/AppSettings";
 import type { TabItem } from "../components/tabs/TabBar";
 import { reorderTabs } from "./tabs/tabs";
@@ -23,15 +17,10 @@ import {
   getNote,
   keepMeetingRecording,
   LIVE_TRANSCRIPT_EVENT,
-  listSessionPartitions,
-  listAgentSessions,
   openPrivacySettings,
   recoverRecording,
   revealPath,
   renameFolder,
-  renameAgentSession,
-  agentHudHide,
-  agentHudShow,
   completeNoteSaveFlush,
   NOTE_SAVE_FLUSH_REQUESTED_EVENT,
   patchNote,
@@ -42,35 +31,12 @@ import {
 } from "../lib/tauri";
 import { preloadRecordingSounds } from "../lib/recording-sounds";
 import { preloadAgentSounds } from "../lib/agent-sounds";
-import {
-  AGENT_NEW_SESSION_EVENT,
-  AGENT_SESSION_RENAMED_EVENT,
-  AGENT_SESSIONS_HYDRATED_EVENT,
-  AGENT_SESSIONS_CHANGED_EVENT,
-  emitAgentSessionsChanged,
-  readAgentSessionSnapshotEpoch,
-  type AgentSessionRenamedDetail,
-  type AgentSessionsHydratedDetail,
-} from "../lib/agent-events";
-import { selectSessionProjectContext } from "../lib/agent-project-context";
-import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
 import { messageFromError } from "../lib/errors";
-import { readClovyHomeStoredSessionId, writeClovyHomeStoredSessionId } from "../lib/clovy-home";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
-import {
-  COMPLETED_DEMO_SESSION_PREFIX,
-  SIDEBAR_DEMO_SESSIONS_EVENT,
-  type SidebarDemoSessionsDetail,
-} from "../lib/completed-sessions-demo-ids";
 import {
   getCurrentDataPartitionName,
   DATA_PARTITION_CHANGED_EVENT,
   type DataPartitionChangedDetail,
 } from "../lib/data-partition";
-import {
-  filterAgentSessionsForDataPartition,
-  sessionPartitionMap,
-} from "../lib/session-partition-filter";
 import {
   authoritativeTranscriptCoverageKey,
   clearTerminalLiveTranscriptEvents,
@@ -87,16 +53,7 @@ import {
   notifyRecordingStillMeetingPrompt,
 } from "../lib/recording-notifications";
 import { RecordingTelemetryProvider } from "../lib/recording-telemetry-store";
-import {
-  OPEN_SETTINGS_EVENT,
-  buildAgentMenuBarState,
-  emitAgentMenuBarState,
-} from "../lib/menu-bar";
-import {
-  AGENT_HUD_VISIBILITY_CHANGED_EVENT,
-  setAgentHudEnabled,
-  type AgentHudVisibilityChangedDetail,
-} from "../lib/agent-hud-settings";
+import { OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
 import type { FolderDto } from "../lib/tauri";
 import type { RecordingSourceMode } from "../lib/tauri";
 import { retryPendingAutostartDefault } from "../lib/autostart";
@@ -106,28 +63,20 @@ import {
   isAccessibilityBlocked,
   isCreateNoteShortcut,
   isMicrophoneRecordingBlocked,
-  isNewSessionShortcut,
 } from "./app-helpers";
-export { isAccessibilityBlocked, isMicrophoneRecordingBlocked } from "./app-helpers";
 import {
   ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
-  AGENT_MENU_BAR_SESSION_LIMIT,
-  AGENT_SESSION_STARTUP_RETRY_DELAYS_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
   SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS,
   noteHasDownloadableAudio,
   tabMeta,
 } from "./app-shell";
+export { isAccessibilityBlocked, isMicrophoneRecordingBlocked } from "./app-helpers";
 
 import { useAppExternalEvents } from "./use-app-external-events";
 
 import { useAgentAttentionNotifications } from "./use-agent-attention-notifications";
 import { startAgentRunSettlementRelay } from "../lib/agent-run-settlement";
-
-import { useAgentSessionSync } from "./use-agent-session-sync";
-import { isAgentSessionDeleted } from "../lib/agent-session-drafts";
-
-import { useAgentMenuEvents } from "./use-agent-menu-events";
 
 import { useDataPartitionRefresh } from "./use-data-partition-refresh";
 
@@ -161,15 +110,12 @@ import { useAppDevDemos } from "./use-app-dev-demos";
 
 import { useRecordingTelemetry } from "./use-recording-telemetry";
 
-import { useSessionMetadata } from "./use-session-metadata";
-
 import { useNoteProcessingEvents } from "./use-note-processing-events";
 
 import { useAppState } from "./use-app-state";
 import { renderAppOnboarding } from "./app-onboarding";
 
 export function App() {
-  useAgentDictationDelivery();
   // Subscribes the shell to the interface language: the render helpers and
   // tab titles below read `t` at render time.
   const locale = useLocale();
@@ -201,42 +147,10 @@ export function App() {
     tabsRef,
     activeTabIdRef,
     restoreTargetRef,
-    agentSessions,
-    setAgentSessions,
-    activeAgentSessionId,
-    setActiveAgentSessionId,
-    activeAgentSessionIdRef,
-    activeAgentSessionSeed,
-    setActiveAgentSessionSeed,
-    setActiveAgentSession,
-    agentWorkingSessionIds,
-    setAgentWorkingSessionIds,
-    agentWaitingSessionIds,
-    setAgentWaitingSessionIds,
-    sessionFolders,
-    setSessionFolders,
-    sessionFolderEditsRef,
     folderChangesRef,
-    completedSessions,
-    setCompletedSessions,
-    sessionCompletionWritesRef,
-    sessionCompletionTouchedRef,
-    completedSessionsRef,
-    sessionPartitionsRef,
-    moveDialogSessionIds,
-    setMoveDialogSessionIds,
-    agentOrigin,
-    setAgentOrigin,
-    pendingSessionProjectRef,
-    agentMenuBarSessionsRef,
-    agentMenuBarWorkingSessionIdsRef,
-    agentMenuBarWaitingSessionIdsRef,
-    agentMenuBarLastStatusRef,
-    agentHudEnabledRef,
     mainPanelBodyRef,
     noteDetailScrollRef,
     notesListRef,
-    agentSessionsListRef,
     settingsReturnView,
     setSettingsReturnView,
     settingsTab,
@@ -296,25 +210,6 @@ export function App() {
   const meetingEndFinishHandlerRef = useRef<(sessionId: string) => Promise<boolean>>(
     async () => false,
   );
-  const [homeStoredSessionId, setHomeStoredSessionId] = useState(() =>
-    readClovyHomeStoredSessionId(currentDataPartitionName),
-  );
-  useEffect(() => {
-    setHomeStoredSessionId(readClovyHomeStoredSessionId(currentDataPartitionName));
-  }, [currentDataPartitionName]);
-  const homeStoredSessionIdRef = useRef(homeStoredSessionId);
-  homeStoredSessionIdRef.current = homeStoredSessionId;
-  const focusedAgentSessions = useMemo(
-    () => agentSessions.filter((session) => session.id !== homeStoredSessionId),
-    [agentSessions, homeStoredSessionId],
-  );
-  const rememberHomeSession = useCallback(
-    (sessionId: string) => {
-      writeClovyHomeStoredSessionId(currentDataPartitionName, sessionId);
-      setHomeStoredSessionId(sessionId);
-    },
-    [currentDataPartitionName],
-  );
   const noteSaveControllerRef = useRef<NoteSaveController | null>(null);
   if (!noteSaveControllerRef.current) {
     noteSaveControllerRef.current = new NoteSaveController({
@@ -370,8 +265,6 @@ export function App() {
     getSelectedNoteId,
     recordingStatusRef,
     setActiveView,
-    setAgentSessions,
-    setCompletedSessions,
     setLiveTranscriptEvents,
     setRecordingNote,
   });
@@ -385,80 +278,6 @@ export function App() {
   // wizard owns the permission prompts while it is on screen.
   const appBlocked = onboardingRequired;
   meetingEndReadyRef.current = !appBlocked && bootstrapped;
-  const publishAgentMenuBarState = useCallback(() => {
-    void emitAgentMenuBarState(
-      buildAgentMenuBarState({
-        // Completed sessions are filed away in the app, so they must not stay
-        // openable from the native menu bar's recent-session shortcuts
-        // (JUN-203 review).
-        sessions: agentMenuBarSessionsRef.current.filter(
-          (session) =>
-            session.id !== homeStoredSessionIdRef.current &&
-            !completedSessionsRef.current[session.id],
-        ),
-        workingSessionIds: agentMenuBarWorkingSessionIdsRef.current,
-        waitingSessionIds: agentMenuBarWaitingSessionIdsRef.current,
-        lastStatus: agentMenuBarLastStatusRef.current,
-        agentHudEnabled: agentHudEnabledRef.current,
-        limit: AGENT_MENU_BAR_SESSION_LIMIT,
-      }),
-    );
-  }, []);
-  // Keep the menu bar in step with completion changes: marking a session
-  // complete (or active again) must add/remove it from the native shortcuts,
-  // not just the in-app lists.
-  useEffect(() => {
-    completedSessionsRef.current = completedSessions;
-    publishAgentMenuBarState();
-  }, [completedSessions, publishAgentMenuBarState]);
-  const dataPartitionScopedAgentSessions = useCallback(
-    (sessions: readonly AgentSessionDto[], partitions = sessionPartitionsRef.current) => {
-      if (partitions === null) return [];
-      const currentDataPartition = getCurrentDataPartitionName().trim() || currentDataPartitionName;
-      return filterAgentSessionsForDataPartition(sessions, partitions, currentDataPartition).filter(
-        (session) => !isAgentSessionDeleted(session.id),
-      );
-    },
-    [currentDataPartitionName],
-  );
-  const refreshSessionPartitions = useCallback(async () => {
-    const partitions = sessionPartitionMap(await listSessionPartitions());
-    sessionPartitionsRef.current = partitions;
-    return partitions;
-  }, []);
-  const commitAgentSessions = useCallback(
-    (sessions: readonly AgentSessionDto[], partitions = sessionPartitionsRef.current) => {
-      const scopedSessions = dataPartitionScopedAgentSessions(sessions, partitions);
-      agentMenuBarSessionsRef.current = scopedSessions;
-      setAgentSessions(scopedSessions);
-      // A real refresh replaces the app-level list wholesale, dropping any
-      // __completedDemo rows; purge the sidebar's copy too so the two demo
-      // surfaces never diverge (Greptile, PR #991).
-      if (import.meta.env.DEV) {
-        window.dispatchEvent(
-          new CustomEvent<SidebarDemoSessionsDetail>(SIDEBAR_DEMO_SESSIONS_EVENT, {
-            detail: { clearPrefix: COMPLETED_DEMO_SESSION_PREFIX },
-          }),
-        );
-      }
-      publishAgentMenuBarState();
-    },
-    [dataPartitionScopedAgentSessions, publishAgentMenuBarState],
-  );
-  const applyAgentHudVisibility = useCallback(
-    (enabled: boolean) => {
-      if (agentHudEnabledRef.current === enabled) return;
-      agentHudEnabledRef.current = enabled;
-      publishAgentMenuBarState();
-    },
-    [publishAgentMenuBarState],
-  );
-  const handleAgentHudVisibilityRequest = useCallback((enabled: boolean) => {
-    setAgentHudEnabled(enabled);
-    void (enabled ? agentHudShow() : agentHudHide()).catch((err) => {
-      setError(messageFromError(err));
-    });
-  }, []);
   const selectedNote = state.selectedNote;
   const selectedNoteId = selectedNote?.id;
   const visibleEditorNoteId = activeView === "meetings" ? selectedNoteId : undefined;
@@ -480,28 +299,11 @@ export function App() {
   const selectedNoteTranscriptCoverageKey = authoritativeTranscriptCoverageKey(
     selectedNote?.sourceTranscripts ?? [],
   );
-  // The contextual Ask Clovy panel next to the open note. Scoped to one note:
-  // it only renders while a note is the active view, and closes whenever the
-  // open note changes (below) so it never flies out onto a different or
-  // brand-new note the user didn't open it on.
-  const [noteChatOpen, setNoteChatOpen] = useState(false);
-  const noteChatOpenRef = useRef(noteChatOpen);
-  noteChatOpenRef.current = noteChatOpen;
   const [confirmDeleteNote, setConfirmDeleteNote] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset note-scoped UI on selection change
   useEffect(() => {
-    setNoteChatOpen(false);
     setConfirmDeleteNote(false);
   }, [selectedNoteId]);
-  // The note's Ask Clovy chat is owned here, not inside the panel, so its
-  // session and working state survive the panel closing: a fired-off question
-  // keeps running in the background and the toolbar's Ask Clovy button shows a
-  // working dot until the reply lands.
-  const noteChat = useNoteChat(
-    selectedNote ? { id: selectedNote.id, title: selectedNote.title } : null,
-  );
-  const noteChatSessionIdRef = useRef(noteChat.storedSessionId);
-  noteChatSessionIdRef.current = noteChat.storedSessionId;
   async function handleExportNotePdf() {
     if (!selectedNote) return;
     await exportNoteAsPdf(selectedNote.title, {
@@ -535,9 +337,6 @@ export function App() {
     <NoteHeaderActions
       noteId={selectedNote.id}
       noteTitle={selectedNote.title}
-      askClovyOpen={noteChatOpen}
-      askClovyWorking={noteChat.working}
-      onAskClovy={() => setNoteChatOpen((open) => !open)}
       onExportPdf={() => void handleExportNotePdf()}
       onDownloadAudio={
         noteHasDownloadableAudio(selectedNote) ? () => void handleDownloadNoteAudio() : undefined
@@ -548,23 +347,6 @@ export function App() {
   const originFolder = originFolderId
     ? state.folders.find((folder) => folder.id === originFolderId)
     : undefined;
-  const agentOriginFolder =
-    agentOrigin?.kind === "project"
-      ? state.folders.find((folder) => folder.id === agentOrigin.folderId)
-      : undefined;
-  // The active session's project. Legacy sessions may have multiple project
-  // assignments, so an explicit project origin wins over assignment order;
-  // sessions opened elsewhere fall back to their first assignment.
-  const activeAgentSessionFolder = activeAgentSessionId
-    ? selectSessionProjectContext(
-        state.folders,
-        sessionFolders[activeAgentSessionId],
-        agentOrigin?.kind === "project" ? agentOrigin.folderId : undefined,
-      )
-    : undefined;
-  const agentProjectContextFolder =
-    activeAgentSessionFolder ??
-    (!activeAgentSessionId && agentOrigin?.kind === "project" ? agentOriginFolder : undefined);
   const recoveriesByNote = useMemo(() => {
     const map = new Map<string, (typeof state.activeRecoveries)[number]>();
     for (const recovery of state.activeRecoveries) {
@@ -588,28 +370,19 @@ export function App() {
   // The current live navigation, reduced to a snapshot. Fields are gated by
   // view so the active tab only churns when something it actually shows
   // changes (see navEquals).
-  const { applyNav, activateTab, openTab, openNewChatTab, closeTab, selectedNoteIdRef } =
+  const { applyNav, activateTab, openTab, openNewTab, closeTab, selectedNoteIdRef } =
     useAppNavigation({
-      activeAgentSessionId,
-      activeAgentSessionSeed,
       activeTabId,
       activeTabIdRef,
       activeView,
       activeViewRef,
-      agentOrigin,
-      agentSessions,
       dispatch,
       originAllNotes,
       originFolderId,
-      pendingSessionProjectRef,
       restoreTargetRef,
       selectedNoteId,
-      setActiveAgentSession,
-      setActiveAgentSessionId,
-      setActiveAgentSessionSeed,
       setActiveTabId,
       setActiveView,
-      setAgentOrigin,
       setError,
       setFolderReturnTarget,
       setOriginAllNotes,
@@ -658,7 +431,7 @@ export function App() {
     closeTab,
     cycleTab,
     dispatch,
-    openNewChatTab,
+    openNewTab,
     pendingCalendarContextAdoptionsRef,
     setTabs,
     tabs,
@@ -682,11 +455,10 @@ export function App() {
           tab.nav,
           state.notes,
           state.folders,
-          agentSessions,
           tab.id === activeTabId ? settingsSectionLabel : undefined,
         ),
       })),
-    [tabs, state.notes, state.folders, agentSessions, activeTabId, settingsSectionLabel, locale],
+    [tabs, state.notes, state.folders, activeTabId, settingsSectionLabel, locale],
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
@@ -750,7 +522,7 @@ export function App() {
   useEffect(() => {
     let aborted = false;
     let unlisten: (() => void) | undefined;
-    void listen(OPEN_SETTINGS_EVENT, openSettings).then((cleanup) => {
+    void listen(OPEN_SETTINGS_EVENT, () => openSettings()).then((cleanup) => {
       if (aborted) cleanup();
       else unlisten = cleanup;
     });
@@ -760,33 +532,17 @@ export function App() {
     };
   }, [openSettings]);
 
-  useAppExternalEvents({
-    agentMenuBarSessionsRef,
-    setActiveAgentSession,
-    setActiveView,
-    setAgentOrigin,
-  });
+  useAppExternalEvents(setActiveView);
 
-  const agentSessionsRef = useRef(agentSessions);
-  agentSessionsRef.current = agentSessions;
   useEffect(
     () =>
       startAgentRunSettlementRelay({
-        resolveTitle: (sessionId) =>
-          agentSessionsRef.current.find((session) => session.id === sessionId)?.title,
+        resolveTitle: () => undefined,
+        readQueuedFollowUps: () => ({}),
       }),
     [],
   );
-
-  useAgentAttentionNotifications({
-    activeAgentSessionIdRef,
-    activeViewRef,
-    agentHudEnabledRef,
-    dictationWorkflowActiveRef,
-    noteChatOpenRef,
-    noteChatSessionIdRef,
-    recordingStatusRef,
-  });
+  useAgentAttentionNotifications({ activeViewRef, dictationWorkflowActiveRef, recordingStatusRef });
 
   const flushNotesForUpdate = useCallback(
     () => noteSaveController.flushAll(),
@@ -799,86 +555,6 @@ export function App() {
     flushNotes: flushNotesForUpdate,
   });
 
-  useEffect(() => {
-    publishAgentMenuBarState();
-  }, [publishAgentMenuBarState]);
-
-  useEffect(() => {
-    if (appBlocked || !bootstrapped) return;
-    let cancelled = false;
-    let retryTimeout: number | undefined;
-    let startupSnapshotInvalidated = false;
-    const invalidateStartupSnapshot = () => {
-      startupSnapshotInvalidated = true;
-    };
-    const observeAuthoritativeSnapshot = (event: Event) => {
-      if ((event as CustomEvent<AgentSessionsHydratedDetail>).detail?.replaceExisting) {
-        invalidateStartupSnapshot();
-      }
-    };
-    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
-    window.addEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
-
-    // The one startup load of the session list: the menu bar, the sidebar
-    // (through AGENT_SESSIONS_HYDRATED_EVENT) and the Agent HUD window all
-    // start from it.
-    function loadStartupAgentSessions(attempt: number) {
-      const nativeEpoch = readAgentSessionSnapshotEpoch();
-      // Defer host access so partial test hosts and transient startup failures
-      // enter the normal retry path instead of escaping the effect synchronously.
-      Promise.resolve()
-        .then(() => Promise.all([listAgentSessions(), refreshSessionPartitions()]))
-        .then(([loadedSessions, partitions]) => {
-          if (
-            cancelled ||
-            startupSnapshotInvalidated ||
-            nativeEpoch !== readAgentSessionSnapshotEpoch()
-          )
-            return;
-          const sessions = loadedSessions.filter((session) => !isAgentSessionDeleted(session.id));
-          commitAgentSessions(sessions, partitions);
-          window.dispatchEvent(
-            new CustomEvent<AgentSessionsHydratedDetail>(AGENT_SESSIONS_HYDRATED_EVENT, {
-              detail: { sessions, partitions },
-            }),
-          );
-          if (sessions.length > 0) {
-            emitAgentSessionsChanged({ sessions, workingSessionIds: [], waitingSessionIds: [] });
-          }
-        })
-        .catch(() => {
-          if (cancelled) return;
-          const retryDelay = AGENT_SESSION_STARTUP_RETRY_DELAYS_MS[attempt];
-          if (retryDelay == null) return;
-          retryTimeout = window.setTimeout(() => loadStartupAgentSessions(attempt + 1), retryDelay);
-        });
-    }
-
-    loadStartupAgentSessions(0);
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, invalidateStartupSnapshot);
-      window.removeEventListener(AGENT_SESSIONS_HYDRATED_EVENT, observeAuthoritativeSnapshot);
-      if (retryTimeout != null) {
-        window.clearTimeout(retryTimeout);
-      }
-    };
-  }, [appBlocked, bootstrapped, commitAgentSessions, refreshSessionPartitions]);
-
-  // Project assignments for agent sessions, loaded once storage is up.
-  useSessionMetadata({
-    appBlocked,
-    bootstrapped,
-    currentDataPartitionName,
-    sessionFolderEditsRef,
-    folderChangesRef,
-    sessionCompletionTouchedRef,
-    setCompletedSessions,
-    setError,
-    setSessionFolders,
-  });
-
   // A fresh install whose automatic launch-at-login enable failed during
   // onboarding completion gets another chance on every normal startup:
   // completion hides the wizard, so without this the retry would wait for
@@ -888,72 +564,6 @@ export function App() {
     if (appBlocked) return;
     void retryPendingAutostartDefault();
   }, [appBlocked]);
-
-  useAgentSessionSync({
-    activeViewRef,
-    activeAgentSessionIdRef,
-    tabsRef,
-    setTabs,
-    agentMenuBarLastStatusRef,
-    agentMenuBarSessionsRef,
-    agentMenuBarWaitingSessionIdsRef,
-    agentMenuBarWorkingSessionIdsRef,
-    commitAgentSessions,
-    pendingSessionProjectRef,
-    publishAgentMenuBarState,
-    refreshSessionPartitions,
-    setActiveAgentSession,
-    setActiveAgentSessionId,
-    setActiveAgentSessionSeed,
-    setAgentOrigin,
-    setAgentSessions,
-    setAgentWaitingSessionIds,
-    setAgentWorkingSessionIds,
-    setSessionFolders,
-    sessionFolderEditsRef,
-  });
-
-  useEffect(() => {
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-
-    function handleVisibilityChanged(event: Event) {
-      const detail = (event as CustomEvent<AgentHudVisibilityChangedDetail>).detail;
-      if (detail) applyAgentHudVisibility(detail.enabled);
-    }
-
-    window.addEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleVisibilityChanged);
-    void listen<AgentHudVisibilityChangedDetail>(AGENT_HUD_VISIBILITY_CHANGED_EVENT, (event) =>
-      applyAgentHudVisibility(event.payload.enabled),
-    )
-      .then((cleanup) => {
-        if (aborted) cleanup();
-        else unlisten = cleanup;
-      })
-      .catch(() => {
-        // Native HUD visibility events only exist inside the Tauri shell.
-      });
-
-    return () => {
-      aborted = true;
-      unlisten?.();
-      window.removeEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleVisibilityChanged);
-    };
-  }, [applyAgentHudVisibility]);
-
-  useAgentMenuEvents({
-    agentMenuBarSessionsRef,
-    handleAgentHudVisibilityRequest,
-    pendingSessionProjectRef,
-    dataPartitionScopedAgentSessions,
-    publishAgentMenuBarState,
-    refreshSessionPartitions,
-    setActiveAgentSession,
-    setActiveAgentSessionId,
-    setActiveAgentSessionSeed,
-    setActiveView,
-    setAgentOrigin,
-  });
 
   useDictationEvents({
     dictationWorkflowActiveRef,
@@ -1033,7 +643,7 @@ export function App() {
   }, []);
 
   // A data partition switch swaps all visible data (ADR 0031): re-read scoped
-  // notes, projects, chat mappings, and sessions together. The same refresh
+  // notes and projects together. The same refresh
   // runs when data moves into the current partition, where its name does not
   // change. If a recording is running its note keeps the selection (get_note
   // is unscoped) so the recording view is never yanked mid-take.
@@ -1044,18 +654,13 @@ export function App() {
     activeViewRef,
     appBlocked,
     bootstrapped,
-    commitAgentSessions,
     crossPartitionRecordingNoteIdRef,
     dispatch,
     lastDataPartitionRef,
     lastDataPartitionRefreshRevisionRef,
-    pendingSessionProjectRef,
     dataPartitionRefreshRevision,
     recordingNoteIdRef,
-    refreshSessionPartitions,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setError,
     setFolderReturnTarget,
     setOriginAllNotes,
@@ -1288,55 +893,6 @@ export function App() {
     [state.selectedFolderId],
   );
 
-  // Mirrors the sidebar's "New session" button so the agent sessions list
-  // can start a fresh chat with the same pending-session handshake. Memoized
-  // so the ⌘N keydown listener below subscribes once instead of every render.
-  const handleNewAgentSession = useCallback(() => {
-    pendingSessionProjectRef.current = null;
-    setAgentOrigin(undefined);
-    markAgentNewSessionPending();
-    setActiveAgentSession(undefined);
-    setActiveView("agent");
-    window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT));
-    }, 0);
-  }, []);
-
-  /** stored session id (not the runtime session id). */
-  const handleRenameAgentSession = useCallback(
-    (sessionId: string, title: string) => {
-      const next = title.trim();
-      const currentSession = agentSessions.find((session) => session.id === sessionId);
-      const currentTitle =
-        currentSession?.title.trim() || (currentSession ? "Untitled session" : "");
-      if (!next || next === currentTitle) return;
-
-      const renameSession = (session: AgentSessionDto) =>
-        session.id === sessionId ? { ...session, title: next } : session;
-      setAgentSessions((current) => current.map(renameSession));
-      agentMenuBarSessionsRef.current = agentMenuBarSessionsRef.current.map(renameSession);
-      publishAgentMenuBarState();
-      void renameAgentSession(sessionId, next).catch(() => {
-        setError(t("app.session.renameFailed"));
-      });
-      rememberSessionManuallyTitled(sessionId);
-      window.dispatchEvent(
-        new CustomEvent<AgentSessionRenamedDetail>(AGENT_SESSION_RENAMED_EVENT, {
-          detail: { sessionId, title: next },
-        }),
-      );
-      // The Agent HUD is a separate window listening on the cross-window
-      // sessions channel; without this emit it would show the old title until
-      // an unrelated sessions-changed broadcast.
-      emitAgentSessionsChanged({
-        sessions: agentMenuBarSessionsRef.current,
-        workingSessionIds: [...agentMenuBarWorkingSessionIdsRef.current],
-        waitingSessionIds: [...agentMenuBarWaitingSessionIdsRef.current],
-      });
-    },
-    [agentSessions, publishAgentMenuBarState],
-  );
-
   useEffect(() => {
     if (
       appBlocked ||
@@ -1353,11 +909,6 @@ export function App() {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (document.querySelector('[role="dialog"]')) return;
-      if (isNewSessionShortcut(event)) {
-        event.preventDefault();
-        handleNewAgentSession();
-        return;
-      }
       if (isCreateNoteShortcut(event)) {
         event.preventDefault();
         void handleCreateNote(null);
@@ -1366,7 +917,7 @@ export function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleCreateNote, handleNewAgentSession]);
+  }, [handleCreateNote]);
 
   function handleSelectFolder(folderId?: string) {
     setFolderReturnTarget(undefined);
@@ -1408,67 +959,14 @@ export function App() {
     }
   }
 
-  const {
-    handleDeleteFolder,
-    handleRemoveNoteFromFolder,
-    handleSetNoteFolder,
-    handleSetSessionFolder,
-    handleToggleSessionCompleted,
-    handleRemoveSessionFromFolder,
-    handleOpenNoteChatInAgent,
-    handleStartBundleChat,
-    handleNewAgentSessionInProject,
-  } = createAppDomainActions({
-    agentSessions,
-    completedSessions,
-    dispatch,
-    noteSaveController,
-    pendingSessionProjectRef,
-    sessionCompletionTouchedRef,
-    sessionCompletionWritesRef,
-    sessionFolders,
-    sessionFolderEditsRef,
-    folderChangesRef,
-    setActiveAgentSession,
-    setActiveView,
-    setAgentOrigin,
-    setCompletedSessions,
-    setError,
-    setSessionFolders,
-    state,
-  });
-
-  // Leaves the agent workspace for the project it was entered from.
-  function handleReturnToAgentOriginFolder() {
-    if (agentOrigin?.kind !== "project") return;
-    setActiveView("folders");
-    dispatch({ type: "folderSelected", folderId: agentOrigin.folderId });
-    setActiveAgentSession(undefined);
-    setAgentOrigin(undefined);
-  }
-
-  // Back target for sessions opened outside a project: the Agents view-all.
-  function handleReturnToAgentsList() {
-    setActiveView("agent-sessions");
-    setActiveAgentSession(undefined);
-    setAgentOrigin(undefined);
-  }
-
-  // Jumps from an open session to the project it's filed in (the crumb that
-  // shows even when the session was opened from the Sessions view).
-  function handleOpenSessionProject(folderId: string) {
-    setActiveView("folders");
-    dispatch({ type: "folderSelected", folderId });
-    setActiveAgentSession(undefined);
-    setAgentOrigin(undefined);
-  }
-
-  // Leaves the agent workspace for the run history it was entered from.
-  function handleReturnToRoutines() {
-    setActiveView("routines");
-    setActiveAgentSession(undefined);
-    setAgentOrigin(undefined);
-  }
+  const { handleDeleteFolder, handleRemoveNoteFromFolder, handleSetNoteFolder } =
+    createAppDomainActions({
+      dispatch,
+      noteSaveController,
+      folderChangesRef,
+      setError,
+      state,
+    });
 
   // Opening a note overlaps with the next open (fast clicks): only the newest
   // open's note is shown, and only its failure is reported.
@@ -1831,21 +1329,9 @@ export function App() {
     accessibilityStatus,
     checkingForUpdates,
     onCheckForUpdates: updatesEnabled ? () => runUpdateCheck("manual") : undefined,
-    currentDataPartitionName,
-    activeAgentSessionFolder,
-    activeAgentSessionId,
-    activeAgentSessionSeed,
     activeView,
-    agentOrigin,
-    agentOriginFolder,
-    agentProjectContextFolder,
-    agentSessions: focusedAgentSessions,
-    agentSessionsListRef,
-    agentWaitingSessionIds,
-    agentWorkingSessionIds,
     changeSettingsTab,
     checkingSourceReadiness,
-    completedSessions,
     dispatch,
     folderReturnTarget,
     handleCreateFolder,
@@ -1860,34 +1346,22 @@ export function App() {
     handleKeepRecordingAfterMeetingEnd,
     handleFlushNote,
     handleFoldersImported,
-    handleNewAgentSession,
-    handleNewAgentSessionInProject,
-    handleOpenSessionProject,
     handlePauseRecording,
     handleRecovery,
     handleRemoveNoteFromFolder,
-    handleRemoveSessionFromFolder,
-    handleRenameAgentSession,
     handleRenameFolder,
     handleResumeRecording,
     handleSaveNoteNow,
-    handleReturnToAgentOriginFolder,
-    handleReturnToAgentsList,
     handleReturnToNote,
-    handleReturnToRoutines,
     handleSelectFolder,
     handleSelectNote,
     handleSelectNoteFromAllNotes,
     handleSelectNoteFromFolder,
     handleSetNoteFolder,
-    handleSetSessionFolder,
     handleSourceModeChange,
-    handleStartBundleChat,
     handleStartRecording,
     handleStopNowAfterMeetingEnd,
-    handleToggleSessionCompleted,
     handleUpdateNote,
-    homeStoredSessionId,
     memoryFolderFilter,
     meetingEndCountdown,
     microphoneBlocked,
@@ -1901,19 +1375,14 @@ export function App() {
     originFolder,
     recordNoticesConsentPinned,
     recordingNoteId,
-    rememberHomeSession,
     selectedNote,
     selectedNoteId,
     selectedNoteLiveTranscript,
     selectedRecovery,
-    sessionFolders,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setError,
     setFolderReturnTarget,
     setMoveDialogNoteIds,
-    setMoveDialogSessionIds,
     setOriginAllNotes,
     setOriginFolderId,
     setSettingsDetailPinned,
@@ -1933,13 +1402,9 @@ export function App() {
     activateTab,
     activeTabId,
     activeView,
-    agentSessions: focusedAgentSessions,
-    agentSessionsListRef,
-    captureActive,
     changeSettingsTab,
     closeOtherTabs,
     closeTab,
-    completedSessions,
     confirmDeleteNote,
     detailScrollerActive,
     dispatch,
@@ -1948,46 +1413,31 @@ export function App() {
     handleDeleteNote,
     handleEnableAccessibility,
     handleKeepRecordingAfterInactivityPrompt,
-    handleOpenNoteChatInAgent,
     handleOpenRecordingNote,
     handlePauseRecordingAfterInactivityPrompt,
     handleRemoveNoteFromFolder,
-    handleRemoveSessionFromFolder,
-    handleRenameAgentSession,
     handleReorderTabs,
     handleSelectNote,
     handleSetNoteFolder,
-    handleSetSessionFolder,
-    handleToggleSessionCompleted,
-    homeStoredSessionId,
     mainPanelBodyRef,
     moveDialogNoteIds,
-    moveDialogSessionIds,
-    noteChat,
-    noteChatOpen,
     noteDetailScrollerActive,
     notesListRef,
-    openNewChatTab,
+    openNewTab,
     openSettings,
     openTab,
-    pendingSessionProjectRef,
     pillIsDemo,
     pillStatus,
     recordingInactivityPrompt,
     recordingInactivitySecondsRemaining,
     recordingNoteTitle,
     selectedNote,
-    sessionFolders,
     setAccessibilityBannerDismissed,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setConfirmDeleteNote,
     setError,
     setFolderReturnTarget,
     setMoveDialogNoteIds,
-    setMoveDialogSessionIds,
-    setNoteChatOpen,
     setOriginAllNotes,
     setOriginFolderId,
     setSidebarCollapsed,

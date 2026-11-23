@@ -6,7 +6,10 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Value};
 
+use super::channel::ExternalConnection;
 use super::tools::{self, McpData, ToolCtx};
+use crate::approval_broker::external::{ExternalApprovalBroker, ExternalCall};
+use std::path::Path;
 
 #[path = "protocol/wire.rs"]
 mod wire;
@@ -18,6 +21,7 @@ pub const GUIDE_URI: &str = "clovy://guide";
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
 const INSTRUCTIONS: &str = "Read-only access to the user's Clovy notes, dictations, and memories (from the data set open in Clovy) and, when activity capture is on, their activity timeline, day summaries, and coding-agent work on this computer. Read clovy://context for the current date, time, and time zone before resolving words like \"today\"; clovy://guide explains which tool answers which question.";
+const EXTERNAL_INSTRUCTIONS: &str = "Read the user's Clovy notes, dictations, memories, and available Activity. Use only the tools listed for this connection. Protected changes require a one-time decision in Clovy's MCP settings, using the active data partition at the start of the request. Read clovy://context for dates and clovy://guide for tool details.";
 const BOUND_INSTRUCTIONS: &str = "Clovy tools for this host-bound chat turn. Notes, conversations, projects, dictations and memories use the conversation's data partition even if the app view changes. Activity belongs to the installation. Read clovy://context for dates and host context and clovy://guide for operations, pagination, effects and costs. Use only the tools actually listed for this turn. Mutations use the host's approval broker and revalidate authority after waits; tool configuration never grants extra access. Media tools can incur direct provider charges without a separate broker card. Status and reading a skill do not activate permissions or execute instructions.";
 
 /// `tools/call` for one of the activity tools: the app opens the activity
@@ -71,6 +75,34 @@ pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
 /// Answers one JSON-RPC message in `ctx` (the connection's turn decides
 /// which tool groups exist); `None` for notifications and responses.
 pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
+    handle_with_access(ctx, message, None).await
+}
+
+/// Handles MCP for a local peer authenticated and identified by the relay.
+/// The active partition comes from the host's per-request data snapshot.
+pub async fn handle_external(
+    ctx: &ToolCtx<'_>,
+    connection: &ExternalConnection,
+    broker: &ExternalApprovalBroker,
+    memory_settings: Option<&Path>,
+    recording_data: Option<&Path>,
+    message: &Value,
+) -> Option<Value> {
+    let scope = broker.scope(connection, &ctx.data.profile, recording_data);
+    // An external message always has an unbound ToolCtx, even if a future
+    // caller were to supply a context with the internal fields populated.
+    let ctx = ToolCtx {
+        app: ctx.app,
+        ..ToolCtx::unbound(ctx.data)
+    };
+    handle_with_access(&ctx, message, Some((&scope, memory_settings))).await
+}
+
+async fn handle_with_access(
+    ctx: &ToolCtx<'_>,
+    message: &Value,
+    external: Option<(&ExternalCall<'_>, Option<&Path>)>,
+) -> Option<Value> {
     let (id, method) = match classify(message) {
         Incoming::Request { id, method } => (id, method),
         Incoming::Notification | Incoming::Response => return None,
@@ -84,13 +116,20 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
             &params,
             if ctx.binding.is_some() {
                 BOUND_INSTRUCTIONS
+            } else if external.is_some() {
+                EXTERNAL_INSTRUCTIONS
             } else {
                 INSTRUCTIONS
             },
         )),
         "ping" => Ok(json!({})),
         "tools/list" => {
-            let mut descriptors = tools::descriptors(ctx).await;
+            let mut descriptors = match external {
+                Some((scope, settings)) if scope.check_read_scope().is_ok() => {
+                    tools::external_descriptors(ctx, scope, settings).await
+                }
+                _ => tools::descriptors(ctx).await,
+            };
             match ctx.binding.and_then(|binding| binding.wire_names.as_ref()) {
                 Some(names) => names
                     .publish(&mut descriptors)
@@ -99,7 +138,7 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
                 None => Ok(json!({ "tools": descriptors })),
             }
         }
-        "tools/call" => call_tool(ctx, &params).await,
+        "tools/call" => call_tool(ctx, &params, external).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
         "resources/read" => read_resource(ctx, &params, ctx.data.now).await,
@@ -111,7 +150,11 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
     })
 }
 
-async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, String)> {
+async fn call_tool(
+    ctx: &ToolCtx<'_>,
+    params: &Value,
+    external: Option<(&ExternalCall<'_>, Option<&Path>)>,
+) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -133,7 +176,13 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .filter(|arguments| !arguments.is_null())
         .cloned()
         .unwrap_or_else(|| json!({}));
-    Ok(match tools::call(ctx, name, &arguments).await {
+    let result = match external {
+        Some((scope, settings)) => {
+            tools::call_external(ctx, scope, settings, name, &arguments).await
+        }
+        None => tools::call(ctx, name, &arguments).await,
+    };
+    Ok(match result {
         Ok(value) => tool_result(&value),
         Err(error) => call_tool_error(name, &error),
     })
@@ -270,7 +319,7 @@ fn local_time_zone_name() -> Option<String> {
 
 const GUIDE: &str = r#"# Clovy MCP guide
 
-Clovy records meetings and dictations, turns them into notes, keeps memories, and (when activity capture is on) a text-only timeline, day summaries, and coding-agent work. External clients receive only the read tools in this section, from the data set open in Clovy. Bound chat turns read their conversation's host-owned data partition. Activity belongs to the installation, whichever data set is open.
+Clovy records meetings and dictations, turns them into notes, keeps memories, and (when activity capture is on) a text-only timeline, day summaries, and coding-agent work. External clients receive the read tools in this section, from the data partition active in Clovy. On the local relay, they can also use applicable tools from the authenticated connection’s catalog. Some tools require a host-owned turn or workspace and are unavailable. Protected changes require a one-time decision in Clovy’s MCP settings. Bound chat turns read their conversation's host-owned data partition. Activity belongs to the installation, whichever data set is open.
 
 ## Which tool
 
@@ -297,7 +346,7 @@ Clovy records meetings and dictations, turns them into notes, keeps memories, an
 - Activity tools exist only while activity capture is on. Apps and sites the user excluded never appear, and nothing older than the retention period is returned.
 - Timeline sessions and gaps retain their full original bounds when they overlap [from,to). Totals count only the overlap. Active state comes from the materialized ETL, updated approximately every 30 seconds; it is not an instantaneous capture watermark.
 - Long results are capped: look at `truncated`, `hasMore`/`nextOffset`, or `nextTranscriptOffset`, and ask for a shorter period or the next page.
-- Clovy must be open with the MCP server turned on (Settings, Agent). Otherwise every tool answers with an error saying so.
+- Clovy must be open with the MCP server turned on (Settings, MCP). Otherwise every tool answers with an error saying so.
 "#;
 
 const BOUND_GUIDE: &str = r#"## Management in this bound turn
