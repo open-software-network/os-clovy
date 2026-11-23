@@ -29,15 +29,6 @@ updates:
       timezone: America/New_York
     open-pull-requests-limit: 10
 
-  - package-ecosystem: cargo
-    directory: /clovy-api
-    schedule:
-      interval: weekly
-      day: monday
-      time: "12:30"
-      timezone: America/New_York
-    open-pull-requests-limit: 10
-
   - package-ecosystem: github-actions
     directory: /
     schedule:

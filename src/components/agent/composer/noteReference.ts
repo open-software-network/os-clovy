@@ -11,6 +11,7 @@ import {
   type NoteSuggestionListHandle,
   type NoteSuggestionListProps,
 } from "./NoteSuggestionList";
+import { t } from "../../../i18n";
 import { listNotes, type NoteListItemDto } from "../../../lib/tauri";
 
 /** Node name for the inline note reference chip. It stays distinct from the
@@ -33,7 +34,7 @@ export type NoteReferenceOptions = {
 
 /** Fallback matches the note title input's placeholder. */
 export function displayNoteTitle(title: string): string {
-  return title.trim() || "New note";
+  return title.trim() || t("chat.composer.newNote");
 }
 
 export function noteReferenceToken(ref: NoteReferenceInput): string {

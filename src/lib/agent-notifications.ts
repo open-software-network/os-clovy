@@ -8,6 +8,7 @@ import type {
   AgentSessionStatusDetail,
   AgentSessionStatusKind,
 } from "./agent-events";
+import { t } from "../i18n/translate";
 import { playAgentSound, type AgentSound } from "./agent-sounds";
 import { sendAppNotification } from "./tauri";
 
@@ -22,6 +23,7 @@ export type AgentAttentionContext = {
   viewingSession: boolean;
   captureActive: boolean;
   soundsEnabled: boolean;
+  routineResult?: boolean;
 };
 
 export type AgentAttentionDecision = {
@@ -84,8 +86,8 @@ export async function notifyAgentRunSettled(
 ) {
   return deliverAgentAttention({
     copy: {
-      title: "Clovy is ready",
-      body: detail.title.trim() || detail.summary.trim() || "Agent session",
+      title: t("lib.agentNotify.ready"),
+      body: detail.title.trim() || detail.summary.trim() || t("lib.agentNotify.fallbackSubject"),
     },
     context,
     detail,
@@ -132,7 +134,9 @@ async function deliverAgentAttention({
         title: copy.title,
         body: copy.body,
         group,
-        sessionId: detail.sessionId,
+        ...(context.routineResult
+          ? { routineSessionId: detail.sessionId }
+          : { sessionId: detail.sessionId }),
       });
       delivered = true;
     } catch {
@@ -167,19 +171,20 @@ async function notificationPermissionGranted() {
 }
 
 export function agentNotificationCopy(detail: AgentSessionStatusDetail): NotificationCopy {
-  const subject = detail.title?.trim() || detail.prompt?.trim() || "Agent session";
+  const subject =
+    detail.title?.trim() || detail.prompt?.trim() || t("lib.agentNotify.fallbackSubject");
   const body = detail.summary?.trim() || subject;
 
   if (detail.status === "waitingForUser") {
-    return { title: "Clovy needs your input", body };
+    return { title: t("lib.agentNotify.needsInput"), body };
   }
   if (detail.status === "completed") {
-    return { title: "Clovy finished", body };
+    return { title: t("lib.agentNotify.finished"), body };
   }
   if (detail.status === "cancelled") {
-    return { title: "Clovy stopped", body };
+    return { title: t("lib.agentNotify.stopped"), body };
   }
-  return { title: "Clovy hit a problem", body };
+  return { title: t("lib.agentNotify.problem"), body };
 }
 
 function agentNotificationGroup(

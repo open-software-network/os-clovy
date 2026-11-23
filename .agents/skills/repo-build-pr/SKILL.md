@@ -5,18 +5,18 @@ description: >-
   the clarifying questions that change what gets built, plan and architect on
   the session model while delegating bulk implementation and review to cheaper
   strong models, isolate work in git worktrees, validate with deterministic
-  checks plus agent-driven live app walkthroughs, record and upload QA video
-  evidence through os-platform, open a draft PR, run the automated Greptile and
+  checks plus agent-driven live app walkthroughs, record QA video evidence,
+  open a draft PR, run the automated Greptile and
   Codex review loop with judgment, and mark it ready. Use when the user invokes
   /repo-build-pr (or $repo-build-pr in Codex), or asks to build, implement,
   ship, or fix something in os-clovy from a feature prompt, bug report,
   screenshot, PR comment, or tracker task id, optionally with a cross-harness
-  implementer directive like "/repo-build-pr JUN-200 with codex".
+  implementer directive like "/repo-build-pr <ticket> with codex".
 ---
 
 # Repo build PR
 
-Use this skill for the end-to-end implementation loop in `open-software-network/os-clovy`. The goal is not only to make code changes. The goal is to understand the prompt, isolate the work in worktrees, ship a coherent PR, and run the automated review loop with judgment.
+Use this skill for the end-to-end implementation loop in `os-clovy`. The goal is not only to make code changes. The goal is to understand the prompt, isolate the work in worktrees, ship a coherent PR, and run the automated review loop with judgment.
 
 To hand this entire workflow to a *different* harness as orchestrator (e.g. dispatch a whole build to Codex from Claude Code, or vice versa), use the `repo-orchestrate` skill instead — it wraps this workflow in a per-harness runner with a stop-before-publish default.
 
@@ -27,9 +27,8 @@ This is the repo's entry-point skill; it orchestrates and defers. Each fact live
 - `repo-review` — pre-publish review battery: axes, per-harness runners, disposition triage, convergence loop.
 - `repo-delegate` — single-brief implementation dispatch to another harness (the building block of the cross-harness implementer mode).
 - `repo-orchestrate` — hand this whole workflow to another harness.
-- `agent-e2e-qa` — live QA process: surface decision tree, video recording/compression, os-platform upload, PASS/FAIL/BLOCKED evidence format.
+- `agent-e2e-qa` — live QA process: surface decision tree, video recording/compression, PASS/FAIL/BLOCKED evidence format.
 - `browser-test-tauri-fe` — browser-surface technique: fake Tauri IPC bridge, Playwright/CDP driving, screenshot suites, PR-embeddable GIFs.
-- `os-platform` / `os-task-prep` — tracker reads, task diagnosis and enrichment (intake step 3).
 - `repo-retrospect` — post-cycle: mine the session, PR threads, and user feedback for lessons and fold them into the owning skill files.
 
 ## Intake
@@ -42,7 +41,7 @@ Treat everything after `/repo-build-pr` (or `$repo-build-pr` in Codex) as the bu
    - any referenced project plan or spec relevant to the task
 
    A handoff doc, prior analysis, or the Issue's own "Agent diagnosis" is **evidence, not a conclusion.** Use its file:line citations to skip re-discovery; re-derive the root cause yourself. Ranked hypotheses in these documents are frequently wrong, and they are wrong in the direction of the mechanism nearest the symptom. Cheapest test: name the one observation the reported symptom forces to be true, then find the code path that produces it. PR #676 — the handoff ranked a clipboard-restore race first; the transcript's presence in the dictation tab proved the paste command had already been sent, so the bug lay past that point entirely (it was a focus-drift TOCTOU). PR #660 — the same shape, the symptom's obvious layer was not the cause.
-3. If the prompt names a tracker task (a `JUN-xxx` id or an os-platform issue reference — issues live on os-platform, org `june`, per `docs/agents/issue-tracker.md`): fetch it via the `os-platform` skill and validate it is actually implementable against the codebase (root cause, affected files, acceptance criteria — apply the `os-task-prep` diagnosis discipline if the issue is thin, and update the issue with what you learn). Then take it before writing code: assign it to the current user and set status to in-progress through the documented platform API (append-only, probe-then-verify). Include `Closes <TASK-ID>` in the eventual PR body.
+3. If the prompt names a tracker ticket, read it and validate it is actually implementable against the codebase (root cause, affected files, acceptance criteria). Include `Closes <TASK-ID>` in the eventual PR body when the tracker supports it.
 4. Inspect the current checkout with `git status -sb`. A dirty checkout is fine, but never implement in it: all work happens in a worktree branched from freshly fetched `origin/main` (see Worktree strategy).
 5. Fetch the target base branch. Use `origin/main` unless the user explicitly names another base.
 6. Search the codebase with `rg` and read the narrowest relevant files before deciding on the implementation.
@@ -105,7 +104,7 @@ Delegation rules:
 
 ### Cross-harness implementer (`with codex` / `with claude`)
 
-When the build prompt carries an implementer directive (e.g. `/repo-build-pr JUN-200 with codex`), the named harness implements every delegated brief AND runs every review axis; the session model keeps everything that determines whether the PR is right — intake, the tracker lifecycle, architecture, chunking, verification of delegated diffs, triage of review findings, and publish.
+When the build prompt carries an implementer directive (e.g. `/repo-build-pr <ticket> with codex`), the named harness implements every delegated brief AND runs every review axis; the session model keeps everything that determines whether the PR is right — intake, the tracker lifecycle, architecture, chunking, verification of delegated diffs, triage of review findings, and publish.
 
 1. Plan first, as above (including clarifying questions — the session is interactive even when the implementer is not). Then split the plan into small, independently verifiable chunks: each chunk gets its own brief file written to the contract standard above, plus the narrowest gate command that proves it.
 2. Dispatch each chunk to the implementer in the active worktree via `repo-delegate`:
@@ -138,13 +137,8 @@ Always isolate implementation work from the user's active checkout.
   cp "$MAIN/.env" .env 2>/dev/null || true
   cp "$MAIN/clovy-api/.env" clovy-api/.env 2>/dev/null || true
   ```
-  These files are gitignored and exist only in the main checkout. The app, the
-  local dev token, and the QA video upload all depend on them. In particular,
-  `clovy-api/.env` holds the os-platform API key
-  (`CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY`, with the June-era alias, or
-  `OS_PLATFORM_API_KEY`) that the
-  video upload step reads, so without this copy `prepare_qa_video.py --upload`
-  fails inside the worktree.
+  These files are gitignored and exist only in the main checkout. The app and
+  the local dev token depend on them.
 - Use one worktree for simple or medium tasks.
 - Use multiple worktrees or subagents only when the prompt naturally splits into independent tracks, such as frontend plus backend exploration, competing implementation strategies, or a broad bug hunt.
 - Keep one final integration branch and one final PR unless the user explicitly asks for multiple PRs.
@@ -190,7 +184,7 @@ Never read a gate's exit code through a pipe: `make verify 2>&1 | tail -40` repo
 
 ### Live app walkthroughs
 
-Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough — it owns the surface decision tree (web preview / background browser video / native Tauri / Chrome handoff), the recording, compression, and os-platform upload pipeline, and the evidence format. For lightweight browser-only visual verification — screenshots or a PR-embeddable GIF without a full QA charter — load `$browser-test-tauri-fe` instead; it owns the technique of driving the Vite frontend in Chromium with a faked Tauri IPC bridge.
+Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough — it owns the surface decision tree (web preview / background browser video / native Tauri / Chrome handoff), the recording and compression pipeline, and the evidence format. For lightweight browser-only visual verification — screenshots or a PR-embeddable GIF without a full QA charter — load `$browser-test-tauri-fe` instead; it owns the technique of driving the Vite frontend in Chromium with a faked Tauri IPC bridge.
 
 Run an agent-driven walkthrough for changes that touch:
 
@@ -209,7 +203,7 @@ Treat walkthrough failures as validation failures. Fix the issue, rerun the rele
 What this workflow requires of the walkthrough (the commands and pipeline live in `$agent-e2e-qa`):
 
 - Record video when human reviewers would benefit from seeing the result (visual/UI changes, native interactions, agent behavior, fixed bug repros, "the test is the demo" flows); prefer the background browser helper over foreground screen capture so the run does not fight the user's screen.
-- When PR sharing was authorized, compress and upload the video to os-platform and put the remote URL or PR comment in the validation evidence — a local path is not sufficient. The upload key rides in `clovy-api/.env`, which fresh worktrees lack (see Worktree strategy); a missing key is a `BLOCKED` upload with the local path kept as evidence.
+- Compress the video and keep its path in the validation evidence; share it on the PR only when the user authorized PR sharing.
 
 ### Pre-publish review pass
 
@@ -241,7 +235,7 @@ Use a draft PR for the first publish.
    - what changed
    - why it changed
    - validation run
-   - live agent walkthrough evidence, os-platform video URLs or PR comments, or the reason no live walkthrough was useful
+   - live agent walkthrough evidence, video paths or PR comments, or the reason no live walkthrough was useful
    - assumptions taken on clarifying questions that went unanswered, flagged for reviewer attention
    - known gaps or skipped checks
 7. Watch initial CI with:

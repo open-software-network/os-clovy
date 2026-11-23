@@ -20,7 +20,6 @@ vi.mock("../components/ui/Toaster", () => ({
 }));
 
 type SpinnerDemoWindow = Window & {
-  __agentGallery?: (show?: boolean) => string;
   __agentHud?: (state?: string, count?: number) => string;
   __sidebarStates?: (show?: boolean) => string;
   __spinnerDemo?: (show?: boolean) => string;
@@ -34,7 +33,6 @@ describe("spinner demo", () => {
     vi.clearAllMocks();
     localStorage.clear();
     localStorage.setItem("clovy:agent-hud:enabled", "false");
-    win.__agentGallery = vi.fn(() => "gallery");
     win.__agentHud = vi.fn(() => "hud");
     win.__sidebarStates = vi.fn(() => "sidebar");
   });
@@ -42,7 +40,6 @@ describe("spinner demo", () => {
   afterEach(() => {
     dispose?.();
     dispose = undefined;
-    delete win.__agentGallery;
     delete win.__agentHud;
     delete win.__sidebarStates;
     delete win.__spinnerDemo;
@@ -53,10 +50,9 @@ describe("spinner demo", () => {
 
     expect(win.__spinnerDemo).toBeTypeOf("function");
     expect(win.__spinnerDemo?.()).toBe(
-      "Spinner demo shown: sidebar, Agent gallery, Agent HUD, and loading toast. Run __spinnerDemo(false) to clear.",
+      "Spinner demo shown: sidebar, Agent HUD, and loading toast. Run __spinnerDemo(false) to clear.",
     );
     expect(win.__sidebarStates).toHaveBeenCalledWith(true);
-    expect(win.__agentGallery).toHaveBeenCalledWith(true);
     expect(win.__agentHud).toHaveBeenCalledWith("mixed");
     expect(mocks.showLoadingToast).toHaveBeenCalledWith("Spinner showcase");
     await vi.waitFor(() =>
@@ -67,7 +63,6 @@ describe("spinner demo", () => {
 
     expect(win.__spinnerDemo?.(false)).toBe("Spinner demo cleared.");
     expect(win.__agentHud).toHaveBeenCalledWith("clear");
-    expect(win.__agentGallery).toHaveBeenCalledWith(false);
     expect(win.__sidebarStates).toHaveBeenCalledWith(false);
     expect(mocks.dismissToast).toHaveBeenCalledWith("spinner-demo-toast");
     await vi.waitFor(() =>

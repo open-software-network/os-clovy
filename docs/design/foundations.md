@@ -34,6 +34,31 @@ shadows (light-tuned black shadows vanish on near-black). See
 [conventions.md](conventions.md) for the brand pipeline and the `index.html`
 sync warning.
 
+### Conversation backgrounds
+
+New session and Home use a single neutral Drift field behind the HTML content.
+Appearance's Background preference offers Drift (default), Image, and None, stored as
+`os-clovy:background` and applied live. The field uses `--agent-background-ink`
+(`#8f8d86` in both themes), independent of the accent, at a barely visible 0.14 opacity
+from the single `DRIFT_OPACITY` constant. It covers the entire surface, including behind the heading, composer, and
+suggestions, with moving organic voids from flow contrast 1.4 and scale 1.6 and no cleared column. Its host extends across the panel body padding to
+reach every panel edge, clipped by the panel's existing rounded corners. The existing composer card protects its
+controls; the field never intercepts pointer events. The kit pauses it offscreen or in a hidden window and holds
+a still frame for reduced motion; missing WebGL2 or a failed load leaves the
+plain surface. Notes, settings, and HUDs do not mount it. The onboarding
+personality card uses the plain card surface. Conversation scroll fades remain; Home confines the composer dissolve to its card
+so it cannot erase the field along the panel bottom.
+
+Image uses a local PNG, JPEG, or WebP copy up to 20 MiB, with no upload. It covers
+the panel, centered, under a single 0.82 veil in the theme's `--card` color.
+Appearance lets the user choose, replace, or remove it. Missing images leave the
+conversation surface plain and are reported only in settings. Drift, Image,
+and None are mutually exclusive.
+
+Without a saved theme the app opens dark; saved light, dark, or system choices
+win. The pre-paint scripts in `index.html`, `styleguide.html`, and
+`onboarding-preview.html` must stay in sync with `src/lib/theme.ts`.
+
 ## Tokens
 
 All tokens live in `src/styles/tokens.css`. Reach for a token before hand-coding

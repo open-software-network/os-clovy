@@ -1,10 +1,10 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoutinesView } from "../components/routines/RoutinesView";
+import type { AgentItemDto } from "../lib/agent-runtime-contract";
 import type { RoutineJob } from "../lib/agent-routines";
-import type { RoutineRunSession } from "../lib/agent-routine-history";
-import appCss from "../styles/app.css?raw";
+import { requestRoutineRunOpen, type RoutineRunSession } from "../lib/agent-routine-history";
 import { representativeConnectorPolicy } from "./fixtures/connector-policy";
 
 const mocks = vi.hoisted(() => ({
@@ -54,9 +54,9 @@ vi.mock("../lib/agent-routine-history", async (importOriginal) => ({
 // with the connectors module present but nothing connected.
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  listItems: vi.fn<(sessionId: string) => Promise<AgentItemDto[]>>(),
   connectorsList: vi.fn(),
   connectorsConnect: vi.fn(),
-  connectorsApplyRuntime: vi.fn(),
   routineTrustGet: vi.fn(),
   routineTrustRecordRun: vi.fn(),
   routineTrustSet: vi.fn(),
@@ -65,7 +65,6 @@ const tauriMocks = vi.hoisted(() => ({
   connectorTriggersList: vi.fn(),
   connectorTriggerSet: vi.fn(),
   connectorTriggerDelete: vi.fn(),
-  browserTransportPolicy: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -84,6 +83,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   ...tauriMocks,
+  agentRuntimeBindings: { listItems: tauriMocks.listItems },
 }));
 
 function job(overrides: Partial<RoutineJob> = {}): RoutineJob {
@@ -123,37 +123,8 @@ function run(overrides: Partial<RoutineRunSession> = {}): RoutineRunSession {
   };
 }
 
-function renderView(
-  props: Partial<{
-    onCreateRoutine: (prompt: string) => void;
-    onOpenRun: (session: RoutineRunSession) => void;
-    creditActionsDisabledReason: string;
-  }> = {},
-) {
-  return render(
-    <RoutinesView
-      onCreateRoutine={props.onCreateRoutine ?? vi.fn()}
-      onOpenRun={props.onOpenRun ?? vi.fn()}
-      creditActionsDisabledReason={props.creditActionsDisabledReason}
-    />,
-  );
-}
-
-function mockTextareaScrollHeight(getScrollHeight: (element: HTMLTextAreaElement) => number) {
-  const original = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
-  Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
-    configurable: true,
-    get() {
-      return getScrollHeight(this as HTMLTextAreaElement);
-    },
-  });
-  return () => {
-    if (original) {
-      Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", original);
-    } else {
-      Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
-    }
-  };
+function renderView() {
+  return render(<RoutinesView />);
 }
 
 async function openDetail(name: string) {
@@ -164,6 +135,7 @@ async function openDetail(name: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  tauriMocks.listItems.mockResolvedValue([]);
   mocks.routineDetailOnRunNow = undefined;
   mocks.pauseRoutine.mockResolvedValue({});
   mocks.resumeRoutine.mockResolvedValue({});
@@ -177,7 +149,6 @@ beforeEach(() => {
     command === "connectors_policy" ? representativeConnectorPolicy() : undefined,
   );
   tauriMocks.connectorsConnect.mockResolvedValue(googleAccount());
-  tauriMocks.connectorsApplyRuntime.mockResolvedValue(undefined);
   tauriMocks.routineTrustGet.mockResolvedValue(null);
   tauriMocks.routineBrowserAccessGet.mockResolvedValue({ enabled: false });
   tauriMocks.routineBrowserAccessSet.mockImplementation(async (input: { enabled: boolean }) =>
@@ -201,10 +172,6 @@ beforeEach(() => {
     }),
   );
   tauriMocks.connectorTriggerDelete.mockResolvedValue(undefined);
-  tauriMocks.browserTransportPolicy.mockResolvedValue({
-    attendedEnabled: true,
-    managedEnabled: true,
-  });
   eventMocks.listen.mockResolvedValue(() => {});
 });
 
@@ -441,113 +408,6 @@ describe("RoutinesView templates and creation", () => {
       "Morning summary",
     );
   });
-
-  it("routes the describe path through the agent prompt, sandboxed by default", async () => {
-    mocks.listRoutines.mockResolvedValue([]);
-    const onCreateRoutine = vi.fn();
-    renderView({ onCreateRoutine });
-    await screen.findByText("Morning brief");
-
-    // The composer bar is permanently anchored to the page bottom.
-    const composer = screen.getByRole("form", {
-      name: "Describe a routine to Clovy",
-    });
-    // Its sandbox trigger reflects the default mode.
-    expect(within(composer).getByRole("button", { name: /sandboxed/i })).toBeInTheDocument();
-
-    await userEvent.type(within(composer).getByRole("textbox"), "watch the weather and message me");
-    await userEvent.click(within(composer).getByRole("button", { name: "Ask Clovy to set it up" }));
-
-    const prompt = onCreateRoutine.mock.calls[0][0] as string;
-    expect(prompt).toContain("watch the weather and message me");
-    expect(prompt).toContain("Create a new Clovy routine");
-    expect(prompt).toContain("sandboxed default");
-    expect(prompt).not.toContain("unrestricted mode");
-  });
-
-  it("expands the describe composer for overflowing text", async () => {
-    const restoreScrollHeight = mockTextareaScrollHeight((element) =>
-      element.value.length > 48 ? 138 : 30,
-    );
-    try {
-      mocks.listRoutines.mockResolvedValue([]);
-      renderView();
-      await screen.findByText("Morning brief");
-
-      const composer = screen.getByRole("form", {
-        name: "Describe a routine to Clovy",
-      });
-      const textbox = within(composer).getByRole("textbox", {
-        name: "Describe a routine",
-      }) as HTMLTextAreaElement;
-
-      await userEvent.type(
-        textbox,
-        "watch the weather and message me whenever storm updates need attention",
-      );
-
-      await waitFor(() => expect(textbox.style.height).toBe("140px"));
-    } finally {
-      restoreScrollHeight();
-    }
-  });
-
-  it("keeps the describe composer height cap on the create page", async () => {
-    mocks.listRoutines.mockResolvedValue([]);
-    renderView();
-    await screen.findByText("Morning brief");
-
-    await userEvent.click(screen.getByRole("button", { name: "New routine" }));
-
-    const createPage = screen.getByRole("region", { name: "New routine" });
-    const describeBar = screen
-      .getByRole("form", { name: "Describe a routine to Clovy" })
-      .closest(".routines-describe");
-    expect(describeBar).not.toBeNull();
-    expect(createPage.contains(describeBar)).toBe(false);
-    expect(appCss).toContain(
-      ".routines-workspace,\n.routine-detail,\n.routines-describe {\n  --routines-describe-input-max-h: 200px;",
-    );
-  });
-
-  it("describes an unrestricted routine only after the explicit opt-in", async () => {
-    mocks.listRoutines.mockResolvedValue([]);
-    const onCreateRoutine = vi.fn();
-    renderView({ onCreateRoutine });
-    await screen.findByText("Morning brief");
-
-    const composer = screen.getByRole("form", {
-      name: "Describe a routine to Clovy",
-    });
-    // Arm Unrestricted through the composer's sandbox menu.
-    await userEvent.click(within(composer).getByRole("button", { name: /sandboxed/i }));
-    await userEvent.click(within(composer).getByRole("menuitemradio", { name: /unrestricted/i }));
-    await userEvent.type(
-      within(composer).getByRole("textbox"),
-      "clean up my downloads folder nightly",
-    );
-    await userEvent.click(within(composer).getByRole("button", { name: "Ask Clovy to set it up" }));
-
-    const prompt = onCreateRoutine.mock.calls[0][0] as string;
-    expect(prompt).toContain("unrestricted mode");
-  });
-
-  it("dismisses the describe mode menu with Escape", async () => {
-    mocks.listRoutines.mockResolvedValue([]);
-    renderView();
-    await screen.findByText("Morning brief");
-
-    const composer = screen.getByRole("form", {
-      name: "Describe a routine to Clovy",
-    });
-    await userEvent.click(within(composer).getByRole("button", { name: /sandboxed/i }));
-    expect(
-      within(composer).getByRole("menuitemradio", { name: /unrestricted/i }),
-    ).toBeInTheDocument();
-
-    await userEvent.keyboard("{Escape}");
-    expect(within(composer).queryByRole("menuitemradio", { name: /unrestricted/i })).toBeNull();
-  });
 });
 
 describe("RoutinesView connector templates", () => {
@@ -586,7 +446,6 @@ describe("RoutinesView connector templates", () => {
         scopes: ["gmail_read", "calendar_read"],
       }),
     );
-    await waitFor(() => expect(tauriMocks.connectorsApplyRuntime).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByRole("button", { name: "Create" })).toBeEnabled());
   });
 
@@ -804,18 +663,6 @@ describe("RoutinesView detail", () => {
         enabledToolsets: expect.arrayContaining(["clovy_browser_routine_abc123"]),
       }),
     );
-    expect(tauriMocks.connectorsApplyRuntime).toHaveBeenCalled();
-  });
-
-  it("explains the bounded browser access available to routines", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    renderView();
-    await openDetail("Morning summary");
-
-    expect(await screen.findByText(/browse public pages anonymously/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: "Allow browser use for this routine" }),
-    ).toBeEnabled();
   });
 
   it("opens a routine with its full instructions", async () => {
@@ -873,9 +720,6 @@ describe("RoutinesView detail", () => {
         autonomousTools: ["create_draft"],
       }),
     );
-    // Restoring autonomous trust mints a new token, so the runtime must reload
-    // the auto MCP server instead of leaving its old token in the environment.
-    expect(tauriMocks.connectorsApplyRuntime).toHaveBeenCalledTimes(1);
   });
 
   it("does not write the event trigger when the cron save fails", async () => {
@@ -1107,54 +951,6 @@ describe("RoutinesView detail", () => {
     expect(mocks.listRoutines).toHaveBeenCalledTimes(2);
   });
 
-  it("disables run now with the funding explanation while credits are depleted", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    renderView({ creditActionsDisabledReason: "Add credits before running a routine." });
-
-    const list = await screen.findByRole("list", { name: "Routines" });
-    await userEvent.click(
-      within(list).getByRole("button", { name: "Actions for Morning summary" }),
-    );
-    const listRunNow = screen.getByRole("menuitem", { name: "Run now" });
-    expect(listRunNow).toBeDisabled();
-    expect(listRunNow).toHaveAttribute("title", "Add credits before running a routine.");
-
-    await userEvent.click(within(list).getByText("Morning summary"));
-    const detailRunNow = screen.getByRole("button", { name: "Run now" });
-    expect(detailRunNow).toBeDisabled();
-    expect(detailRunNow).toHaveAttribute("title", "Add credits before running a routine.");
-
-    // Invoke the captured child callback directly to prove the handler itself
-    // enforces the funding guard before reaching the runtime.
-    await act(async () => {
-      if (!mocks.routineDetailOnRunNow) {
-        throw new Error("Routine detail did not expose its Run now handler.");
-      }
-      await mocks.routineDetailOnRunNow();
-    });
-    expect(mocks.triggerRoutine).not.toHaveBeenCalled();
-  });
-
-  it("blocks describing a routine while credits are depleted", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    const onCreateRoutine = vi.fn();
-    renderView({
-      onCreateRoutine,
-      creditActionsDisabledReason: "Add credits before running a routine.",
-    });
-
-    const draft = await screen.findByRole("textbox", { name: "Describe a routine" });
-    await userEvent.type(draft, "Summarize my mornings");
-
-    const send = screen.getByRole("button", { name: "Ask Clovy to set it up" });
-    expect(send).toBeDisabled();
-    expect(send).toHaveAttribute("title", "Add credits before running a routine.");
-
-    // Enter-to-submit goes through the same handler-level guard.
-    fireEvent.submit(draft.closest("form") as HTMLFormElement);
-    expect(onCreateRoutine).not.toHaveBeenCalled();
-  });
-
   it("shows this routine's runs and opens one on click", async () => {
     mocks.listRoutines.mockResolvedValue([job()]);
     const mine = run();
@@ -1165,8 +961,7 @@ describe("RoutinesView detail", () => {
         title: "Someone else's run",
       }),
     ]);
-    const onOpenRun = vi.fn();
-    renderView({ onOpenRun });
+    renderView();
     await openDetail("Morning summary");
     await userEvent.click(screen.getByRole("tab", { name: "Run history" }));
 
@@ -1175,7 +970,8 @@ describe("RoutinesView detail", () => {
     expect(within(history).queryByText("Someone else's run")).toBeNull();
 
     await userEvent.click(within(history).getByRole("button", { name: /morning summary/i }));
-    expect(onOpenRun).toHaveBeenCalledWith(mine);
+    expect(await screen.findByRole("heading", { name: "Run result" })).toBeInTheDocument();
+    expect(tauriMocks.listItems).toHaveBeenCalledWith(mine.id);
   });
 
   it("labels normalized detail runs with the routine name", async () => {
@@ -1260,12 +1056,80 @@ describe("RoutinesView detail", () => {
 });
 
 describe("RoutinesView run history", () => {
+  it("opens the stored result from a notification before the view mounts", async () => {
+    const session = run();
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([session]);
+    requestRoutineRunOpen(session.id);
+    renderView();
+    expect(await screen.findByRole("heading", { name: "Run result" })).toBeVisible();
+    expect(tauriMocks.listItems).toHaveBeenCalledWith(session.id);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("returns focus to the same run in a routine's history", async () => {
+    const session = run();
+    mocks.listRoutines.mockResolvedValue([job()]);
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([session]);
+    renderView();
+    await openDetail("Morning summary");
+    await userEvent.click(screen.getByRole("tab", { name: "Run history" }));
+    const history = screen.getByRole("tabpanel", { name: "Run history" });
+    await userEvent.click(within(history).getByRole("button", { name: /morning summary/i }));
+    expect(await screen.findByRole("heading", { name: "Run result" })).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Back to routines" }));
+    expect(screen.getByRole("tab", { name: "Run history" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /morning summary/i })).toHaveFocus();
+  });
+
+  it("opens a stored routine result without a message composer", async () => {
+    const session = run();
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([session]);
+    tauriMocks.listItems.mockResolvedValue([
+      {
+        id: "output",
+        sessionId: session.id,
+        sequence: 2,
+        createdAt: session.createdAt,
+        kind: "message",
+        role: "assistant",
+        text: "The fixture routine stored its result.",
+        status: "complete",
+      },
+      {
+        id: "prompt",
+        sessionId: session.id,
+        sequence: 1,
+        createdAt: session.createdAt,
+        kind: "message",
+        role: "user",
+        text: "Private routine instructions",
+        status: "complete",
+      },
+    ]);
+    renderView();
+    const history = await screen.findByRole("region", { name: "Run history" });
+    await userEvent.click(within(history).getByRole("button", { name: /morning summary/i }));
+    expect(await screen.findByRole("heading", { name: "Run result" })).toBeInTheDocument();
+    expect(await screen.findByText("The fixture routine stored its result.")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Run result" })).toHaveFocus();
+    expect(screen.queryByText("Private routine instructions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Back to routines" }));
+    expect(
+      within(await screen.findByRole("region", { name: "Run history" })).getByRole("button", {
+        name: /morning summary/i,
+      }),
+    ).toHaveFocus();
+  });
+
   it("lists run history under the routines and opens a run on click", async () => {
     mocks.listRoutines.mockResolvedValue([job()]);
     const session = run();
     adapterMocks.listScheduledRunSessions.mockResolvedValue([session]);
-    const onOpenRun = vi.fn();
-    renderView({ onOpenRun });
+    renderView();
 
     const history = await screen.findByRole("region", { name: "Run history" });
     // The run is labeled with its routine's name (matched via the job id
@@ -1276,10 +1140,22 @@ describe("RoutinesView run history", () => {
     ).toBeInTheDocument();
 
     await userEvent.click(within(history).getByRole("button", { name: /morning summary/i }));
-    expect(onOpenRun).toHaveBeenCalledWith(session);
+    expect(await screen.findByRole("heading", { name: "Run result" })).toBeInTheDocument();
+    expect(tauriMocks.listItems).toHaveBeenCalledWith(session.id);
     expect(adapterMocks.listScheduledRunSessions).toHaveBeenCalledWith({
       includeActive: true,
     });
+  });
+
+  it("shows the stored error for a failed run", async () => {
+    const session = run({ status: "failed", error: "Fixture backend failure" });
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([session]);
+    renderView();
+    const history = await screen.findByRole("region", { name: "Run history" });
+    await userEvent.click(within(history).getByRole("button", { name: /morning summary/i }));
+    expect(await screen.findByText("Fixture backend failure")).toBeVisible();
+    expect(screen.getByText("Failed", { selector: '[role="status"]' })).toBeVisible();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
   it("marks active routine runs in history", async () => {

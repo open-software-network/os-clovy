@@ -1,5 +1,23 @@
 # Clovy Companion protocol
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
+> **Fork note:** this fork's desktop app no longer has the companion (removed by
+> the `desvincular-servicos-open-software` change). The Clovy API relay and the
+> `crates/clovy-companion-*` / `june-companion-*` crates are removed in a later change.
+
+The protocol below is retained as historical integration documentation, not a
+current desktop entry point. CLI tool approvals now belong to the local broker
+([ADR-0072](adr/0072-cli-chat-replaces-the-native-agent.md)); no companion
+transport gains approval authority.
+
 The shared crate is `crates/clovy-companion-protocol`; desktop and iOS crypto
 use `crates/clovy-companion-crypto`.
 
@@ -83,14 +101,14 @@ the additive field, and new companions retain their generic Mac fallback when
 an older Desktop omits it.
 
 Agent session and message reads go through typed frontend intents backed by
-Clovy's current agent-runtime session APIs. The companion receives the same
+the former desktop session APIs. The companion receives the same
 sanitized display text as Clovy Desktop: machine context, provider routing
 details, reasoning, tool calls/results, approvals, secrets, and media internals
 stay on the Mac. The always-mounted app shell serves reads even when the Agent
 screen is closed. Send and cancel intents wake the existing Agent workspace.
 Wire session identifiers are qualified explicitly: agent data uses
 `storedSessionId`, while active-recording snapshots and controls use
-`recordingSessionId`. The companion protocol does not expose an agent-runtime
+`recordingSessionId`. The companion protocol does not expose a desktop agent
 session id.
 
 Model control uses the `modelsList`, `sessionModelGet`, and `sessionModelSet`
@@ -183,7 +201,7 @@ request frame encodes to 43,988 bytes, leaving 1,068 bytes below the 44 KiB
 plaintext ceiling. Existing Noise and relay-envelope ceilings therefore remain
 unchanged.
 
-`computerUseApprove` is limited to the existing `computer_use` agent-runtime
+`computerUseApprove` is limited to the existing `computer_use` desktop agent
 approval interruption. A pending event carries a request id, stored session id,
 bounded action and description, optional target app/URL, and a 60-second
 deadline. After receiving the event, a linked device may send the additive

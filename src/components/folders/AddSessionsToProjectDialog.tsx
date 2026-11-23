@@ -5,6 +5,7 @@ import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderDto } from "../../lib/tauri";
 import type { AgentSessionDto } from "../../lib/agent-runtime-contract";
+import { useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
 
 type AddSessionsToProjectDialogProps = {
@@ -26,6 +27,7 @@ export function AddSessionsToProjectDialog({
   sessionFolderIds,
   onAdd,
 }: AddSessionsToProjectDialogProps) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
@@ -79,13 +81,13 @@ export function AddSessionsToProjectDialog({
         if (submitting) return;
         onClose();
       }}
-      title={`Add sessions to ${folder.name}`}
-      description="Pick the agent sessions you want in this project."
+      title={t("notes.add.sessions.title", { name: folder.name })}
+      description={t("notes.add.sessions.description")}
       initialFocusSelector='input[name="add-sessions-search"]'
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -93,11 +95,7 @@ export function AddSessionsToProjectDialog({
             onClick={() => void handleSubmit()}
             disabled={submitting || count === 0}
           >
-            {submitting
-              ? "Adding…"
-              : count === 0
-                ? "Add sessions"
-                : `Add ${count} ${count === 1 ? "session" : "sessions"}`}
+            {submitting ? t("notes.move.adding") : t("notes.add.sessions.commit", { count })}
           </button>
         </>
       }
@@ -109,7 +107,7 @@ export function AddSessionsToProjectDialog({
             ref={searchRef}
             type="search"
             name="add-sessions-search"
-            placeholder="Search sessions"
+            placeholder={t("notes.add.sessions.search")}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             autoComplete="off"
@@ -118,7 +116,7 @@ export function AddSessionsToProjectDialog({
             <button
               type="button"
               className="search-clear"
-              aria-label="Clear search"
+              aria-label={t("notes.folderChip.clearSearch")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setQuery("");
@@ -148,12 +146,12 @@ export function AddSessionsToProjectDialog({
                     </span>
                     <span className="add-notes-body">
                       <span className="add-notes-title">
-                        {session.title.trim() || "Untitled session"}
+                        {session.title.trim() || t("chat.session.untitled")}
                       </span>
                       <span className="add-notes-preview">
                         {session.source === "legacy_routine"
-                          ? "Imported routine history"
-                          : "Conversation"}
+                          ? t("notes.add.sessions.importedRoutine")
+                          : t("notes.add.sessions.conversation")}
                       </span>
                     </span>
                     <span className="add-notes-check" aria-hidden>
@@ -167,8 +165,8 @@ export function AddSessionsToProjectDialog({
         ) : (
           <p className="add-notes-empty">
             {sessions.some((session) => !(sessionFolderIds[session.id] ?? []).includes(folder.id))
-              ? "No sessions match that search."
-              : "Every session already lives in this project."}
+              ? t("notes.add.sessions.noMatch")
+              : t("notes.add.sessions.allIn")}
           </p>
         )}
       </div>

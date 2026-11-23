@@ -1,3 +1,4 @@
+import { LocalTranscriptionSettings } from "./LocalTranscriptionSettings";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -8,59 +9,57 @@ import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconMoonStar } from "central-icons/IconMoonStar";
 import { IconSun } from "central-icons/IconSun";
 import { IconTelevision } from "central-icons/IconTelevision";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
-  CLOVY_COMMUNITY_URL,
+  INTERFACE_LOCALE_OPTIONS,
+  type InterfaceLocale,
+  type MessageKey,
+  setInterfaceLocale,
+  t as translate,
+  type TFunction,
+  useLocale,
+  useT,
+} from "../../i18n";
+import {
+  appPreferencesGet,
+  appPreferencesSet,
   dictationHotkeyStatus,
   dictationHelperCommand,
   dictationSettings,
-  listVeniceModels,
+  listProviderModels,
   localAudioFileSrc,
   providerModelSettings,
-  clovyOpenCommunityPage,
-  clovyOpenVerifyPage,
-  clearVeniceApiKey,
-  saveLocalGenerationSettings,
-  setLocalGenerationEnabled,
-  probeLocalGenerationEndpoint,
+  clearProviderApiKey,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
   setImageSafeMode,
   setLiveTranscription,
-  setCostQuality,
-  setVeniceApiKey,
-  setVeniceModel,
-  connectorsApplyRuntime,
-  unpackBundledExtension,
+  setProviderApiKey,
+  setProviderModel,
 } from "../../lib/tauri";
 import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
 import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../../lib/autostart";
 import { replayOnboarding } from "../../lib/onboarding";
+import { errorCode, messageForErrorCode } from "../../lib/errors";
 import type {
-  AccountStatus,
   DictationHelperEvent,
   DictationMicrophoneDeviceDto,
   DictationShortcutKind,
   DictationSettingsDto,
   DictationShortcutModifiers,
   DictationShortcutSetting,
+  BuiltinProvider,
   FolderDto,
-  LocalGenerationSettingsDto,
+  ProviderModelDto,
   ProviderModelMode,
   ProviderModelSettingsDto,
   RecordingSourceMode,
   RecordingSourceReadinessDto,
-  VeniceModelDto,
 } from "../../lib/tauri";
-import { AccountSettingsSection, BillingSettingsSection } from "../account/AccountSettings";
 import { KeycapShortcut } from "../shortcuts/KeycapShortcut";
-import {
-  MODIFIER_REQUIRED_MESSAGE,
-  chordFromKeyEvent,
-  shortcutFromCapturePayload,
-} from "../shortcuts/use-shortcut-capture";
+import { chordFromKeyEvent, shortcutFromCapturePayload } from "../shortcuts/use-shortcut-capture";
 import {
   Select,
   selectPopoverPlacement,
@@ -73,7 +72,6 @@ import { Switch } from "../ui/Switch";
 import { HoverTip } from "../ui/HoverTip";
 import { toast } from "../ui/Toaster";
 import { APP_COMMIT_HASH, APP_VERSION } from "../../app/build-info";
-import type { ReportCategory } from "../agent/composer/reportCategory";
 import { getStoredTheme, setStoredTheme, type ThemePreference } from "../../lib/theme";
 import { BRAND_PRESETS, getStoredBrand, setStoredBrand, type BrandId } from "../../lib/brand";
 import {
@@ -83,40 +81,23 @@ import {
   type FontScaleId,
 } from "../../lib/font-scale";
 import {
-  getReleaseChannel,
-  reconcileToStable,
-  setReleaseChannel,
-  type ReleaseChannel,
-} from "../../lib/updater";
-import {
   fallbackDictationCapabilities,
+  isMacLikePlatform,
   isSystemAudioSupportedPlatform,
+  isWindowsPlatform,
   useDictationCapabilities,
 } from "../../lib/platform";
 import { systemAudioAvailability } from "../../lib/source-readiness";
 import { parseDictationHelperEvent } from "../../lib/dictation-events";
-import {
-  dispatchProviderModelSettingsChanged,
-  modelAvailableForMode,
-} from "../../lib/model-privacy";
-import {
-  isLoopbackUrl,
-  localGenerationOptionId,
-  withLocalGenerationOption,
-} from "../../lib/local-generation";
+import { dispatchProviderModelSettingsChanged } from "../../lib/model-privacy";
+import type { LlmProvidersDto } from "../../lib/llm-providers";
+import { LlmProvidersSection } from "./LlmProvidersSection";
 import { ProviderLogo } from "./ProviderLogo";
-import { AUTO_MODEL_ID, modelOptions, selectedModel } from "./ModelPickerDialog";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { modelOptions, selectedModel } from "./ModelPickerDialog";
+import { DEFAULT_GENERATION_SUGGESTION_ID } from "../../lib/suggested-models";
 import {
-  DEFAULT_GENERATION_SUGGESTION_ID,
-  suggestedModelsForMode,
-} from "../../lib/suggested-models";
-import {
-  AUTO_PREFERENCE_VALUES,
-  autoPreferenceFromCostQuality,
   ModelPickerCardContent,
   ModelPickerPopover,
-  type AutoPreference,
   type ModelPickerFlyout,
 } from "./ModelPickerPopover";
 import { DEFAULT_IMAGE_MODEL, imageModelCatalog } from "../../lib/image-models";
@@ -127,92 +108,78 @@ import {
   setExperimentalFlags,
   useExperimentalFlags,
 } from "../../lib/experimental-flags";
-import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
+import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
+import { McpServerSection } from "./McpServerSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
-import { LinkedDevicesSection } from "./LinkedDevicesSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
-import { PrivacySettingsSection } from "./PrivacySettingsSection";
+import { ActivitySettingsSection } from "./ActivitySettingsSection";
+import { activityStatus } from "../../lib/activity-capture";
+import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
-import {
-  getStoredDateFormat,
-  setStoredDateFormat,
-  type DateFormatPreference,
-} from "../../lib/date-format";
-
-const THEME_OPTIONS: readonly {
+function themeOptions(t: TFunction): readonly {
   value: ThemePreference;
   label: ReactNode;
   ariaLabel: string;
-}[] = [
-  {
-    value: "system",
-    label: (
-      <>
-        <IconTelevision size={14} />
-        System
-      </>
-    ),
-    ariaLabel: "Match system theme",
-  },
-  {
-    value: "light",
-    label: (
-      <>
-        <IconSun size={14} />
-        Light
-      </>
-    ),
-    ariaLabel: "Use light theme",
-  },
-  {
-    value: "dark",
-    label: (
-      <>
-        <IconMoonStar size={14} />
-        Dark
-      </>
-    ),
-    ariaLabel: "Use dark theme",
-  },
-];
+}[] {
+  return [
+    {
+      value: "system",
+      label: (
+        <>
+          <IconTelevision size={14} />
+          {t("settings.theme.system")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.systemAria"),
+    },
+    {
+      value: "light",
+      label: (
+        <>
+          <IconSun size={14} />
+          {t("settings.theme.light")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.lightAria"),
+    },
+    {
+      value: "dark",
+      label: (
+        <>
+          <IconMoonStar size={14} />
+          {t("settings.theme.dark")}
+        </>
+      ),
+      ariaLabel: t("settings.theme.darkAria"),
+    },
+  ];
+}
 
-const FONT_SCALE_OPTIONS: readonly {
+const FONT_SCALE_LABEL_KEYS = {
+  default: "settings.textSize.default",
+  large: "settings.textSize.large",
+  larger: "settings.textSize.larger",
+} as const satisfies Record<FontScaleId, MessageKey>;
+
+function fontScaleOptions(t: TFunction): readonly {
   value: FontScaleId;
   label: ReactNode;
   ariaLabel: string;
-}[] = FONT_SCALE_PRESETS.map((preset) => ({
-  value: preset.id,
-  label: preset.label,
-  ariaLabel: `${preset.label} text size`,
-}));
-
-const DATE_FORMAT_OPTIONS = [
-  { value: "system", label: "System" },
-  { value: "month-first", label: "Jul 9" },
-  { value: "day-first", label: "9 Jul" },
-] satisfies { value: DateFormatPreference; label: string }[];
-
-const RELEASE_CHANNEL_OPTIONS: readonly {
-  value: ReleaseChannel;
-  label: ReactNode;
-}[] = [
-  { value: "stable", label: "Stable" },
-  { value: "rc", label: "Release candidate" },
-];
-
-const AUTO_PREFERENCE_OPTIONS: readonly {
-  value: AutoPreference;
-  label: ReactNode;
-}[] = [
-  { value: "cost", label: "Economy" },
-  { value: "balanced", label: "Balanced" },
-  { value: "quality", label: "Quality" },
-];
+}[] {
+  return FONT_SCALE_PRESETS.map((preset) => {
+    const label = t(FONT_SCALE_LABEL_KEYS[preset.id]);
+    return {
+      value: preset.id,
+      label,
+      ariaLabel: t("settings.textSize.optionAria", { size: label }),
+    };
+  });
+}
 
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
   command: false,
@@ -248,12 +215,20 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
   microphone: {},
   style: "standard",
   language: undefined,
+  cleanupEnabled: false,
+  cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
+  hudPlacement: "bottom",
 };
 
+// Windows has no Fn: dictation defaults to Right Ctrl alone (mirrors
+// `DictationSettings::default_for_platform` in Rust).
 const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcutSetting> = {
   push_to_talk: {
-    ...DEFAULT_SETTINGS.pushToTalkShortcut,
-    label: "Ctrl+Alt+D",
+    keyCode: 0,
+    code: "ControlRight",
+    modifiers: { command: false, control: false, option: false, shift: false, function: false },
+    label: "Right Ctrl",
+    pressCount: 1,
   },
   toggle: {
     ...DEFAULT_SETTINGS.toggleShortcut,
@@ -262,24 +237,24 @@ const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcut
 };
 
 const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
-  transcriptionProvider: "venice",
-  generationProvider: "venice",
-  transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
-  // Mirrors DEFAULT_GENERATION_MODEL in the Rust providers module and the
-  // leading Suggested pick in lib/suggested-models.ts.
-  generationModel: "zai-org-glm-5-2",
-  // Mirrors DEFAULT_COST_QUALITY in the Rust providers module.
-  costQuality: 100,
-  remoteGenerationModel: "zai-org-glm-5-2",
-  // Mirrors DEFAULT_IMAGE_MODEL in the Rust providers module.
+  transcriptionProvider: "groq",
+  generationProvider: "openrouter",
+  transcriptionModel: "whisper-large-v3-turbo",
+  // The factory default text model: DEFAULT_GENERATION_MODEL in the Rust
+  // providers module, mirrored by the leading Suggested pick.
+  generationModel: DEFAULT_GENERATION_SUGGESTION_ID,
+  remoteGenerationModel: DEFAULT_GENERATION_SUGGESTION_ID,
   imageModel: DEFAULT_IMAGE_MODEL,
-  // Mirrors DEFAULT_VIDEO_MODEL in the Rust providers module.
   videoModel: DEFAULT_VIDEO_MODEL,
-  veniceApiKeyConfigured: false,
+  providerApiKeysConfigured: {
+    groq: false,
+    openrouter: false,
+    fal: false,
+    tavily: false,
+  },
   localGeneration: {
     baseUrl: "",
     modelId: "",
-    apiKey: "",
   },
   // On by default, matching the Rust providers default.
   imageSafeMode: true,
@@ -309,38 +284,9 @@ function providerModelSettingsSnapshot(response: ProviderModelSettingsSnapshot) 
 
 const MIC_TEST_DURATION_SECONDS = 5;
 
-export type SettingsTab =
-  | "general"
-  | "appearance"
-  | "billing"
-  | "shortcuts"
-  | "dictation"
-  | "audio"
-  | "models"
-  | "agent"
-  | "memory"
-  | "connectors"
-  | "linked-devices"
-  | "about";
-
-export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
-  { id: "general", label: "General" },
-  { id: "appearance", label: "Appearance" },
-  { id: "billing", label: "Billing" },
-  { id: "shortcuts", label: "Shortcuts" },
-  { id: "dictation", label: "Dictation" },
-  { id: "audio", label: "Audio" },
-  { id: "models", label: "Models" },
-  { id: "agent", label: "Agent" },
-  { id: "memory", label: "Memory" },
-  { id: "connectors", label: "Plugins" },
-  { id: "linked-devices", label: "Linked devices" },
-  { id: "about", label: "About" },
-];
-
-export function appSettingsTabsForCompanionPairing(companionPairingEnabled: boolean) {
-  return SETTINGS_TABS.filter((tab) => companionPairingEnabled || tab.id !== "linked-devices");
-}
+export type { SettingsTab };
+// Same list (and translated `label` getters) as the sidebar's settings nav.
+export { SETTINGS_TABS };
 
 /**
  * The shared settings page header (Codex-app style): a large serif page title
@@ -376,15 +322,11 @@ type AppSettingsProps = {
   memoryFolderFilter?: string;
   /** Drill from a memory's project tag into that project. */
   onOpenProject?: (folderId: string) => void;
-  account: AccountStatus;
-  accountLoading: boolean;
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
   microphonePermissionStatus?: string;
   accessibilityPermissionStatus?: string;
-  onAccountChanged: (next: AccountStatus) => void;
-  onAccountRefresh: () => Promise<AccountStatus | undefined>;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
   onEnableMicrophone?: () => void;
   onEnableAccessibility?: () => void;
@@ -400,21 +342,11 @@ type AppSettingsProps = {
   // data-note-detail-scroller on .main-panel-body and the detail owns its own
   // scroll region under a pinned breadcrumb bar.
   onDetailPinnedChange?: (pinned: boolean) => void;
-  // Runs the app updater's manual check flow.
+  activitySupported?: boolean;
+  // Runs the updater's manual check. Absent in a development build, which
+  // never checks, so the Updates section does not render.
   onCheckForUpdates?: () => void;
-  // True when an update is downloaded and waiting for a relaunch. The bundle
-  // swap is what can kill the dictation helper, so the "dictation paused"
-  // notice points the user at the relaunch that finishes the update.
-  updateReadyToRelaunch?: boolean;
-  // Relaunches Clovy to finish a staged update (also restores the helper).
-  onRelaunch?: () => void;
-  // Confirmed leave-rc reconcile: downloads and installs the current stable,
-  // even if it is older than the running prerelease build (Q4-Q8).
-  onReconcileToStable?: () => void;
-  // Opens Agent with the direct issue report dialog preselected.
-  onReportIssue?: (category: ReportCategory) => void;
-  // Opens a new agent session that runs a skill bundle's slash command.
-  onStartBundleChat?: (prompt: string) => void;
+  checkingForUpdates?: boolean;
 };
 
 export function AppSettings({
@@ -422,15 +354,11 @@ export function AppSettings({
   onFoldersImported,
   memoryFolderFilter,
   onOpenProject,
-  account,
-  accountLoading,
   sourceMode,
   sourceReadiness,
   checkingSourceReadiness,
   microphonePermissionStatus,
   accessibilityPermissionStatus,
-  onAccountChanged,
-  onAccountRefresh,
   onSourceModeChange,
   onEnableMicrophone,
   onEnableAccessibility,
@@ -439,11 +367,8 @@ export function AppSettings({
   onTabChange,
   onDetailPinnedChange,
   onCheckForUpdates,
-  updateReadyToRelaunch,
-  onRelaunch,
-  onReconcileToStable,
-  onReportIssue,
-  onStartBundleChat,
+  checkingForUpdates = false,
+  activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
   const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
   const [providerSettings, setProviderSettings] =
@@ -451,26 +376,14 @@ export function AppSettings({
   const [effectiveProviderSettings, setEffectiveProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
   const providerSettingsProfileRef = useRef<string | null>(null);
-  const [localGenerationDraft, setLocalGenerationDraft] = useState<LocalGenerationSettingsDto>(
-    DEFAULT_PROVIDER_MODELS.localGeneration,
-  );
   const currentDataPartitionLabel = useCurrentDataPartitionName();
   const showingPartitionModels = currentDataPartitionLabel !== DEFAULT_DATA_PARTITION;
   const [partitionGenerationModel, setPartitionGenerationModel] = useState<string>();
-  // Model ids returned by the last successful "Test connection" probe, used to
-  // populate the Model ID field's datalist (free text is still allowed).
-  const [localProbeModels, setLocalProbeModels] = useState<string[]>([]);
-  // A non-loopback endpoint requires an explicit confirm before enabling, so
-  // the switch doesn't silently start sending prompts off the device. Set when
-  // the switch is flipped for a remote endpoint; the confirm affordance
-  // proceeds.
-  const [localEnableConfirm, setLocalEnableConfirm] = useState(false);
-  const [veniceModels, setVeniceModels] = useState<Record<ProviderModelMode, VeniceModelDto[]>>({
+  const [providerModels, setProviderModels] = useState<
+    Record<ProviderModelMode, ProviderModelDto[]>
+  >({
     transcription: [],
     generation: [],
-    // Image options come from a curated local list, not the fetched catalog;
-    // this stays empty and `imageOptions` supplies the picker. Video follows
-    // the same curated-local pattern while the first fast path is fixed-shape.
     image: [],
     video: [],
   });
@@ -489,46 +402,45 @@ export function AppSettings({
     message: string;
   }>();
   const [micOpen, setMicOpen] = useState(false);
+  const t = useT();
+  const interfaceLocale = useLocale();
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const fontScale = useFontScaleId();
-  const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
-  const [releaseChannel, setReleaseChannelValue] = useState<ReleaseChannel>("stable");
   const experimentalFlags = useExperimentalFlags();
   const experimentalUnlockClicksRef = useRef({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
   });
   const experimentalUnlockingRef = useRef(false);
-  const runtimeFlagBaselineCandidateRef = useRef<boolean | null>(null);
-  const runtimeFlagStatusLoadedRef = useRef(false);
-  const [runtimeBrowserUseBaseline, setRuntimeBrowserUseBaseline] = useState<boolean | null>(null);
-  const [agentRuntimeRunning, setAgentRuntimeRunning] = useState(false);
-  const [experimentalOperation, setExperimentalOperation] = useState<
-    "flags" | "restart" | "unpack"
-  >();
+  const [experimentalOperation, setExperimentalOperation] = useState<"flags">();
   const [experimentalError, setExperimentalError] = useState<string>();
-  // Set only when a leave-rc switch turns up an installable stable, so the
-  // bespoke in-context confirm below the toggle can name the exact version.
-  const [reconcileVersion, setReconcileVersion] = useState<string>();
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelPickerFlyout, setModelPickerFlyout] = useState<ModelPickerFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
   const modelPickerSearchRef = useRef<HTMLInputElement>(null);
-  const costQualitySaveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const latestCostQualitySaveRef = useRef(0);
-  const confirmedCostQualityRef = useRef(DEFAULT_PROVIDER_MODELS.costQuality);
-  const [veniceApiKeyDraft, setVeniceApiKeyDraft] = useState("");
-  // Saving a Venice key while Auto is the text model would silently keep
-  // billing Clovy credits (Auto never uses the key), so the save surfaces an
-  // explicit billing choice: switch to a Venice model or knowingly keep Auto.
-  const [veniceKeyAutoBillingChoiceOpen, setVeniceKeyAutoBillingChoiceOpen] = useState(false);
+  const [providerApiKeyDrafts, setProviderApiKeyDrafts] = useState<Record<BuiltinProvider, string>>(
+    {
+      groq: "",
+      openrouter: "",
+      fal: "",
+      tavily: "",
+    },
+  );
+  const [providerApiKeyRejectedErrors, setProviderApiKeyRejectedErrors] = useState<
+    Record<BuiltinProvider, string | undefined>
+  >({
+    groq: undefined,
+    openrouter: undefined,
+    fal: undefined,
+    tavily: undefined,
+  });
+  const [notesProviders, setNotesProviders] = useState<LlmProvidersDto | null>(null);
+  const [generationCatalogFailed, setGenerationCatalogFailed] = useState(false);
   const [showMoreVoiceOptions, setShowMoreVoiceOptions] = useState(false);
   const [showMoreTextOptions, setShowMoreTextOptions] = useState(false);
   const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
-  const [localModelSetupVisible, setLocalModelSetupVisible] = useState(false);
-  const [localModelStatus, setLocalModelStatus] = useState<string>();
   const [internalTab, setInternalTab] = useState<SettingsTab>("general");
   const [micPopoverPlacement, setMicPopoverPlacement] =
     useState<SelectPopoverPlacement>("align-selected");
@@ -538,7 +450,6 @@ export function AppSettings({
   const [micTestState, setMicTestState] = useState<MicTestState>("idle");
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestStartedAt, setMicTestStartedAt] = useState<number>();
-  const [micTestElapsedMs, setMicTestElapsedMs] = useState(0);
   const [micTestSampleSrc, setMicTestSampleSrc] = useState<string>();
 
   const [micTestError, setMicTestError] = useState<string>();
@@ -554,11 +465,24 @@ export function AppSettings({
   }, [detailPinned, onDetailPinnedChange]);
   // Never leave the host thinking a detail scroller is active after unmount.
   useEffect(() => () => onDetailPinnedChange?.(false), [onDetailPinnedChange]);
-  const settingsTabs = appSettingsTabsForCompanionPairing(
-    experimentalFlags.companionPairingEnabled,
-  ).filter((tab) => !(account.localDev && tab.id === "billing"));
+  const [internalActivitySupported, setInternalActivitySupported] = useState(
+    () => isMacLikePlatform() || isWindowsPlatform(),
+  );
+  useEffect(() => {
+    if (activitySupportedProp !== undefined) return;
+    let active = true;
+    void activityStatus()
+      .then((status) => {
+        if (active) setInternalActivitySupported(status.supported);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [activitySupportedProp]);
+  const effectiveActivitySupported = activitySupportedProp ?? internalActivitySupported;
+  const settingsTabs = settingsTabsForPlatform(effectiveActivitySupported);
   const capabilities = useDictationCapabilities();
-  const macLikePlatform = capabilities.platform === "macos";
   const systemAudioSupportedPlatform = capabilities.systemAudio || isSystemAudioSupportedPlatform();
   const defaultShortcuts =
     capabilities.platform === "windows"
@@ -569,30 +493,9 @@ export function AppSettings({
         };
   const modifierRequiredMessage =
     capabilities.platform === "windows"
-      ? "Shortcut must include Ctrl, Alt, Shift, or Win."
-      : MODIFIER_REQUIRED_MESSAGE;
+      ? t("settings.shortcuts.modifierRequiredWindows")
+      : t("settings.shortcuts.modifierRequiredMac");
 
-  useEffect(() => {
-    if (!experimentalFlags.loaded || runtimeFlagStatusLoadedRef.current) return;
-    runtimeFlagBaselineCandidateRef.current ??= experimentalFlags.browserUseEnabled;
-    let cancelled = false;
-    const baseline = runtimeFlagBaselineCandidateRef.current;
-    Promise.resolve()
-      .then(() => {
-        if (cancelled) return;
-        runtimeFlagStatusLoadedRef.current = true;
-        setAgentRuntimeRunning(true);
-        setRuntimeBrowserUseBaseline(baseline);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        runtimeFlagStatusLoadedRef.current = true;
-        setRuntimeBrowserUseBaseline(baseline);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [experimentalFlags.loaded, experimentalFlags.browserUseEnabled]);
   const setActiveTab = (tab: SettingsTab) => {
     if (controlled) {
       onTabChange?.(tab);
@@ -620,71 +523,6 @@ export function AppSettings({
     capturingShortcutRef.current = capturingShortcut;
   }, [capturingShortcut]);
 
-  // Load the persisted release channel once the updater is available. Gated on
-  // a stable boolean (not the onCheckForUpdates prop itself, which is an inline
-  // arrow with a new identity each render) so this loads once, not per render.
-  const updaterAvailable = Boolean(onCheckForUpdates);
-  useEffect(() => {
-    if (!updaterAvailable) return;
-    let active = true;
-    void getReleaseChannel()
-      .then((channel) => {
-        if (active) setReleaseChannelValue(channel);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [updaterAvailable]);
-
-  const handleReleaseChannelChange = (next: ReleaseChannel) => {
-    setReleaseChannelValue(next);
-    // Any channel change dismisses a stale reconcile offer (e.g. toggling back
-    // to rc, or stable -> rc -> stable) before we decide whether to re-offer.
-    setReconcileVersion(undefined);
-    void setReleaseChannel(next)
-      .then(() => {
-        // Leaving rc for stable while running a prerelease build: stable is
-        // normally older than the rc you are on, so a routine check would never
-        // pull it. Offer a one-time reconcile down onto the current stable (Q4-Q8).
-        if (next === "stable" && isPrereleaseBuild()) {
-          void offerReconcileToStable();
-        }
-      })
-      .catch(() => {
-        // Persist failed: re-read so the toggle reflects the real saved channel
-        // rather than an optimistic value that never reached disk.
-        void getReleaseChannel()
-          .then(setReleaseChannelValue)
-          .catch(() => undefined);
-      });
-  };
-
-  async function offerReconcileToStable() {
-    try {
-      const update = await reconcileToStable();
-      // Only prompt when a stable is actually installable. If stable has already
-      // caught up or passed the rc, the routine updater handles it (no reconcile).
-      if (update) setReconcileVersion(update.version);
-    } catch {
-      // A failed reconcile check is silent: the channel is already saved and the
-      // routine update flow will retry on its next check.
-    }
-  }
-
-  function confirmReconcileToStable() {
-    setReconcileVersion(undefined);
-    onReconcileToStable?.();
-  }
-
-  useEffect(() => {
-    setLocalGenerationDraft(providerSettings.localGeneration);
-  }, [
-    providerSettings.localGeneration.baseUrl,
-    providerSettings.localGeneration.modelId,
-    providerSettings.localGeneration.apiKey,
-  ]);
-
   useEffect(() => {
     setMicOpen(false);
     setLanguageOpen(false);
@@ -692,17 +530,6 @@ export function AppSettings({
       void resetMicTestState(true);
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    if (!account.localDev || activeTab !== "billing") {
-      return;
-    }
-    if (controlled) {
-      onTabChange?.("general");
-      return;
-    }
-    setInternalTab("general");
-  }, [account.localDev, activeTab, controlled, onTabChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -721,14 +548,15 @@ export function AppSettings({
         // Merge over defaults so a settings payload that predates a field
         // (e.g. imageModel from an older backend) still has every model set.
         const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
-        confirmedCostQualityRef.current = modelSnapshot.settings.costQuality;
         setProviderSettings(modelSnapshot.settings);
         setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
         providerSettingsProfileRef.current = currentDataPartitionLabel;
         await requestMicrophones();
         await Promise.all([
-          requestVeniceModels("transcription"),
-          requestVeniceModels("generation"),
+          requestProviderModels("transcription"),
+          requestProviderModels("generation"),
+          requestProviderModels("image"),
+          requestProviderModels("video"),
         ]);
       } catch (error) {
         if (!cancelled) setStatus(messageFromError(error));
@@ -849,10 +677,20 @@ export function AppSettings({
   useEffect(() => {
     if (!capturingShortcut) return;
     const kind = capturingShortcut;
+    const windows = capabilities.platform === "windows";
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         void cancelShortcutCapture();
+        return;
+      }
+      // On Windows the helper's keyboard hook is the only source: it sees
+      // which side a modifier is on and AltGr, which the DOM does not, and
+      // two sources racing each other is how a capture used to end with
+      // the other source's cancel wiping its result.
+      if (windows) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       // Key chords are read here in the DOM (the window is focused during a
@@ -875,7 +713,7 @@ export function AppSettings({
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [capturingShortcut]);
+  }, [capturingShortcut, capabilities.platform]);
 
   async function requestMicrophones() {
     try {
@@ -885,15 +723,26 @@ export function AppSettings({
     }
   }
 
-  async function requestVeniceModels(mode: ProviderModelMode) {
+  const providerCatalogRequests = useRef<Record<ProviderModelMode, number>>({
+    transcription: 0,
+    generation: 0,
+    image: 0,
+    video: 0,
+  });
+
+  async function requestProviderModels(mode: ProviderModelMode) {
+    const request = ++providerCatalogRequests.current[mode];
     try {
-      const response = await listVeniceModels(mode);
-      setVeniceModels((models) => ({
-        ...models,
-        [mode]: response.models,
-      }));
+      const response = await listProviderModels(mode);
+      if (request !== providerCatalogRequests.current[mode]) return;
+      setProviderModels((models) => ({ ...models, [mode]: response.models }));
+      if (mode === "generation") setGenerationCatalogFailed(false);
     } catch (error) {
-      setStatus(messageFromError(error));
+      if (request !== providerCatalogRequests.current[mode]) return;
+      // A stale successful fetch must not survive a failed refresh.
+      setProviderModels((models) => ({ ...models, [mode]: [] }));
+      if (mode === "generation") setGenerationCatalogFailed(true);
+      else setStatus(messageFromError(error));
     }
   }
 
@@ -909,7 +758,6 @@ export function AppSettings({
       setMicTestSampleSrc(undefined);
       setMicTestLevel(0);
       setMicTestStartedAt(Date.now());
-      setMicTestElapsedMs(0);
       setMicTestPlaying(false);
       return;
     }
@@ -921,12 +769,11 @@ export function AppSettings({
       const path = stringPayload(helperEvent.payload?.path);
       if (!path) {
         setMicTestState("error");
-        setMicTestError("Microphone test did not return a playable sample.");
+        setMicTestError(translate("settings.micTest.noSample"));
         return;
       }
       setMicTestState("ready");
       setMicTestStartedAt(undefined);
-      setMicTestElapsedMs(0);
       setMicTestLevel(numericPayload(helperEvent.payload?.observedAudioLevel));
       setMicTestError(undefined);
       setMicTestPlaying(false);
@@ -934,7 +781,10 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "mic_test_error") {
-      const message = helperEvent.payload?.message ?? "Microphone test could not record.";
+      const message = messageForErrorCode(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.micTest.couldNotRecord"),
+      );
       setMicTestState("error");
       setMicTestStartedAt(undefined);
       setMicTestError(message);
@@ -943,13 +793,19 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "fn_monitor_unavailable") {
-      setStatus(helperEvent.payload?.message ?? "Global shortcut monitoring is unavailable.");
+      setStatus(
+        messageForErrorCode(
+          stringPayload(helperEvent.payload?.code),
+          helperEvent.payload?.message ?? translate("settings.shortcuts.monitorUnavailable"),
+          { shortcut: stringPayload(helperEvent.payload?.shortcut) },
+        ),
+      );
       return;
     }
     if (helperEvent.type === "helper_unavailable") {
       setHelperUnavailable({
         reason: stringPayload(helperEvent.payload?.reason) ?? "restarting",
-        message: helperEvent.payload?.message ?? "Dictation stopped and is restarting.",
+        message: helperEvent.payload?.message ?? translate("settings.helper.restarting"),
       });
       return;
     }
@@ -959,7 +815,11 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "hotkey_trigger_unavailable") {
-      const message = helperEvent.payload?.message ?? "Dictation shortcut is unavailable.";
+      const message = windowsShortcutMessage(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.shortcuts.unavailable"),
+        stringPayload(helperEvent.payload?.shortcut),
+      );
       const kind = shortcutKindPayload(helperEvent.payload?.kind);
       setHelperUnavailable(undefined);
       setShortcutError(message);
@@ -968,11 +828,14 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_capture_started") {
-      setStatus("Press the shortcut to record it.");
+      setStatus(translate("settings.shortcuts.pressToRecord"));
       return;
     }
     if (helperEvent.type === "shortcut_capture_error") {
-      const message = helperEvent.payload?.message ?? "Shortcut could not be captured.";
+      const message = windowsShortcutMessage(
+        stringPayload(helperEvent.payload?.code),
+        helperEvent.payload?.message ?? translate("settings.shortcuts.captureFailed"),
+      );
       const kind = shortcutKindPayload(helperEvent.payload?.kind) ?? capturingShortcutRef.current;
       setCapturingShortcut(undefined);
       setShortcutError(message);
@@ -981,23 +844,23 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "shortcut_capture_cancelled") {
+      // The capture ending is not the user's next action: an error already
+      // on the row (a registration the system refused) stays visible.
       setCapturingShortcut(undefined);
-      setShortcutError(undefined);
-      setShortcutErrorKind(undefined);
-      setStatus("Shortcut capture ended.");
+      setStatus(translate("settings.shortcuts.captureEnded"));
       return;
     }
     if (helperEvent.type === "shortcut_captured") {
       const kind = capturingShortcutRef.current;
       if (!kind) {
-        setShortcutError("Shortcut capture returned without an active target.");
-        setStatus("Shortcut capture returned without an active target.");
+        setShortcutError(translate("settings.shortcuts.noTarget"));
+        setStatus(translate("settings.shortcuts.noTarget"));
         return;
       }
       const shortcut = shortcutFromCapturePayload(helperEvent.payload?.shortcut, 1);
       if (!shortcut) {
-        setShortcutError("Shortcut capture returned invalid data.");
-        setStatus("Shortcut capture returned invalid data.");
+        setShortcutError(translate("settings.shortcuts.invalidData"));
+        setStatus(translate("settings.shortcuts.invalidData"));
         return;
       }
       setShortcutError(undefined);
@@ -1006,7 +869,12 @@ export function AppSettings({
       return;
     }
     if (helperEvent.type === "error") {
-      setStatus(helperEvent.payload?.message ?? "Settings helper failed.");
+      setStatus(
+        messageForErrorCode(
+          stringPayload(helperEvent.payload?.code),
+          helperEvent.payload?.message ?? translate("settings.helper.failed"),
+        ),
+      );
     }
   }
 
@@ -1018,7 +886,11 @@ export function AppSettings({
       const next = await setDictationMicrophone(id, name);
       setSettings(next);
       setMicOpen(false);
-      setStatus(name ? `Microphone set to ${name}.` : "Microphone set to auto-detect.");
+      setStatus(
+        name
+          ? translate("settings.audio.microphoneSet", { name })
+          : translate("settings.audio.microphoneAuto"),
+      );
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1034,7 +906,12 @@ export function AppSettings({
       setCapturingShortcut(undefined);
       setShortcutError(undefined);
       setShortcutErrorKind(undefined);
-      setStatus(`${shortcutKindLabel(kind)} set to ${shortcutForKind(next, kind).label}.`);
+      setStatus(
+        translate("settings.shortcuts.set", {
+          shortcut: shortcutKindLabel(kind),
+          label: shortcutForKind(next, kind).label,
+        }),
+      );
     } catch (error) {
       setShortcutError(messageFromError(error));
       setShortcutErrorKind(kind);
@@ -1077,7 +954,6 @@ export function AppSettings({
     setMicTestSampleSrc(undefined);
     setMicTestLevel(0);
     setMicTestStartedAt(Date.now());
-    setMicTestElapsedMs(0);
     setMicTestPlaying(false);
     try {
       await dictationHelperCommand({
@@ -1102,7 +978,6 @@ export function AppSettings({
     setMicTestState("idle");
     setMicTestLevel(0);
     setMicTestStartedAt(undefined);
-    setMicTestElapsedMs(0);
     setMicTestSampleSrc(undefined);
     setMicTestError(undefined);
     setMicTestPlaying(false);
@@ -1114,57 +989,20 @@ export function AppSettings({
     }
   }
 
-  // Returns whether the switch persisted, so confirmation flows (the Venice
-  // key billing choice) can stay open instead of closing over a failed save.
-  async function selectVeniceModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
+  // Persists the model without changing any engine selection.
+  async function selectProviderModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
     if (showingPartitionModels) return false;
     try {
-      const next = await setVeniceModel(mode, modelId);
+      const next = await setProviderModel(mode, modelId);
       setProviderSettings(next);
       setEffectiveProviderSettings(next);
       dispatchProviderModelSettingsChanged({ mode, modelId });
-      setStatus(
-        mode === "transcription"
-          ? "Transcription model updated."
-          : mode === "image"
-            ? "Image model updated."
-            : mode === "video"
-              ? "Video model updated."
-              : "Text model updated.",
-      );
+      setStatus(translate(`settings.models.updated.${mode}`));
       return true;
     } catch (error) {
       setStatus(messageFromError(error));
       return false;
     }
-  }
-
-  function saveCostQuality(value: number) {
-    const version = ++latestCostQualitySaveRef.current;
-    const save = costQualitySaveChainRef.current.then(() => setCostQuality(value));
-    costQualitySaveChainRef.current = save.then(
-      () => undefined,
-      () => undefined,
-    );
-    void save.then(
-      (next) => {
-        confirmedCostQualityRef.current = next.costQuality;
-        if (version !== latestCostQualitySaveRef.current) return;
-        setProviderSettings((current) => ({
-          ...current,
-          costQuality: next.costQuality,
-        }));
-        setStatus("Automatic model preference updated.");
-      },
-      (error) => {
-        if (version !== latestCostQualitySaveRef.current) return;
-        setProviderSettings((current) => ({
-          ...current,
-          costQuality: confirmedCostQualityRef.current,
-        }));
-        setStatus(messageFromError(error));
-      },
-    );
   }
 
   function closeModelPicker() {
@@ -1173,205 +1011,57 @@ export function AppSettings({
     setModelSearch("");
   }
 
-  // Optimistic apply + persisted save for the Models row's segmented Auto
-  // preference control.
-  function applyCostQuality(costQuality: number) {
-    setProviderSettings((current) => ({ ...current, costQuality }));
-    saveCostQuality(costQuality);
+  function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
+    if (!showingPartitionModels) void selectProviderModel(mode, modelId);
+    closeModelPicker();
   }
 
-  function selectModelFromPicker(
-    mode: ProviderModelMode,
-    modelId: string,
-    costQuality?: number,
-    options?: { keepOpen?: boolean },
-  ) {
-    // Named profiles show their own models read-only; a pick is a no-op.
-    if (showingPartitionModels) {
-      closeModelPicker();
-      return;
-    }
-    const picked = modelOptionsForMode(mode).find((model) => model.id === modelId);
-    if (mode === "generation" && costQuality !== undefined) {
-      applyCostQuality(costQuality);
-    }
-    if (mode === "generation" && picked?.provider === "local") {
-      enableLocalGenerationFromPicker();
-    } else {
-      void selectVeniceModel(mode, modelId);
-    }
-    // The Auto toggle switches models mid-flow, so it asks to keep the picker
-    // open; a row pick is a final choice and closes it.
-    if (!options?.keepOpen) closeModelPicker();
-  }
-
-  // True when the draft matches what's persisted, so enabling can skip a
-  // redundant save. The catalog is derived from providerSettings, never a
-  // re-fetch, so there's no awaited network call to overwrite the status.
-  function draftMatchesSavedLocal() {
-    const saved = providerSettings.localGeneration;
-    return (
-      localGenerationDraft.baseUrl.trim() === saved.baseUrl.trim() &&
-      localGenerationDraft.modelId.trim() === saved.modelId.trim() &&
-      localGenerationDraft.apiKey === saved.apiKey
-    );
-  }
-
-  // Persists the draft fields without changing the active provider. Returns
-  // the updated settings on success (draft re-syncs from providerSettings via
-  // effect); surfaces validation errors next to the local controls.
-  async function commitLocalGenerationSettings() {
-    try {
-      const next = await saveLocalGenerationSettings({
-        baseUrl: localGenerationDraft.baseUrl,
-        modelId: localGenerationDraft.modelId,
-        apiKey: localGenerationDraft.apiKey,
-      });
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      return next;
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-      return undefined;
-    }
-  }
-
-  async function handleSaveLocalModel() {
-    const saved = await commitLocalGenerationSettings();
-    if (saved) setLocalModelStatus("Local model saved.");
-  }
-
-  // Flips the provider to the saved local endpoint. The backend enables from
-  // stored settings, so callers save any dirty draft first.
-  async function commitLocalGenerationEnabled() {
-    try {
-      const next = await setLocalGenerationEnabled(true);
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      setLocalEnableConfirm(false);
-      setLocalModelSetupVisible(true);
-      setLocalModelStatus("Local model enabled.");
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-    }
-  }
-
-  // The model picker's local option enables from the SAVED settings (never
-  // the draft), but it must honor the same off-device invariant as the
-  // toggle: a non-loopback endpoint is never enabled silently. Instead of
-  // enabling, it reveals the confirm affordance in More options
-  // and says so; a loopback endpoint enables in one step.
-  function enableLocalGenerationFromPicker() {
-    const baseUrl = providerSettings.localGeneration.baseUrl.trim();
-    if (!isLoopbackUrl(baseUrl)) {
-      setLocalEnableConfirm(true);
-      setLocalModelSetupVisible(true);
-      // The confirm affordance lives behind More options; reveal it so the
-      // status message's instruction is reachable.
-      setShowMoreTextOptions(true);
-      setLocalModelStatus(
-        "This endpoint is not on this machine. Requests will leave your device. Confirm in More options to enable it.",
-      );
-      return;
-    }
-    void commitLocalGenerationEnabled();
-  }
-
-  async function enableLocalGeneration() {
-    const baseUrl = localGenerationDraft.baseUrl.trim();
-    const modelId = localGenerationDraft.modelId.trim();
-    if (!baseUrl || !modelId) {
-      setLocalModelSetupVisible(true);
-      setLocalModelStatus("Enter a local endpoint and model ID first.");
-      return;
-    }
-    // A remote endpoint takes a deliberate second step: the first flip reveals
-    // the confirm affordance instead of enabling.
-    if (!isLoopbackUrl(baseUrl) && !localEnableConfirm) {
-      setLocalEnableConfirm(true);
-      setLocalModelSetupVisible(true);
-      return;
-    }
-    if (!draftMatchesSavedLocal()) {
-      const saved = await commitLocalGenerationSettings();
-      if (!saved) return;
-    }
-    await commitLocalGenerationEnabled();
-  }
-
-  async function disableLocalGeneration() {
-    // Toggle-off never saves the draft: it only flips the provider back and
-    // leaves the stored local fields untouched.
-    setLocalEnableConfirm(false);
-    try {
-      const next = await setLocalGenerationEnabled(false);
-      setProviderSettings(next);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: next.generationModel,
-      });
-      setLocalModelStatus("Local model disabled.");
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-    }
-  }
-
-  async function saveVeniceApiKey() {
-    const apiKey = veniceApiKeyDraft.trim();
+  async function saveProviderApiKey(provider: BuiltinProvider) {
+    const apiKey = (providerApiKeyDrafts[provider] || "").trim();
     if (!apiKey) {
-      setStatus("Enter a Venice API key before saving.");
+      setStatus(translate("settings.providerKeys.enterKey"));
       return;
     }
     try {
-      const next = await setVeniceApiKey(apiKey);
+      const next = await setProviderApiKey(provider, apiKey);
       setProviderSettings(next);
-      setVeniceApiKeyDraft("");
-      setStatus("Venice API key saved.");
-      // The workspace's model picker shows a billing note while a key is
-      // saved, so let it refresh its provider settings snapshot.
+      setEffectiveProviderSettings((current) => ({
+        ...current,
+        providerApiKeysConfigured: next.providerApiKeysConfigured,
+      }));
+      if (provider === "openrouter") void requestProviderModels("generation");
+      void requestProviderModels("image");
+      void requestProviderModels("video");
+      setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
+      setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
+      const providerName = translate(`settings.providerKeys.${provider}.name`);
+      setStatus(translate("settings.providerKeys.saved", { provider: providerName }));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
-      if (next.generationModel === AUTO_MODEL_ID) {
-        setVeniceKeyAutoBillingChoiceOpen(true);
+    } catch (error) {
+      const code = errorCode(error);
+      const message = messageFromError(error);
+      if (code === "provider_api_key_rejected") {
+        setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: message }));
       }
-    } catch (error) {
-      setStatus(messageFromError(error));
+      setStatus(message);
     }
   }
 
-  function handleLocalToggle(enabled: boolean) {
-    setLocalModelSetupVisible(true);
-    if (enabled) {
-      void enableLocalGeneration();
-    } else {
-      void disableLocalGeneration();
-    }
-  }
-
-  async function testLocalConnection() {
+  async function removeProviderApiKey(provider: BuiltinProvider) {
     try {
-      const result = await probeLocalGenerationEndpoint({
-        baseUrl: localGenerationDraft.baseUrl,
-        apiKey: localGenerationDraft.apiKey,
-      });
-      setLocalProbeModels(result.models);
-      setLocalModelStatus(`Connected. ${result.models.length} models available.`);
-    } catch (error) {
-      setLocalModelStatus(messageFromError(error));
-    }
-  }
-
-  async function removeVeniceApiKey() {
-    try {
-      const next = await clearVeniceApiKey();
+      const next = await clearProviderApiKey(provider);
       setProviderSettings(next);
-      setVeniceApiKeyDraft("");
-      setStatus("Venice API key removed.");
+      setEffectiveProviderSettings((current) => ({
+        ...current,
+        providerApiKeysConfigured: next.providerApiKeysConfigured,
+      }));
+      if (provider === "openrouter") void requestProviderModels("generation");
+      void requestProviderModels("image");
+      void requestProviderModels("video");
+      setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
+      setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
+      const providerName = translate(`settings.providerKeys.${provider}.name`);
+      setStatus(translate("settings.providerKeys.removed", { provider: providerName }));
       dispatchProviderModelSettingsChanged({ mode: "generation", modelId: next.generationModel });
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1384,8 +1074,8 @@ export function AppSettings({
       setProviderSettings(next);
       setStatus(
         enabled
-          ? "Live transcription on: the transcript streams while you record."
-          : "Live transcription off: the transcript appears after the recording ends.",
+          ? translate("settings.liveTranscription.on")
+          : translate("settings.liveTranscription.off"),
       );
     } catch (error) {
       setStatus(messageFromError(error));
@@ -1396,11 +1086,7 @@ export function AppSettings({
     try {
       const next = await setImageSafeMode(enabled);
       setProviderSettings(next);
-      setStatus(
-        enabled
-          ? "Safe mode on: adult content is blurred."
-          : "Safe mode off: images are not filtered.",
-      );
+      setStatus(enabled ? translate("settings.safeMode.on") : translate("settings.safeMode.off"));
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1413,21 +1099,24 @@ export function AppSettings({
       setLanguageOpen(false);
       setStatus(
         language
-          ? `Default transcription language set to ${languageLabel(language)}.`
-          : "Default transcription language set to auto-detect.",
+          ? translate("settings.dictation.languageSet", { language: languageLabel(language) })
+          : translate("settings.dictation.languageAuto"),
       );
     } catch (error) {
       setStatus(messageFromError(error));
     }
   }
 
-  const microphoneName = settings.microphone.name ?? "Auto-detect";
+  const microphoneName = settings.microphone.name ?? t("settings.audio.autoDetect");
   const microphoneDescription = settings.microphone.id
-    ? "Input device used for dictation."
+    ? t("settings.audio.microphoneDescription")
     : defaultMicrophone?.name
-      ? `Auto-detect uses ${defaultMicrophone.name}.`
-      : "Auto-detect uses the current system input.";
-  const microphoneOptions = [{ id: undefined, name: "Auto-detect" }, ...microphones];
+      ? t("settings.audio.autoDetectUses", { name: defaultMicrophone.name })
+      : t("settings.audio.autoDetectSystem");
+  const microphoneOptions = [
+    { id: undefined, name: t("settings.audio.autoDetect") },
+    ...microphones,
+  ];
   const selectedMicrophoneIndex = Math.max(
     0,
     microphoneOptions.findIndex((option) => (option.id ?? "") === (settings.microphone.id ?? "")),
@@ -1440,67 +1129,40 @@ export function AppSettings({
     ? effectiveProviderSettings
     : providerSettings;
   const transcriptionOptions = modelOptions(
-    veniceModels.transcription,
+    providerModels.transcription.filter(
+      (model) => model.provider === displayProviderSettings.transcriptionProvider,
+    ),
     displayProviderSettings.transcriptionModel,
   );
-  const localModelEnabled = providerSettings.generationProvider === "local";
-  const generationCatalog = useMemo(
-    () => withLocalGenerationOption(veniceModels.generation, providerSettings.localGeneration),
-    [
-      veniceModels.generation,
-      providerSettings.localGeneration.baseUrl,
-      providerSettings.localGeneration.modelId,
-    ],
+  const generationOptions = modelOptions(
+    providerModels.generation,
+    modelValueForMode("generation"),
   );
-  // Pass the prefixed local id (when local is enabled) so it matches the
-  // catalog's local option. Passing the raw generationModel let modelOptions
-  // prepend a bare duplicate entry that persisted the local id as the remote
-  // model when clicked.
-  const generationOptions = modelOptions(generationCatalog, modelValueForMode("generation"));
-  // Where the billing-choice dialog lands when the user opts out of Auto to
-  // use their Venice key: the leading suggested pick, else the first Venice
-  // catalog model, drawn from the same selectable list as the model picker so
-  // the dialog can never persist a model the picker would exclude (the factory
-  // default stays the last resort for an empty catalog).
-  const selectableGenerationOptions = generationOptions.filter((option) =>
-    modelAvailableForMode("generation", option),
-  );
-  const veniceKeySwitchTarget =
-    suggestedModelsForMode("generation", selectableGenerationOptions).find(
-      (item) => item.model.id !== AUTO_MODEL_ID,
-    )?.model ??
-    selectableGenerationOptions.find(
-      (option) => option.provider === "venice" && option.id !== AUTO_MODEL_ID,
-    );
+  const notesProvider = notesProviders?.usage.notes;
+  const cliNames: Record<string, string> = {
+    claude: "Claude Code",
+    codex: "Codex",
+    pi: "Pi",
+    agy: "Antigravity",
+    "cursor-agent": "Cursor Agent",
+    copilot: "GitHub Copilot",
+  };
+  const notesEngineName =
+    notesProvider?.kind === "cli"
+      ? (cliNames[notesProvider.id] ?? notesProvider.id)
+      : notesProvider?.kind === "endpoint"
+        ? (notesProviders?.endpoints.find((endpoint) => endpoint.id === notesProvider.id)?.name ??
+          notesProvider.id)
+        : undefined;
+  const textModelDescription = notesEngineName
+    ? t("settings.models.textOtherEngineDescription", { engine: notesEngineName })
+    : t("settings.models.textDescription");
   const imageOptions = IMAGE_GENERATION_ENABLED
     ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
     : [];
   const videoOptions = VIDEO_GENERATION_ENABLED
-    ? modelOptions(VIDEO_MODELS, displayProviderSettings.videoModel)
+    ? modelOptions(videoModelCatalog(), displayProviderSettings.videoModel)
     : [];
-  const localDraftBaseUrl = localGenerationDraft.baseUrl.trim();
-  const localNonLoopback = localDraftBaseUrl.length > 0 && !isLoopbackUrl(localDraftBaseUrl);
-  const localModelHasDraft =
-    localDraftBaseUrl.length > 0 ||
-    localGenerationDraft.modelId.trim().length > 0 ||
-    localGenerationDraft.apiKey.length > 0;
-  const localModelHasSavedConfig =
-    providerSettings.localGeneration.baseUrl.trim().length > 0 ||
-    providerSettings.localGeneration.modelId.trim().length > 0;
-  const showLocalModelFields =
-    localModelEnabled || localModelSetupVisible || localModelHasDraft || localModelHasSavedConfig;
-
-  // Advanced model settings (the Venice key and the local model) sit behind a
-  // collapsed "More options" disclosure. Auto-expand it when a local model is
-  // already enabled so the active toggle and endpoint config are never hidden
-  // behind the disclosure. It only ever expands: a manual collapse, or a later
-  // disable, is left as the user set it.
-  useEffect(() => {
-    if (localModelEnabled) {
-      setShowMoreTextOptions(true);
-      setLocalModelSetupVisible(true);
-    }
-  }, [localModelEnabled]);
 
   useEffect(() => {
     if (showingPartitionModels) closeModelPicker();
@@ -1549,14 +1211,6 @@ export function AppSettings({
     if (languageOpen) updateLanguagePopoverPlacement();
   }, [languageOpen, selectedLanguageIndex]);
 
-  useEffect(() => {
-    if (micTestState !== "recording" || !micTestStartedAt) return;
-    const interval = window.setInterval(() => {
-      setMicTestElapsedMs(Date.now() - micTestStartedAt);
-    }, 100);
-    return () => window.clearInterval(interval);
-  }, [micTestState, micTestStartedAt]);
-
   function updateMicrophonePopoverPlacement() {
     setMicPopoverPlacement(
       selectPopoverPlacement(micWrapRef.current, microphoneOptions.length, selectedMicrophoneIndex),
@@ -1591,9 +1245,6 @@ export function AppSettings({
   }
 
   function globalGenerationModelValue() {
-    if (localModelEnabled && providerSettings.localGeneration.modelId.trim()) {
-      return localGenerationOptionId(providerSettings.localGeneration.modelId);
-    }
     return providerSettings.generationModel;
   }
 
@@ -1605,7 +1256,7 @@ export function AppSettings({
     setModelPickerFlyout(null);
     setModelSearch("");
     // Image and video models are curated local lists, not fetched catalogs.
-    if (mode !== "image" && mode !== "video") void requestVeniceModels(mode);
+    void requestProviderModels(mode);
   }
 
   function microphonePopoverStyle(): CSSProperties {
@@ -1633,32 +1284,21 @@ export function AppSettings({
     void setExperimentalFlags({
       unlocked: true,
       browser_use: experimentalFlags.browser_use,
-      companion_pairing: experimentalFlags.companion_pairing,
-      companion_computer_use_approvals: experimentalFlags.companion_computer_use_approvals,
     })
-      .then(() => toast("Experiments are unlocked"))
+      .then(() => toast(translate("settings.experiments.unlocked")))
       .catch((error) => setExperimentalError(messageFromError(error)))
       .finally(() => {
         experimentalUnlockingRef.current = false;
       });
   }
 
-  async function updateExperimentalFlags(update: {
-    unlocked?: boolean;
-    browser_use?: boolean;
-    companion_pairing?: boolean;
-    companion_computer_use_approvals?: boolean;
-  }) {
+  async function updateExperimentalFlags(update: { unlocked?: boolean; browser_use?: boolean }) {
     setExperimentalOperation("flags");
     setExperimentalError(undefined);
     try {
       await setExperimentalFlags({
         unlocked: update.unlocked ?? experimentalFlags.unlocked,
         browser_use: update.browser_use ?? experimentalFlags.browser_use,
-        companion_pairing: update.companion_pairing ?? experimentalFlags.companion_pairing,
-        companion_computer_use_approvals:
-          update.companion_computer_use_approvals ??
-          experimentalFlags.companion_computer_use_approvals,
       });
     } catch (error) {
       setExperimentalError(messageFromError(error));
@@ -1667,49 +1307,16 @@ export function AppSettings({
     }
   }
 
-  async function restartAgentForExperimentalFlags() {
-    setExperimentalOperation("restart");
-    setExperimentalError(undefined);
-    try {
-      await connectorsApplyRuntime();
-      setRuntimeBrowserUseBaseline(experimentalFlags.browserUseEnabled);
-      setAgentRuntimeRunning(true);
-    } catch (error) {
-      setExperimentalError(messageFromError(error));
-    } finally {
-      setExperimentalOperation(undefined);
-    }
-  }
-
-  async function unpackExperimentalExtension() {
-    setExperimentalOperation("unpack");
-    setExperimentalError(undefined);
-    try {
-      await unpackBundledExtension();
-    } catch (error) {
-      setExperimentalError(messageFromError(error));
-    } finally {
-      setExperimentalOperation(undefined);
-    }
-  }
-
-  const experimentalRestartNeeded =
-    agentRuntimeRunning &&
-    runtimeBrowserUseBaseline !== null &&
-    runtimeBrowserUseBaseline !== experimentalFlags.browserUseEnabled;
-
   return (
     <div className="settings-page" data-controlled={controlled || undefined}>
       {controlled ? null : (
         <>
           <header className="settings-header">
-            <h1 className="settings-title">Settings</h1>
-            <p className="settings-description">
-              Manage audio, dictation, AI models, and agent capabilities.
-            </p>
+            <h1 className="settings-title">{t("common.settings")}</h1>
+            <p className="settings-description">{t("settings.page.description")}</p>
           </header>
 
-          <nav className="settings-nav" role="tablist" aria-label="Settings sections">
+          <nav className="settings-nav" role="tablist" aria-label={t("settings.page.navAria")}>
             {settingsTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -1736,16 +1343,9 @@ export function AppSettings({
         {activeTab === "general" ? (
           <>
             <SettingsPageHeader
-              title="General"
-              blurb="Your account and everyday Clovy preferences."
+              title={t("settings.tabs.general")}
+              blurb={t("settings.general.blurb")}
             />
-            <AccountSettingsSection
-              account={account}
-              loading={accountLoading}
-              onAccountChanged={onAccountChanged}
-              onRefresh={onAccountRefresh}
-            />
-
             <PermissionsSettingsSection
               microphonePermissionStatus={microphonePermissionStatus}
               microphoneReadiness={microphoneReadiness}
@@ -1758,7 +1358,9 @@ export function AppSettings({
 
             <StartupSettingsSection />
 
-            <PrivacySettingsSection />
+            {onCheckForUpdates ? (
+              <UpdatesSettingsSection onCheck={onCheckForUpdates} checking={checkingForUpdates} />
+            ) : null}
           </>
         ) : null}
 
@@ -1766,23 +1368,47 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="appearance-heading">
             <SettingsPageHeader
               id="appearance-heading"
-              title="Appearance"
-              blurb="Choose the theme, accent color, text size, and date format Clovy uses."
+              title={t("settings.appearance.title")}
+              blurb={t("settings.appearance.blurb")}
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Theme</h3>
+                    <h3 className="settings-row-title">{t("settings.interfaceLanguage.title")}</h3>
                     <p className="settings-row-description">
-                      Match the system or force light or dark mode.
+                      {t("settings.interfaceLanguage.description")}
                     </p>
                   </div>
                   <div className="settings-row-control">
+                    <Select
+                      value={interfaceLocale}
+                      options={INTERFACE_LOCALE_OPTIONS.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        lang: option.value,
+                      }))}
+                      placeholder="English"
+                      ariaLabel={t("settings.interfaceLanguage.aria", {
+                        language:
+                          INTERFACE_LOCALE_OPTIONS.find(
+                            (option) => option.value === interfaceLocale,
+                          )?.label ?? "English",
+                      })}
+                      onChange={(value) => setInterfaceLocale(value as InterfaceLocale)}
+                    />
+                  </div>
+                </div>
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <h3 className="settings-row-title">{t("settings.theme.title")}</h3>
+                    <p className="settings-row-description">{t("settings.theme.description")}</p>
+                  </div>
+                  <div className="settings-row-control">
                     <SegmentedControl<ThemePreference>
-                      aria-label="App theme"
+                      aria-label={t("settings.theme.aria")}
                       value={theme}
-                      options={THEME_OPTIONS}
+                      options={themeOptions(t)}
                       onValueChange={(next) => {
                         setTheme(next);
                         setStoredTheme(next);
@@ -1792,26 +1418,22 @@ export function AppSettings({
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Text size</h3>
-                    <p className="settings-row-description">
-                      Make text across the app larger. Affects every label, note, and conversation.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.textSize.title")}</h3>
+                    <p className="settings-row-description">{t("settings.textSize.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <SegmentedControl<FontScaleId>
-                      aria-label="Text size"
+                      aria-label={t("settings.textSize.title")}
                       value={fontScale}
-                      options={FONT_SCALE_OPTIONS}
+                      options={fontScaleOptions(t)}
                       onValueChange={setStoredFontScale}
                     />
                   </div>
                 </div>
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Accent</h3>
-                    <p className="settings-row-description">
-                      The brand color used across buttons, highlights, and the recorder.
-                    </p>
+                    <h3 className="settings-row-title">{t("settings.accent.title")}</h3>
+                    <p className="settings-row-description">{t("settings.accent.description")}</p>
                   </div>
                   <div className="settings-row-control">
                     <Select
@@ -1824,37 +1446,14 @@ export function AppSettings({
                         color: preset.value,
                       }))}
                       placeholder="Clay"
-                      ariaLabel={`Accent color: ${
-                        BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
-                        BRAND_PRESETS[0].label
-                      }`}
+                      ariaLabel={t("settings.accent.aria", {
+                        color:
+                          BRAND_PRESETS.find((preset) => preset.id === brand)?.label ??
+                          BRAND_PRESETS[0].label,
+                      })}
                       onChange={(id) => {
                         setBrand(id as BrandId);
                         setStoredBrand(id as BrandId);
-                      }}
-                    />
-                  </div>
-                </div>
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">Date format</h3>
-                    <p className="settings-row-description">
-                      Choose how older session dates appear in the sidebar.
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <Select
-                      value={dateFormat}
-                      options={DATE_FORMAT_OPTIONS}
-                      placeholder="System"
-                      ariaLabel={`Date format: ${
-                        DATE_FORMAT_OPTIONS.find((option) => option.value === dateFormat)?.label ??
-                        "System"
-                      }`}
-                      onChange={(value) => {
-                        const next = value as DateFormatPreference;
-                        setDateFormat(next);
-                        setStoredDateFormat(next);
                       }}
                     />
                   </div>
@@ -1864,34 +1463,19 @@ export function AppSettings({
           </section>
         ) : null}
 
-        {activeTab === "billing" && !account.localDev ? (
-          <BillingSettingsSection account={account} onRefresh={onAccountRefresh} />
-        ) : null}
-
         {activeTab === "shortcuts" ? (
           <section className="settings-group" aria-labelledby="shortcuts-heading">
             <SettingsPageHeader
               id="shortcuts-heading"
-              title="Shortcuts"
-              blurb="Set the keyboard shortcuts that start dictation and control Clovy."
+              title={t("settings.tabs.shortcuts")}
+              blurb={t("settings.shortcuts.blurb")}
             />
             {helperUnavailable ? (
               <InlineNotice
                 role="alert"
-                aria-label="Dictation unavailable"
-                eyebrow={updateReadyToRelaunch ? "Relaunch to finish updating" : "Dictation paused"}
-                body={
-                  updateReadyToRelaunch
-                    ? "Dictation is paused until you relaunch to finish updating."
-                    : helperUnavailable.message
-                }
-                actions={
-                  updateReadyToRelaunch && onRelaunch ? (
-                    <button type="button" className="btn btn-secondary" onClick={onRelaunch}>
-                      Relaunch Clovy
-                    </button>
-                  ) : undefined
-                }
+                aria-label={t("settings.helper.unavailableAria")}
+                eyebrow={t("settings.helper.pausedEyebrow")}
+                body={helperUnavailable.message}
               />
             ) : null}
             <div className="settings-card">
@@ -1899,8 +1483,8 @@ export function AppSettings({
                 {capabilities.shortcuts ? (
                   <>
                     <ShortcutRow
-                      title="Push to talk"
-                      description="Hold this shortcut to dictate, then release to paste."
+                      title={t("settings.shortcuts.pushToTalk")}
+                      description={t("settings.shortcuts.pushToTalkDescription")}
                       shortcut={settings.pushToTalkShortcut}
                       defaultShortcut={defaultShortcuts.push_to_talk}
                       capturing={capturingShortcut === "push_to_talk"}
@@ -1912,11 +1496,12 @@ export function AppSettings({
                       }
                       onCancel={() => void cancelShortcutCapture()}
                       platform={capabilities.platform}
+                      captureHintWindows={t("settings.shortcuts.captureHintWindows")}
                     />
 
                     <ShortcutRow
-                      title="Toggle dictation"
-                      description="Press this shortcut to start or stop dictation."
+                      title={t("settings.shortcuts.toggle")}
+                      description={t("settings.shortcuts.toggleDescription")}
                       shortcut={settings.toggleShortcut}
                       defaultShortcut={defaultShortcuts.toggle}
                       capturing={capturingShortcut === "toggle"}
@@ -1926,14 +1511,17 @@ export function AppSettings({
                       onReset={() => void saveShortcut("toggle", defaultShortcuts.toggle)}
                       onCancel={() => void cancelShortcutCapture()}
                       platform={capabilities.platform}
+                      captureHintWindows={t("settings.shortcuts.captureHintWindowsToggle")}
                     />
                   </>
                 ) : (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Dictation shortcuts unavailable</h3>
+                      <h3 className="settings-row-title">
+                        {t("settings.shortcuts.unavailableTitle")}
+                      </h3>
                       <p className="settings-row-description">
-                        Global dictation shortcuts are not available on this device.
+                        {t("settings.shortcuts.unavailableDescription")}
                       </p>
                     </div>
                   </div>
@@ -1942,29 +1530,29 @@ export function AppSettings({
             </div>
           </section>
         ) : null}
-
+        {activeTab === "activity" ? <ActivitySettingsSection /> : null}
         {activeTab === "dictation" ? (
           <>
             <section className="settings-group" aria-labelledby="dictation-heading">
               <SettingsPageHeader
                 id="dictation-heading"
-                title="Dictation"
-                blurb="Choose the language, microphone, and behavior for dictation."
+                title={t("settings.tabs.dictation")}
+                blurb={t("settings.dictation.blurb")}
               />
               <div className="settings-card">
                 <div className="settings-rows">
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Language</h3>
+                      <h3 className="settings-row-title">{t("common.language")}</h3>
                       <p className="settings-row-description">
-                        Default language hint for note transcription and dictation.
+                        {t("settings.dictation.languageDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control" ref={languageWrapRef}>
                       <button
                         type="button"
                         className="select-trigger settings-language-select"
-                        aria-label="Default transcription language"
+                        aria-label={t("settings.dictation.languageAria")}
                         aria-haspopup="listbox"
                         aria-expanded={languageOpen}
                         onClick={() => setLanguageOpen((value) => !value)}
@@ -2016,18 +1604,18 @@ export function AppSettings({
           <section className="settings-group" aria-labelledby="audio-heading">
             <SettingsPageHeader
               id="audio-heading"
-              title="Audio"
+              title={t("settings.tabs.audio")}
               blurb={
                 capabilities.platform === "windows"
-                  ? "Control how Clovy captures microphone audio on this device."
-                  : "Control how Clovy captures meeting and system audio."
+                  ? t("settings.audio.blurbWindows")
+                  : t("settings.audio.blurb")
               }
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title">Microphone</h3>
+                    <h3 className="settings-row-title">{t("settings.audio.microphone")}</h3>
                     <p className="settings-row-description">{microphoneDescription}</p>
                   </div>
                   <div className="settings-row-control" ref={micWrapRef}>
@@ -2087,7 +1675,7 @@ export function AppSettings({
                   <MicTestControl
                     state={micTestState}
                     level={micTestLevel}
-                    elapsedMs={micTestElapsedMs}
+                    startedAt={micTestStartedAt}
                     sampleSrc={micTestSampleSrc}
                     error={micTestError}
                     playing={micTestPlaying}
@@ -2095,7 +1683,7 @@ export function AppSettings({
                     onStart={() => void startMicTest()}
                     onStartOver={() => void startOverMicTest()}
                     onPlaybackError={() => {
-                      setMicTestError("Microphone test recorded, but playback is unavailable.");
+                      setMicTestError(t("settings.micTest.playbackUnavailable"));
                     }}
                     onPlayingChange={setMicTestPlaying}
                   />
@@ -2104,9 +1692,9 @@ export function AppSettings({
                 {systemUnavailable ? null : (
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">System audio</h3>
+                      <h3 className="settings-row-title">{t("settings.audio.systemAudio")}</h3>
                       <p className="settings-row-description">
-                        Capture audio from other apps along with your microphone.
+                        {t("settings.audio.systemAudioDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2116,13 +1704,13 @@ export function AppSettings({
                           className="btn btn-secondary"
                           onClick={onEnableSystemAudio}
                         >
-                          Enable
+                          {t("common.enable")}
                         </button>
                       ) : null}
                       <Switch
                         checked={systemOn}
                         disabled={checkingSourceReadiness || systemLocked}
-                        aria-label="Capture system audio for notes"
+                        aria-label={t("settings.audio.systemAudioAria")}
                         onCheckedChange={(next) =>
                           onSourceModeChange(next ? "microphonePlusSystem" : "microphoneOnly")
                         }
@@ -2138,19 +1726,17 @@ export function AppSettings({
         {activeTab === "models" ? (
           <>
             <SettingsPageHeader
-              title="Models"
-              blurb="Choose the models Clovy uses for voice, text, image, and video."
+              title={t("settings.tabs.models")}
+              blurb={t("settings.models.blurb")}
             />
             <section
               className="settings-group settings-models-group"
               aria-labelledby="voice-models-heading"
             >
               <h2 id="voice-models-heading" className="settings-group-heading">
-                Voice
+                {t("settings.models.voice")}
               </h2>
-              <p className="settings-group-description">
-                Choose the model Clovy uses for note transcription and dictation.
-              </p>
+              <p className="settings-group-description">{t("settings.models.voiceDescription")}</p>
               {showingPartitionModels ? (
                 <p className="settings-models-profile-note">
                   Showing models for the current data set: {currentDataPartitionLabel}. Switch to
@@ -2162,8 +1748,8 @@ export function AppSettings({
                   <ModelRow
                     mode="transcription"
                     beforeDivider
-                    title="Transcription"
-                    description="Speech-to-text for note recordings and dictation."
+                    title={t("settings.models.transcription")}
+                    description={t("settings.models.transcriptionDescription")}
                     value={modelValueForMode("transcription")}
                     options={transcriptionOptions}
                     open={pickerMode === "transcription"}
@@ -2181,20 +1767,75 @@ export function AppSettings({
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
                     onSelect={(modelId) => selectModelFromPicker("transcription", modelId)}
+                    readOnly={
+                      showingPartitionModels ||
+                      displayProviderSettings.transcriptionProvider === "local"
+                    }
+                  />
+                  <LocalTranscriptionSettings
+                    supported={providerSettings.localTranscriptionSupported === true}
+                    provider={displayProviderSettings.transcriptionProvider}
+                    model={displayProviderSettings.transcriptionModel}
                     readOnly={showingPartitionModels}
+                    onSelect={async (modelId) => {
+                      closeModelPicker();
+                      await selectProviderModel("transcription", modelId);
+                    }}
+                    onRemoved={async (result) => {
+                      if (result?.switched_to_groq) {
+                        // Removal already committed this choice; a failed read must not leave Local selected.
+                        setProviderSettings((settings) =>
+                          settings.transcriptionProvider === "local"
+                            ? {
+                                ...settings,
+                                transcriptionProvider: "groq",
+                                transcriptionModel: "whisper-large-v3-turbo",
+                              }
+                            : settings,
+                        );
+                        setEffectiveProviderSettings((settings) =>
+                          settings.transcriptionProvider === "local"
+                            ? {
+                                ...settings,
+                                transcriptionProvider: "groq",
+                                transcriptionModel: "whisper-large-v3-turbo",
+                              }
+                            : settings,
+                        );
+                        dispatchProviderModelSettingsChanged({
+                          mode: "transcription",
+                          modelId:
+                            providerSettings.transcriptionProvider === "local"
+                              ? "whisper-large-v3-turbo"
+                              : providerSettings.transcriptionModel,
+                        });
+                      }
+                      const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
+                      setProviderSettings(snapshot.settings);
+                      setEffectiveProviderSettings(snapshot.effectiveSettings);
+                      if (!result?.switched_to_groq) {
+                        dispatchProviderModelSettingsChanged({
+                          mode: "transcription",
+                          modelId: snapshot.settings.transcriptionModel,
+                        });
+                      }
+                      await requestProviderModels("transcription");
+                    }}
                   />
                   <div className="settings-row-divider" aria-hidden />
                   <button
                     type="button"
                     className="settings-more-options-trigger settings-more-options-row"
-                    aria-label="More options for voice"
+                    aria-label={t("settings.models.moreVoiceAria")}
                     aria-expanded={showMoreVoiceOptions}
                     aria-controls="voice-more-options-panel"
                     onClick={() => setShowMoreVoiceOptions((open) => !open)}
                   >
                     <span className="settings-row-info">
-                      <span className="settings-row-title">More options</span>
-                      <span className="settings-row-description">Advanced voice settings</span>
+                      <span className="settings-row-title">{t("common.moreOptions")}</span>
+                      <span className="settings-row-description">
+                        {t("settings.models.moreVoiceDescription")}
+                      </span>
                     </span>
                     <IconChevronDownSmall
                       className="settings-more-options-chevron"
@@ -2206,17 +1847,17 @@ export function AppSettings({
                     <div id="voice-more-options-panel" className="settings-more-options-panel">
                       <div className="settings-row">
                         <div className="settings-row-info">
-                          <h3 className="settings-row-title">Live transcription</h3>
+                          <h3 className="settings-row-title">
+                            {t("settings.liveTranscription.title")}
+                          </h3>
                           <p className="settings-row-description">
-                            Show a live transcript while you record. This transcribes audio twice,
-                            so it may use extra credits; turning it off shows the transcript only
-                            after the recording ends.
+                            {t("settings.liveTranscription.description")}
                           </p>
                         </div>
                         <div className="settings-row-control">
                           <Switch
                             checked={providerSettings.liveTranscription}
-                            aria-label="Show a live transcript while recording"
+                            aria-label={t("settings.liveTranscription.aria")}
                             onCheckedChange={toggleLiveTranscription}
                           />
                         </div>
@@ -2232,10 +1873,10 @@ export function AppSettings({
               aria-labelledby="text-models-heading"
             >
               <h2 id="text-models-heading" className="settings-group-heading">
-                Text
+                {t("settings.models.text")}
               </h2>
               <p className="settings-group-description">
-                Choose the model Clovy uses for generated notes and agent responses.
+                {t("settings.models.textGroupDescription")}
               </p>
               {showingPartitionModels ? (
                 <p className="settings-models-profile-note">
@@ -2247,13 +1888,16 @@ export function AppSettings({
                 <div className="settings-rows">
                   <ModelRow
                     mode="generation"
-                    beforeDivider={providerSettings.generationModel !== "open-software/auto"}
-                    title="Text"
-                    description="Used for generated notes and agent responses."
+                    title={t("settings.models.text")}
+                    description={textModelDescription}
+                    catalogError={generationCatalogFailed}
+                    onRetry={() =>
+                      showingPartitionModels
+                        ? void requestProviderModels("generation")
+                        : openModelPicker("generation")
+                    }
                     value={modelValueForMode("generation")}
                     options={generationOptions}
-                    costQuality={providerSettings.costQuality}
-                    veniceApiKeyConfigured={providerSettings.veniceApiKeyConfigured}
                     open={pickerMode === "generation"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -2268,50 +1912,23 @@ export function AppSettings({
                     }
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
-                    onSelect={(modelId, costQuality, options) =>
-                      selectModelFromPicker("generation", modelId, costQuality, options)
-                    }
-                    onCostQualityChange={applyCostQuality}
+                    onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
                     readOnly={showingPartitionModels}
                   />
-                  {providerSettings.generationModel === "open-software/auto" ? (
-                    <div className="settings-row settings-row-before-divider">
-                      <div className="settings-row-info">
-                        <span className="settings-row-title">Auto preference</span>
-                        <span className="settings-row-description">
-                          Choose how Clovy balances model quality and usage cost.
-                        </span>
-                        {providerSettings.veniceApiKeyConfigured ? (
-                          <span className="settings-row-description settings-row-substatus">
-                            Auto does not use your Venice API key for notes or chat. Choose a Venice
-                            model above to use your key for notes and new chats.
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="settings-row-control">
-                        <SegmentedControl<AutoPreference>
-                          aria-label="Auto preference"
-                          value={autoPreferenceFromCostQuality(providerSettings.costQuality)}
-                          options={AUTO_PREFERENCE_OPTIONS}
-                          onValueChange={(preference) =>
-                            applyCostQuality(AUTO_PREFERENCE_VALUES[preference])
-                          }
-                        />
-                      </div>
-                    </div>
-                  ) : null}
                   <div className="settings-row-divider" aria-hidden />
                   <button
                     type="button"
                     className="settings-more-options-trigger settings-more-options-row"
-                    aria-label="More options for text"
+                    aria-label={t("settings.models.moreTextAria")}
                     aria-expanded={showMoreTextOptions}
                     aria-controls="text-more-options-panel"
                     onClick={() => setShowMoreTextOptions((open) => !open)}
                   >
                     <span className="settings-row-info">
-                      <span className="settings-row-title">More options</span>
-                      <span className="settings-row-description">Advanced text settings</span>
+                      <span className="settings-row-title">{t("common.moreOptions")}</span>
+                      <span className="settings-row-description">
+                        {t("settings.models.moreTextDescription")}
+                      </span>
                     </span>
                     <IconChevronDownSmall
                       className="settings-more-options-chevron"
@@ -2321,169 +1938,50 @@ export function AppSettings({
                   </button>
                   {showMoreTextOptions ? (
                     <div id="text-more-options-panel" className="settings-more-options-panel">
-                      <VeniceApiKeyRow
-                        configured={providerSettings.veniceApiKeyConfigured}
-                        value={veniceApiKeyDraft}
-                        onValueChange={setVeniceApiKeyDraft}
-                        onSave={() => void saveVeniceApiKey()}
-                        onRemove={() => void removeVeniceApiKey()}
-                      />
-                      <div className="settings-row settings-local-model-toggle-row">
+                      <div className="settings-row">
                         <div className="settings-row-info">
-                          <h3 className="settings-row-title">Use local model</h3>
+                          <h3 className="settings-row-title">{t("settings.providerKeys.title")}</h3>
                           <p className="settings-row-description">
-                            Route generated notes and agent responses through your own
-                            OpenAI-compatible endpoint.
+                            {t("settings.providerKeys.description")}
                           </p>
                         </div>
-                        <div className="settings-row-control">
-                          <Switch
-                            checked={localModelEnabled}
-                            aria-label="Use local text model"
-                            onCheckedChange={handleLocalToggle}
-                          />
-                        </div>
                       </div>
-
-                      {showLocalModelFields ? (
-                        <div className="settings-row settings-row-stack settings-local-model-fields-row">
-                          <div className="settings-row-info">
-                            <h3 className="settings-row-title">Endpoint</h3>
-                            <p className="settings-row-description">
-                              Add the base URL, model ID, and optional API key for your local text
-                              model.
-                            </p>
-                          </div>
-                          <div className="settings-row-control settings-local-model-fields">
-                            <label className="settings-field">
-                              <span>Base URL</span>
-                              <input
-                                value={localGenerationDraft.baseUrl}
-                                onChange={(event) => {
-                                  const baseUrl = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    baseUrl,
-                                  }));
-                                  setLocalEnableConfirm(false);
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder="http://localhost:11434/v1"
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                            </label>
-                            <label className="settings-field">
-                              <span>Model ID</span>
-                              <input
-                                value={localGenerationDraft.modelId}
-                                onChange={(event) => {
-                                  const modelId = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    modelId,
-                                  }));
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder="llama3.1:8b"
-                                list="local-generation-models"
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                              <datalist id="local-generation-models">
-                                {localProbeModels.map((id) => (
-                                  <option key={id} value={id} />
-                                ))}
-                              </datalist>
-                            </label>
-                            <label className="settings-field">
-                              <span>Local API key</span>
-                              <input
-                                type="password"
-                                value={localGenerationDraft.apiKey}
-                                onChange={(event) => {
-                                  const apiKey = event.currentTarget.value;
-                                  setLocalGenerationDraft((draft) => ({
-                                    ...draft,
-                                    apiKey,
-                                  }));
-                                  setLocalModelStatus(undefined);
-                                }}
-                                placeholder="Optional"
-                                autoCapitalize="none"
-                                autoCorrect="off"
-                                spellCheck={false}
-                              />
-                            </label>
-                            {localNonLoopback ? (
-                              <p className="settings-local-model-warning" role="note">
-                                This endpoint is not on this machine. Requests will leave your
-                                device.
-                              </p>
-                            ) : null}
-                            <div className="settings-local-model-actions">
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={() => void testLocalConnection()}
-                              >
-                                Test connection
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={() => void handleSaveLocalModel()}
-                              >
-                                Save local model
-                              </button>
-                            </div>
-                            {localModelStatus ? (
-                              <p className="settings-local-model-status" role="status">
-                                {localModelStatus}
-                              </p>
-                            ) : null}
-                            {localEnableConfirm ? (
-                              <div className="settings-local-model-confirm" role="alert">
-                                <p className="settings-row-error">
-                                  This endpoint is not on this machine. Requests will leave your
-                                  device.
-                                </p>
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  onClick={() => void enableLocalGeneration()}
-                                >
-                                  Enable anyway
-                                </button>
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                      ) : null}
+                      {(["groq", "openrouter", "fal"] as const).map((provider) => (
+                        <ProviderApiKeyRow
+                          key={provider}
+                          provider={provider}
+                          configured={providerSettings.providerApiKeysConfigured[provider]}
+                          rejectedError={providerApiKeyRejectedErrors[provider]}
+                          value={providerApiKeyDrafts[provider]}
+                          onValueChange={(val) =>
+                            setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: val }))
+                          }
+                          onSave={() => void saveProviderApiKey(provider)}
+                          onRemove={() => void removeProviderApiKey(provider)}
+                        />
+                      ))}
                     </div>
                   ) : null}
                 </div>
               </div>
             </section>
 
-            <ConfirmDialog
-              open={veniceKeyAutoBillingChoiceOpen}
-              onClose={() => setVeniceKeyAutoBillingChoiceOpen(false)}
-              onConfirm={async () => {
-                const switched = await selectVeniceModel(
-                  "generation",
-                  veniceKeySwitchTarget?.id ?? DEFAULT_GENERATION_SUGGESTION_ID,
-                );
-                // Keep the dialog open over a failed save so the choice is
-                // never silently dropped; the status line carries the error.
-                if (!switched) throw new Error("venice_model_switch_failed");
+            <LlmProvidersSection
+              onProvidersChanged={setNotesProviders}
+              onChatProviderChanged={async () => {
+                try {
+                  const modelResponse = await providerModelSettings();
+                  const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
+                  setProviderSettings(modelSnapshot.settings);
+                  setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
+                  dispatchProviderModelSettingsChanged({
+                    mode: "generation",
+                    modelId: modelSnapshot.settings.generationModel,
+                  });
+                } catch {
+                  // Provider settings refresh failed
+                }
               }}
-              title="Auto does not use your Venice API key"
-              description={`Notes and chat are billed to Clovy credits while Auto is selected. Switch to ${veniceKeySwitchTarget?.name ?? "a Venice model"} to use your key for notes and new chats.`}
-              confirmLabel={`Use ${veniceKeySwitchTarget?.name ?? "a Venice model"}`}
-              cancelLabel="Keep Auto"
             />
 
             {IMAGE_GENERATION_ENABLED || VIDEO_GENERATION_ENABLED ? (
@@ -2492,10 +1990,10 @@ export function AppSettings({
                 aria-labelledby="media-generation-heading"
               >
                 <h2 id="media-generation-heading" className="settings-group-heading">
-                  Image and video
+                  {t("settings.models.imageAndVideo")}
                 </h2>
                 <p className="settings-group-description">
-                  Choose the models Clovy uses when you ask it to generate an image or video.
+                  {t("settings.models.mediaDescription")}
                 </p>
                 {showingPartitionModels ? (
                   <p className="settings-models-profile-note">
@@ -2509,8 +2007,8 @@ export function AppSettings({
                       <ModelRow
                         mode="image"
                         beforeDivider={!VIDEO_GENERATION_ENABLED}
-                        title="Image"
-                        description="Used when you generate an image from chat."
+                        title={t("settings.models.image")}
+                        description={t("settings.models.imageDescription")}
                         value={modelValueForMode("image")}
                         options={imageOptions}
                         open={pickerMode === "image"}
@@ -2533,8 +2031,8 @@ export function AppSettings({
                       <ModelRow
                         mode="video"
                         beforeDivider
-                        title="Video"
-                        description="Used when you generate a video from chat."
+                        title={t("settings.models.video")}
+                        description={t("settings.models.videoDescription")}
                         value={modelValueForMode("video")}
                         options={videoOptions}
                         open={pickerMode === "video"}
@@ -2557,15 +2055,15 @@ export function AppSettings({
                     <button
                       type="button"
                       className="settings-more-options-trigger settings-more-options-row"
-                      aria-label="More options for image and video"
+                      aria-label={t("settings.models.moreMediaAria")}
                       aria-expanded={showMoreImageOptions}
                       aria-controls="image-more-options-panel"
                       onClick={() => setShowMoreImageOptions((open) => !open)}
                     >
                       <span className="settings-row-info">
-                        <span className="settings-row-title">More options</span>
+                        <span className="settings-row-title">{t("common.moreOptions")}</span>
                         <span className="settings-row-description">
-                          Advanced image and video settings
+                          {t("settings.models.moreMediaDescription")}
                         </span>
                       </span>
                       <IconChevronDownSmall
@@ -2578,17 +2076,17 @@ export function AppSettings({
                       <div id="image-more-options-panel" className="settings-more-options-panel">
                         <div className="settings-row">
                           <div className="settings-row-info">
-                            <h3 className="settings-row-title">Safe mode</h3>
+                            <h3 className="settings-row-title">{t("settings.safeMode.title")}</h3>
                             <p className="settings-row-description">
                               {VIDEO_GENERATION_ENABLED
-                                ? "Blur adult content in generated and edited images, and hold back video prompts that request it (videos cannot be blurred). On by default; your image and video work stays private either way."
-                                : "Blur adult content in generated and edited images. On by default; your image work stays private either way."}
+                                ? t("settings.safeMode.descriptionWithVideo")
+                                : t("settings.safeMode.description")}
                             </p>
                           </div>
                           <div className="settings-row-control">
                             <Switch
                               checked={providerSettings.imageSafeMode}
-                              aria-label="Blur adult content in images"
+                              aria-label={t("settings.safeMode.aria")}
                               onCheckedChange={toggleImageSafeMode}
                             />
                           </div>
@@ -2612,6 +2110,13 @@ export function AppSettings({
           <AgentSettingsSection folders={folders} onFoldersImported={onFoldersImported} />
         ) : null}
 
+        {activeTab === "mcp" ? (
+          <>
+            <SettingsPageHeader title={t("mcpServer.tab")} />
+            <McpServerSection />
+          </>
+        ) : null}
+
         {activeTab === "memory" ? (
           <MemorySettingsSection
             folders={folders}
@@ -2622,30 +2127,25 @@ export function AppSettings({
 
         {activeTab === "connectors" ? (
           <>
-            <ConnectorsSection
-              onOpenModels={() => setActiveTab("models")}
-              onOpenBilling={() => setActiveTab("billing")}
-            />
+            <ConnectorsSection />
             <AgentMcpServersSection />
           </>
-        ) : null}
-
-        {activeTab === "linked-devices" && experimentalFlags.companionPairingEnabled ? (
-          <LinkedDevicesSection />
         ) : null}
 
         {activeTab === "about" ? (
           <section className="settings-group" aria-labelledby="about-heading">
             <SettingsPageHeader
               id="about-heading"
-              title="About"
-              blurb="Version, release channel, and other details about this copy of Clovy."
+              title={t("settings.tabs.about")}
+              blurb={t("settings.about.blurb")}
             />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row settings-row-meta">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title settings-meta-label">Release version</h3>
+                    <h3 className="settings-row-title settings-meta-label">
+                      {t("settings.about.releaseVersion")}
+                    </h3>
                   </div>
                   <div className="settings-row-control">
                     <button
@@ -2660,7 +2160,9 @@ export function AppSettings({
 
                 <div className="settings-row settings-row-meta">
                   <div className="settings-row-info">
-                    <h3 className="settings-row-title settings-meta-label">Commit</h3>
+                    <h3 className="settings-row-title settings-meta-label">
+                      {t("settings.about.commit")}
+                    </h3>
                   </div>
                   <div className="settings-row-control">
                     <span className="settings-meta-value settings-meta-value-mono">
@@ -2669,142 +2171,15 @@ export function AppSettings({
                   </div>
                 </div>
 
-                {onCheckForUpdates ? (
-                  <>
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">Updates</h3>
-                        <p className="settings-row-description">
-                          Check whether a newer version of Clovy is available.
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onCheckForUpdates}
-                        >
-                          Check for updates
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">Release channel</h3>
-                        <p className="settings-row-description">
-                          Stable is recommended. Release candidate gets early builds for testing.
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <SegmentedControl<ReleaseChannel>
-                          aria-label="Release channel"
-                          value={releaseChannel}
-                          options={RELEASE_CHANNEL_OPTIONS}
-                          onValueChange={handleReleaseChannelChange}
-                        />
-                      </div>
-                    </div>
-
-                    {reconcileVersion ? (
-                      <div className="settings-row">
-                        <InlineNotice
-                          aria-label="Switch to stable now"
-                          eyebrow="Switch to stable now?"
-                          body={`Installs ${reconcileVersion}, replacing your release candidate build. You'll get ${baseVersion()} when it reaches stable.`}
-                          actions={
-                            <>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => setReconcileVersion(undefined)}
-                              >
-                                Not now
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                onClick={confirmReconcileToStable}
-                              >
-                                Switch to stable
-                              </button>
-                            </>
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
-
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">Community</h3>
-                    <p className="settings-row-description">
-                      Join us in the Clovy community on Telegram at{" "}
-                      {CLOVY_COMMUNITY_URL.replace("https://", "")}.
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => void clovyOpenCommunityPage().catch(() => undefined)}
-                    >
-                      Join community
-                    </button>
-                  </div>
-                </div>
-
-                <div className="settings-row">
-                  <div className="settings-row-info">
-                    <h3 className="settings-row-title">Server verification</h3>
-                    <p className="settings-row-description">
-                      Clovy&apos;s server runs in a confidential VM. See exactly what code is
-                      running and how to verify it yourself.
-                    </p>
-                  </div>
-                  <div className="settings-row-control">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => void clovyOpenVerifyPage().catch(() => undefined)}
-                    >
-                      Verify server
-                    </button>
-                  </div>
-                </div>
-
-                {onReportIssue ? (
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">Report an issue</h3>
-                      <p className="settings-row-description">
-                        Describe the problem, attach files if you have them, and send the report to
-                        the Clovy team.
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={() => onReportIssue("bug")}
-                      >
-                        Report an issue
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
                 {import.meta.env.DEV ? (
                   // Dev builds only: same helper the devtools console exposes
                   // as clovy.replayOnboarding() — clears completion and
                   // reloads into the wizard.
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Replay onboarding</h3>
+                      <h3 className="settings-row-title">{t("settings.about.replayOnboarding")}</h3>
                       <p className="settings-row-description">
-                        Dev only. Forget that onboarding finished and reload into the first-run
-                        wizard.
+                        {t("settings.about.replayOnboardingDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2813,7 +2188,7 @@ export function AppSettings({
                         className="btn btn-secondary"
                         onClick={() => replayOnboarding()}
                       >
-                        Replay onboarding
+                        {t("settings.about.replayOnboarding")}
                       </button>
                     </div>
                   </div>
@@ -2826,10 +2201,9 @@ export function AppSettings({
                 <div className="settings-rows">
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Experiments</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.title")}</h3>
                       <p className="settings-row-description">
-                        Runtime overrides for features that ship dark. They apply to this install
-                        only.
+                        {t("settings.experiments.description")}
                       </p>
                     </div>
                     <div className="settings-row-control">
@@ -2839,95 +2213,27 @@ export function AppSettings({
                         disabled={experimentalOperation !== undefined}
                         onClick={() => void updateExperimentalFlags({ unlocked: false })}
                       >
-                        Hide again
+                        {t("settings.experiments.hide")}
                       </button>
                     </div>
                   </div>
 
                   <div className="settings-row">
                     <div className="settings-row-info">
-                      <h3 className="settings-row-title">Browser use</h3>
+                      <h3 className="settings-row-title">{t("settings.experiments.browserUse")}</h3>
                       <p className="settings-row-description">
-                        Enable Browser use on this install while the public feature remains off.
-                        Turning it off applies fully after Clovy restarts.
+                        {t("settings.experiments.browserUseDescription")}
                       </p>
                     </div>
                     <div className="settings-row-control">
                       <Switch
                         checked={experimentalFlags.browser_use}
                         disabled={experimentalOperation !== undefined}
-                        aria-label="Enable experimental Browser use"
+                        aria-label={t("settings.experiments.browserUseAria")}
                         onCheckedChange={(browser_use) =>
                           void updateExperimentalFlags({ browser_use })
                         }
                       />
-                    </div>
-                  </div>
-
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">Companion pairing</h3>
-                      <p className="settings-row-description">
-                        {experimentalFlags.companion_pairing ===
-                        experimentalFlags.companionPairingEnabled
-                          ? "Enable Linked devices and the Clovy Companion runtime on this install. Changes apply after Clovy restarts."
-                          : experimentalFlags.companionPairingEnabled
-                            ? "Companion pairing remains available until Clovy restarts. It is saved as off for the next launch."
-                            : "Companion pairing is saved as on and will become available after Clovy restarts."}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <Switch
-                        checked={experimentalFlags.companion_pairing}
-                        disabled={experimentalOperation !== undefined}
-                        aria-label="Enable experimental Companion pairing"
-                        onCheckedChange={(companion_pairing) =>
-                          void updateExperimentalFlags({ companion_pairing })
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  {experimentalRestartNeeded ? (
-                    <div className="settings-row">
-                      <div className="settings-row-info">
-                        <h3 className="settings-row-title">Agent runtime</h3>
-                        <p className="settings-row-description">
-                          Restart the agent to apply the Browser use change.
-                        </p>
-                      </div>
-                      <div className="settings-row-control">
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          disabled={experimentalOperation === "restart"}
-                          onClick={() => void restartAgentForExperimentalFlags()}
-                        >
-                          {experimentalOperation === "restart" ? "Restarting..." : "Restart agent"}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">Browser extension (unpacked)</h3>
-                      <p className="settings-row-description">
-                        Open chrome://extensions, turn on Developer mode, choose Load unpacked, and
-                        select the revealed folder.
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={experimentalOperation === "unpack"}
-                        onClick={() => void unpackExperimentalExtension()}
-                      >
-                        {experimentalOperation === "unpack"
-                          ? "Unpacking..."
-                          : "Unpack and reveal folder"}
-                      </button>
                     </div>
                   </div>
                 </div>
@@ -2956,10 +2262,76 @@ type PermissionStatusView = {
  * LaunchAgent is the single source of truth), so state here can never drift
  * from what System Settings shows. Hidden in browser previews, where no
  * autostart backend exists. */
-function StartupSettingsSection() {
+function UpdatesSettingsSection({ onCheck, checking }: { onCheck: () => void; checking: boolean }) {
+  const t = useT();
+  return (
+    <section className="settings-group" aria-labelledby="updates-heading">
+      <h2 id="updates-heading" className="settings-group-heading">
+        {t("settings.updates.title")}
+      </h2>
+      <p className="settings-group-description">{t("settings.updates.description")}</p>
+      <div className="settings-card">
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <h3 className="settings-row-title">{t("settings.updates.installed")}</h3>
+              <p className="settings-row-description">{APP_VERSION}</p>
+            </div>
+            <div className="settings-row-control">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={checking}
+                aria-busy={checking || undefined}
+                onClick={onCheck}
+              >
+                {checking ? t("settings.updates.checking") : t("settings.updates.check")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function StartupSettingsSection() {
+  const t = useT();
   const [enabled, setEnabled] = useState<boolean>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [hideDock, setHideDock] = useState<boolean>();
+  const [dockSaving, setDockSaving] = useState(false);
+  const [dockError, setDockError] = useState<string>();
+  const mac = isMacLikePlatform();
+
+  useEffect(() => {
+    if (!mac) return;
+    let active = true;
+    appPreferencesGet()
+      .then((value) => {
+        if (active) setHideDock(value.hideFromDock);
+      })
+      .catch(() => {
+        if (active) setDockError(translate("settings.startup.dockReadError"));
+      });
+    return () => {
+      active = false;
+    };
+  }, [mac]);
+
+  async function toggleDock(next: boolean) {
+    setDockSaving(true);
+    setDockError(undefined);
+    try {
+      const value = await appPreferencesSet({ hideFromDock: next });
+      setHideDock(value.hideFromDock);
+    } catch {
+      setDockError(translate("settings.startup.dockUpdateError"));
+    } finally {
+      setDockSaving(false);
+    }
+  }
 
   useEffect(() => {
     if (!autostartSupported()) return;
@@ -2969,7 +2341,7 @@ function StartupSettingsSection() {
         if (!cancelled) setEnabled(value);
       })
       .catch(() => {
-        if (!cancelled) setError("Could not read the login item state.");
+        if (!cancelled) setError(translate("settings.startup.readError"));
       });
     return () => {
       cancelled = true;
@@ -2983,41 +2355,64 @@ function StartupSettingsSection() {
       await setAutostartEnabled(next);
       setEnabled(next);
     } catch {
-      setError("Could not update the login item. Try again.");
+      setError(translate("settings.startup.updateError"));
     } finally {
       setSaving(false);
     }
   }
 
-  if (!autostartSupported() || (enabled === undefined && !error)) return null;
+  if (!mac && (!autostartSupported() || (enabled === undefined && !error))) return null;
 
   return (
     <section className="settings-group" aria-labelledby="startup-heading">
       <h2 id="startup-heading" className="settings-group-heading">
-        Startup
+        {t("settings.startup.title")}
       </h2>
-      <p className="settings-group-description">
-        Dictation shortcuts and meeting detection only work while Clovy is running.
-      </p>
+      <p className="settings-group-description">{t("settings.startup.description")}</p>
       <div className="settings-card">
         <div className="settings-rows">
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h3 className="settings-row-title">Open Clovy at login</h3>
-              <p className="settings-row-description">
-                Start Clovy automatically when you sign in to your computer.
-              </p>
+          {autostartSupported() ? (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">{t("settings.startup.openAtLogin")}</h3>
+                <p className="settings-row-description">
+                  {t("settings.startup.openAtLoginDescription")}
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={enabled === true}
+                  disabled={saving || enabled === undefined}
+                  aria-label={t("settings.startup.openAtLogin")}
+                  onCheckedChange={(next) => void toggle(next)}
+                />
+              </div>
             </div>
-            <div className="settings-row-control">
-              <Switch
-                checked={enabled === true}
-                disabled={saving || enabled === undefined}
-                aria-label="Open Clovy at login"
-                onCheckedChange={(next) => void toggle(next)}
-              />
-            </div>
-          </div>
+          ) : null}
           {error ? <p className="settings-row-description">{error}</p> : null}
+          {mac ? (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">{t("settings.startup.hideDock")}</h3>
+                <p className="settings-row-description">
+                  {t("settings.startup.hideDockDescription")}
+                </p>
+                {dockError ? (
+                  <p className="settings-row-error" role="alert">
+                    {dockError}
+                  </p>
+                ) : null}
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={hideDock === true}
+                  disabled={dockSaving || hideDock === undefined}
+                  aria-label={t("settings.startup.hideDock")}
+                  onCheckedChange={(next) => void toggleDock(next)}
+                />
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
@@ -3041,26 +2436,30 @@ function PermissionsSettingsSection({
   onEnableAccessibility?: () => void;
   onEnableSystemAudio: () => void;
 }) {
+  const t = useT();
   const macLikePlatform = fallbackDictationCapabilities().platform === "macos";
   const systemAudioSupportedPlatform = isSystemAudioSupportedPlatform();
   return (
     <section className="settings-group" aria-labelledby="permissions-heading">
       <h2 id="permissions-heading" className="settings-group-heading">
-        {macLikePlatform ? "System permissions" : "Audio access"}
+        {macLikePlatform
+          ? t("settings.permissions.systemTitle")
+          : t("settings.permissions.audioAccessTitle")}
       </h2>
       <p className="settings-group-description">
         {macLikePlatform
-          ? "macOS access used for recording audio, pasting dictation, and capturing system sound."
+          ? t("settings.permissions.macDescription")
           : systemAudioSupportedPlatform
-            ? "Audio sources available for recording microphone and app audio."
-            : "Audio sources available for recording microphone audio."}
+            ? t("settings.permissions.systemAudioDescription")
+            : t("settings.permissions.micOnlyDescription")}
       </p>
       <div className="settings-card">
         <div className="settings-rows">
           <PermissionRow
-            title="Microphone"
-            description="Record dictation and note audio."
+            title={t("settings.audio.microphone")}
+            description={t("settings.permissions.microphoneDescription")}
             status={permissionStatus(
+              t,
               microphonePermissionStatus ?? microphoneReadiness?.permissionState,
             )}
             onManage={onEnableMicrophone}
@@ -3069,26 +2468,26 @@ function PermissionsSettingsSection({
           {macLikePlatform ? (
             <>
               <PermissionRow
-                title="Accessibility"
-                description="Paste dictated text into the active app."
-                status={permissionStatus(accessibilityPermissionStatus)}
+                title={t("settings.permissions.accessibility")}
+                description={t("settings.permissions.accessibilityDescription")}
+                status={permissionStatus(t, accessibilityPermissionStatus)}
                 onManage={onEnableAccessibility}
               />
 
               {systemAudioSupportedPlatform ? (
                 <PermissionRow
-                  title="System audio"
-                  description="Record audio from other apps when system audio is enabled."
-                  status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+                  title={t("settings.audio.systemAudio")}
+                  description={t("settings.permissions.systemAudioRowDescription")}
+                  status={sourcePermissionStatus(t, systemReadiness, macLikePlatform)}
                   onManage={onEnableSystemAudio}
                 />
               ) : null}
             </>
           ) : systemAudioSupportedPlatform ? (
             <PermissionRow
-              title="System audio"
-              description="Record audio from other apps when system audio is enabled."
-              status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+              title={t("settings.audio.systemAudio")}
+              description={t("settings.permissions.systemAudioRowDescription")}
+              status={sourcePermissionStatus(t, systemReadiness, macLikePlatform)}
             />
           ) : null}
         </div>
@@ -3103,7 +2502,7 @@ function PermissionRow({
   status,
   onManage,
   actionLabel,
-  actionText = "Manage",
+  actionText,
 }: {
   title: string;
   description: string;
@@ -3112,6 +2511,7 @@ function PermissionRow({
   actionLabel?: string;
   actionText?: string;
 }) {
+  const t = useT();
   const actionDisabled = status.tone === "unsupported" || !onManage;
   return (
     <div className="settings-row">
@@ -3134,10 +2534,10 @@ function PermissionRow({
             type="button"
             className="btn btn-secondary"
             disabled={actionDisabled}
-            aria-label={actionLabel ?? `Manage ${title} permission`}
+            aria-label={actionLabel ?? t("settings.permissions.manageAria", { name: title })}
             onClick={onManage}
           >
-            {actionText}
+            {actionText ?? t("settings.permissions.manage")}
           </button>
         ) : null}
       </div>
@@ -3152,44 +2552,50 @@ function PermissionStatusIcon({ tone }: { tone: PermissionStatusTone }) {
   return <IconExclamationCircle size={16} />;
 }
 
-function permissionStatus(state?: string): PermissionStatusView {
+function permissionStatus(t: TFunction, state?: string): PermissionStatusView {
   switch (state) {
     case "granted":
-      return { label: "Allowed", tone: "allowed" };
+      return { label: t("settings.permissions.status.allowed"), tone: "allowed" };
     case "denied":
-      return { label: "Blocked", tone: "blocked" };
+      return { label: t("settings.permissions.status.blocked"), tone: "blocked" };
     case "restricted":
-      return { label: "Restricted", tone: "blocked" };
+      return { label: t("settings.permissions.status.restricted"), tone: "blocked" };
     case "missing":
-      return { label: "Needs access", tone: "attention" };
+      return { label: t("settings.permissions.status.needsAccess"), tone: "attention" };
     case "not_determined":
-      return { label: "Not requested", tone: "attention" };
+      return { label: t("settings.permissions.status.notRequested"), tone: "attention" };
     case "unavailable":
-      return { label: "No microphone found", tone: "attention" };
+      return { label: t("settings.permissions.status.noMicrophone"), tone: "attention" };
     case "unsupported":
-      return { label: "Unsupported", tone: "unsupported" };
+      return { label: t("settings.permissions.status.unsupported"), tone: "unsupported" };
     case "unknown":
-      return { label: "Unknown", tone: "unknown" };
+      return { label: t("settings.permissions.status.unknown"), tone: "unknown" };
     default:
-      return { label: "Checking", tone: "unknown" };
+      return { label: t("settings.permissions.status.checking"), tone: "unknown" };
   }
 }
 
 function sourcePermissionStatus(
+  t: TFunction,
   source: RecordingSourceReadinessDto["sources"][number] | undefined,
   macLikePlatform: boolean,
 ): PermissionStatusView {
-  if (!source) return { label: "Checking", tone: "unknown" };
+  if (!source) return { label: t("settings.permissions.status.checking"), tone: "unknown" };
   // The two halves are independent: permissionState is the platform grant or
   // endpoint status, while `ready` says whether this device can actually
   // capture. A microphone-only check never asks for the grant/status, and a
   // granted source can still be uncapturable.
   if (source.permissionState === "granted") {
     return source.ready
-      ? { label: macLikePlatform ? "Allowed" : "Available", tone: "allowed" }
-      : { label: "Unavailable", tone: "attention" };
+      ? {
+          label: macLikePlatform
+            ? t("settings.permissions.status.allowed")
+            : t("settings.permissions.status.available"),
+          tone: "allowed",
+        }
+      : { label: t("settings.permissions.status.unavailable"), tone: "attention" };
   }
-  return permissionStatus(source.permissionState);
+  return permissionStatus(t, source.permissionState);
 }
 
 function stringPayload(value: unknown) {
@@ -3214,8 +2620,6 @@ function ModelRow({
   description,
   value,
   options,
-  costQuality,
-  veniceApiKeyConfigured,
   open,
   flyout,
   search,
@@ -3226,18 +2630,17 @@ function ModelRow({
   onFlyoutChange,
   onSearchChange,
   onSelect,
-  onCostQualityChange,
   readOnly = false,
   summarySuppressed,
+  catalogError,
+  onRetry,
 }: {
   mode: ProviderModelMode;
   beforeDivider?: boolean;
   title: string;
   description: string;
   value: string;
-  options: VeniceModelDto[];
-  costQuality?: number;
-  veniceApiKeyConfigured?: boolean;
+  options: ProviderModelDto[];
   open: boolean;
   flyout: ModelPickerFlyout;
   search: string;
@@ -3247,13 +2650,15 @@ function ModelRow({
   onToggle: () => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
-  onCostQualityChange?: (value: number) => void;
+  onSelect: (modelId: string) => void;
   readOnly?: boolean;
   summarySuppressed?: boolean;
+  catalogError?: boolean;
+  onRetry?: () => void;
 }) {
+  const t = useT();
   const model = selectedModel(options, value);
-  const modelLabel = `${title.toLowerCase()} model`;
+  const modelLabel = t(`settings.models.modelLabel.${mode}`);
   return (
     <div
       className={`settings-row settings-model-row${
@@ -3263,6 +2668,14 @@ function ModelRow({
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
         <p className="settings-row-description">{description}</p>
+        {catalogError ? (
+          <div role="status">
+            <p className="settings-row-description">{t("settings.models.catalogFailed")}</p>
+            <button type="button" className="btn btn-secondary" onClick={onRetry}>
+              {t("settings.models.retryCatalog")}
+            </button>
+          </div>
+        ) : null}
       </div>
       <div className="settings-row-control settings-model-control">
         <HoverTip
@@ -3278,16 +2691,12 @@ function ModelRow({
             type="button"
             className="model-summary-button"
             onClick={readOnly ? undefined : onToggle}
-            aria-label={`Change ${modelLabel}`}
+            aria-label={t("settings.models.changeAria", { model: modelLabel })}
             aria-haspopup="dialog"
             aria-expanded={readOnly ? false : open}
             disabled={readOnly}
           >
-            <span
-              className="model-summary-logo"
-              data-brand={model.id === AUTO_MODEL_ID ? "clovy" : undefined}
-              aria-hidden
-            >
+            <span className="model-summary-logo" aria-hidden>
               <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
             </span>
             <span className="model-summary-name">{model.name}</span>
@@ -3300,23 +2709,15 @@ function ModelRow({
             flyout={flyout}
             model={model}
             options={options}
-            costQuality={costQuality}
-            veniceApiKeyConfigured={veniceApiKeyConfigured}
             search={search}
             popoverRef={popoverRef}
             searchRef={searchRef}
             className="settings-model-popover"
-            title={
-              modelLabel === "text model"
-                ? undefined
-                : modelLabel[0].toUpperCase() + modelLabel.slice(1)
-            }
-            ariaLabel={`Choose ${modelLabel}`}
+            title={mode === "generation" ? undefined : t(`settings.models.popoverTitle.${mode}`)}
+            ariaLabel={t("settings.models.chooseAria", { model: modelLabel })}
             onFlyoutChange={onFlyoutChange}
             onSearchChange={onSearchChange}
             onSelect={onSelect}
-            onCostQualityChange={onCostQualityChange}
-            showAutoPreference={false}
           />
         ) : null}
       </div>
@@ -3324,7 +2725,7 @@ function ModelRow({
   );
 }
 
-function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
+function ModelSummaryHoverDetails({ model }: { model: ProviderModelDto }) {
   return (
     <div className="agent-composer-model-detail model-summary-hovercard">
       {/* Read-only summary card: full description in one hover (the card shows
@@ -3334,45 +2735,59 @@ function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
   );
 }
 
-function VeniceApiKeyRow({
+function ProviderApiKeyRow({
   id,
+  provider,
   configured,
+  rejectedError,
   value,
   onValueChange,
   onSave,
   onRemove,
 }: {
   id?: string;
+  provider: BuiltinProvider;
   configured: boolean;
+  rejectedError?: string;
   value: string;
   onValueChange: (value: string) => void;
   onSave: () => void;
   onRemove: () => void;
 }) {
+  const t = useT();
   const canSave = value.trim().length > 0;
+  const title = t(`settings.providerKeys.${provider}.name`);
+  const description = t(`settings.providerKeys.${provider}.description`);
   return (
-    <div id={id} className="settings-row settings-row-venice-key">
+    <div id={id} className="settings-row settings-row-provider-key">
       <div className="settings-row-info">
-        <h3 className="settings-row-title">Venice API key</h3>
-        <p className="settings-row-description">
-          Use your own key for Venice models so Clovy credits are not used. Stored locally and sent
-          only for Venice requests. For least privilege, use an inference-only key.
-        </p>
+        <h3 className="settings-row-title">{title}</h3>
+        <p className="settings-row-description">{description}</p>
         {configured ? (
-          <p className="settings-row-description settings-row-substatus">Key saved.</p>
-        ) : null}
+          <p className="settings-row-description settings-row-substatus">
+            {t("settings.providerKeys.configured")}
+          </p>
+        ) : rejectedError ? (
+          <p className="settings-row-description settings-row-error" role="alert">
+            {rejectedError}
+          </p>
+        ) : (
+          <p className="settings-row-description settings-row-muted">
+            {t("settings.providerKeys.missing")}
+          </p>
+        )}
       </div>
       <div className="settings-row-control settings-secret-control">
         <label className="settings-field settings-secret-field">
-          <span>API key</span>
+          <span>{t("settings.providerKeys.apiKey")}</span>
           <input
             type="password"
             className="dialog-input"
             value={value}
             autoComplete="off"
             spellCheck={false}
-            placeholder={configured ? "Saved key hidden" : "Venice API key"}
-            aria-label="Venice API key"
+            placeholder={configured ? t("settings.providerKeys.savedHidden") : title}
+            aria-label={`${title} ${t("settings.providerKeys.apiKey")}`}
             onChange={(event) => onValueChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && canSave) onSave();
@@ -3380,11 +2795,11 @@ function VeniceApiKeyRow({
           />
         </label>
         <button type="button" className="btn btn-secondary" disabled={!canSave} onClick={onSave}>
-          Save
+          {t("common.save")}
         </button>
         {configured ? (
           <button type="button" className="btn btn-secondary" onClick={onRemove}>
-            Remove
+            {t("common.remove")}
           </button>
         ) : null}
       </div>
@@ -3404,11 +2819,13 @@ function ShortcutRow({
   onReset,
   onCancel,
   platform,
+  captureHintWindows,
 }: {
   title: string;
   description: string;
   shortcut: DictationShortcutSetting;
   defaultShortcut: DictationShortcutSetting;
+  captureHintWindows: string;
   capturing: boolean;
   disabled: boolean;
   error?: string;
@@ -3417,14 +2834,21 @@ function ShortcutRow({
   onCancel: () => void;
   platform: "macos" | "windows" | "unsupported";
 }) {
+  const t = useT();
   const canReset = !capturing && !shortcutsMatch(shortcut, defaultShortcut) && !disabled;
 
   return (
     <div className="settings-row">
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
-        <p className="settings-row-description">{description}</p>
-        {error ? <p className="settings-row-error">{error}</p> : null}
+        <p className="settings-row-description" aria-live="polite">
+          {capturing && platform === "windows" ? captureHintWindows : description}
+        </p>
+        {error ? (
+          <p className="settings-row-error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
       <div className="settings-row-control">
         <KeycapShortcut label={shortcut.label} capturing={capturing} platform={platform} />
@@ -3434,16 +2858,16 @@ function ShortcutRow({
           disabled={disabled}
           onClick={capturing ? onCancel : onChange}
         >
-          {capturing ? "Cancel" : "Change"}
+          {capturing ? t("common.cancel") : t("settings.shortcuts.change")}
         </button>
         {canReset ? (
           <button
             type="button"
             className="btn btn-secondary"
-            aria-label={`Reset ${title} shortcut to default`}
+            aria-label={t("settings.shortcuts.resetAria", { name: title })}
             onClick={onReset}
           >
-            Reset
+            {t("settings.shortcuts.reset")}
           </button>
         ) : null}
       </div>
@@ -3451,12 +2875,31 @@ function ShortcutRow({
   );
 }
 
+/** The helper's Windows capture and registration codes, in the interface
+ * language; anything else keeps the helper's own message. */
+function windowsShortcutMessage(code: string | undefined, fallback: string, shortcut?: string) {
+  switch (code) {
+    case "no_key_detected":
+      return translate("settings.shortcuts.noKeyWindows");
+    case "modifier_required":
+      return translate("settings.shortcuts.modifierRequiredWindows");
+    case "unsupported_key":
+      return translate("settings.shortcuts.unsupportedKeyWindows");
+  }
+  if (code?.startsWith("register_hotkey_") && shortcut) {
+    return translate("settings.shortcuts.registerFailedWindows", { shortcut });
+  }
+  return fallback;
+}
+
 function shortcutKindPayload(value: unknown): DictationShortcutKind | undefined {
   return value === "push_to_talk" || value === "toggle" ? value : undefined;
 }
 
 function shortcutKindLabel(kind: DictationShortcutKind) {
-  return kind === "toggle" ? "Toggle dictation" : "Push to talk";
+  return kind === "toggle"
+    ? translate("settings.shortcuts.toggle")
+    : translate("settings.shortcuts.pushToTalk");
 }
 
 function shortcutForKind(settings: DictationSettingsDto, kind: DictationShortcutKind) {
@@ -3480,25 +2923,9 @@ function shortcutsMatch(first: DictationShortcutSetting, second: DictationShortc
   );
 }
 
-function stringPayloadValue(value: unknown) {
-  return typeof value === "string" ? value : undefined;
-}
-
 function messageFromError(error: unknown) {
   if (error && typeof error === "object" && "message" in error) {
     return String((error as { message: unknown }).message);
   }
   return String(error);
-}
-
-// The running build is a release candidate (X.Y.Z-rc.N). Only these get the
-// leave-rc reconcile offer; a clean stable build has nothing to reconcile.
-function isPrereleaseBuild() {
-  return APP_VERSION.includes("-rc");
-}
-
-// The base version an rc will become once promoted (0.0.25-rc.2 -> 0.0.25), used
-// to reassure the user which stable they will land on when it ships.
-function baseVersion() {
-  return APP_VERSION.split("-")[0];
 }

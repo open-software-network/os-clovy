@@ -1,5 +1,6 @@
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { useEffect, useState } from "react";
+import { useT } from "../../i18n";
 import {
   onboardingArea,
   onboardingResumeStep,
@@ -7,16 +8,13 @@ import {
   type OnboardingArea,
 } from "../../lib/onboarding";
 import { fallbackDictationCapabilities } from "../../lib/platform";
-import { dictationSettings, p3aRecord, setDictationShortcut } from "../../lib/tauri";
-import type { AccountStatus, DictationShortcutSetting } from "../../lib/tauri";
+import { dictationSettings, setDictationShortcut } from "../../lib/tauri";
+import type { DictationShortcutSetting } from "../../lib/tauri";
 import { PermissionsStep } from "./steps/PermissionSteps";
 import { AreaStep } from "./steps/AreaStep";
-import { MoodStep } from "./steps/MoodStep";
-import { SignInStep } from "./steps/SignInStep";
-import { TelemetryConsentStep } from "./steps/TelemetryConsentStep";
 import { usePermissionStatuses, useSystemAudioStatus } from "./use-permission-status";
 
-type StepId = "sign-in" | "telemetry" | "area" | "mood" | "permissions";
+type StepId = "area" | "permissions";
 
 // The product default: bare fn, mirroring DictationShortcutSetting::bare_fn()
 // on the Rust side.
@@ -46,11 +44,9 @@ function isFactoryDefaultShortcut(shortcut: DictationShortcutSetting) {
   );
 }
 
-const ONBOARDING_STEPS: StepId[] = ["sign-in", "telemetry", "area", "mood", "permissions"];
+const ONBOARDING_STEPS: StepId[] = ["area", "permissions"];
 
 type Props = {
-  account: AccountStatus;
-  onAccountChanged: (next: AccountStatus) => void;
   onComplete: () => void;
 };
 
@@ -63,7 +59,7 @@ function initialStepIndex(steps: StepId[]): number {
   const saved = onboardingResumeStep();
   if (!saved) return 0;
   if (saved === "usage-intent") return Math.max(0, steps.indexOf("area"));
-  if (saved === "personality") return Math.max(0, steps.indexOf("mood"));
+  if (saved === "personality" || saved === "mood") return steps.indexOf("permissions");
   if (saved === "dictation-practice") return Math.max(0, steps.indexOf("permissions"));
   const index = steps.indexOf(saved as StepId);
   return index === -1 ? 0 : index;
@@ -73,42 +69,18 @@ function browserOnboardingDemoStep(): StepId | null {
   if (!import.meta.env.DEV || typeof window === "undefined") return null;
   const params = new URLSearchParams(window.location.search);
   const step = params.get("clovyDemoStep") ?? params.get("juneDemoStep");
-  return step === "sign-in" ||
-    step === "telemetry" ||
-    step === "area" ||
-    step === "mood" ||
-    step === "permissions"
-    ? step
-    : null;
+  if (step === "mood") return "permissions";
+  return step === "area" || step === "permissions" ? step : null;
 }
 
-export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props) {
+export function OnboardingFlow({ onComplete }: Props) {
+  const t = useT();
   const capabilities = fallbackDictationCapabilities();
   const steps = ONBOARDING_STEPS;
-  const [stepIndex, setStepIndex] = useState(() => {
-    const initial = initialStepIndex(steps);
-    return account.signedIn && steps[initial] === "sign-in" ? 1 : initial;
-  });
+  const [stepIndex, setStepIndex] = useState(() => initialStepIndex(steps));
   const [area, setArea] = useState<OnboardingArea>(() => onboardingArea() ?? "work");
 
   const stepId = steps[stepIndex];
-
-  // Everything past sign-in needs an account; a resume point past it with a
-  // signed-out account (keychain cleared, signed out elsewhere) would strand
-  // the user on steps that can't work.
-  useEffect(() => {
-    if (!account.signedIn && stepId !== "sign-in") {
-      setStepIndex(0);
-    }
-  }, [account.signedIn, stepId]);
-
-  useEffect(() => {
-    if (account.signedIn && stepId === "sign-in") {
-      setStepIndex(1);
-    }
-  }, [account.signedIn, stepId]);
-
-  const firstReachableStepIndex = account.signedIn ? 1 : 0;
 
   useEffect(() => {
     setOnboardingResumeStep(stepId);
@@ -145,35 +117,30 @@ export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props)
   }
 
   function completeOnboarding() {
-    void Promise.allSettled([
-      p3aRecord("onboarding.completed"),
-      p3aRecord(`onboarding.area.${area}`),
-    ]).finally(onComplete);
+    onComplete();
   }
 
   function goBack() {
-    setStepIndex((index) => {
-      return Math.max(index - 1, firstReachableStepIndex);
-    });
+    setStepIndex((index) => Math.max(index - 1, 0));
   }
 
   return (
     <div className="onboarding-screen">
       <header className="onboarding-topbar">
-        {stepIndex > firstReachableStepIndex ? (
+        {stepIndex > 0 ? (
           <button
             type="button"
             className="onboarding-back"
             onClick={goBack}
-            aria-label="Back"
-            title="Back"
+            aria-label={t("common.back")}
+            title={t("common.back")}
           >
             <IconChevronLeftSmall size={18} aria-hidden />
           </button>
         ) : null}
         <nav
           className="onboarding-progress"
-          aria-label={`Setup progress: step ${stepIndex + 1} of ${steps.length}`}
+          aria-label={t("onboarding.progress", { step: stepIndex + 1, total: steps.length })}
         >
           {steps.map((id, index) => (
             <span
@@ -186,19 +153,13 @@ export function OnboardingFlow({ account, onAccountChanged, onComplete }: Props)
         </nav>
       </header>
       <div className="onboarding-body">
-        {stepId === "sign-in" ? (
-          <SignInStep account={account} onAccountChanged={onAccountChanged} onContinue={goNext} />
-        ) : stepId === "telemetry" ? (
-          <TelemetryConsentStep onContinue={goNext} />
-        ) : stepId === "area" ? (
+        {stepId === "area" ? (
           <AreaStep
             onContinue={(nextArea) => {
               setArea(nextArea);
               goNext();
             }}
           />
-        ) : stepId === "mood" ? (
-          <MoodStep area={area} onContinue={goNext} />
         ) : stepId === "permissions" ? (
           <PermissionsStep
             area={area}

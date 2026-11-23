@@ -48,6 +48,7 @@ export type AgentRunDto = {
   sessionId: string;
   status: AgentRunStatus;
   model: string;
+  approvalMode?: "approvals" | "bypass";
   reasoningEffort?: "minimal" | "medium" | "high";
   startedAt?: string;
   completedAt?: string;
@@ -59,6 +60,7 @@ type AgentItemBase = {
   id: string;
   sessionId: string;
   runId?: string;
+  /** Authoritative position in the stored conversation, across all runs. */
   sequence: number;
   createdAt: string;
 };
@@ -95,7 +97,8 @@ export type AgentToolCallItemDto = AgentItemBase & {
   callId: string;
   name: string;
   arguments: unknown;
-  status: "running" | "complete" | "failed";
+  /** Interrupted means the run ended without an observed final result. */
+  status: "running" | "complete" | "failed" | "interrupted";
 };
 
 export type AgentToolResultItemDto = AgentItemBase & {
@@ -133,9 +136,15 @@ type AgentInterruptionBase = {
   id: string;
   sessionId: string;
   runId: string;
-  status: "pending" | "resolved" | "expired";
+  /** `cancelled` only on items asked by a CLI turn (`engine: "cli"`). */
+  status: "pending" | "resolved" | "expired" | "cancelled";
   createdAt: string;
   resolvedAt?: string;
+  /** Set when a CLI turn asked through the approval broker. */
+  engine?: "cli";
+  /** Why a CLI item left `pending` without an answer (`timeout`,
+   * `cancelled`, `restarted`). */
+  retiredReason?: string;
 };
 
 export type AgentApprovalInterruptionDto = AgentInterruptionBase & {
@@ -185,6 +194,9 @@ export type AgentSkillDto = {
   description: string;
   source: "managed" | "user_global";
   enabled: boolean;
+  configuredEnabled: boolean;
+  readable: boolean;
+  error: { code: string; message: string } | null;
   editable: boolean;
 };
 
@@ -192,7 +204,14 @@ type RuntimeFrameBase = {
   protocolVersion: typeof AGENT_RUNTIME_PROTOCOL_VERSION;
   sessionId: string;
   runId: string;
+  /** Event cursor within this run; used only for replay/deduplication. */
   sequence: number;
+};
+
+type RuntimeItemData = {
+  itemId: string;
+  /** Conversation ordinal assigned by the host when persisting the item. */
+  itemSequence: number;
 };
 
 export type AgentRuntimeEvent = RuntimeFrameBase &
@@ -210,13 +229,12 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "message.delta";
-        data: { itemId: string; role: "assistant"; delta: string; createdAt: string };
+        data: RuntimeItemData & { role: "assistant"; delta: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "message.completed";
-        data: {
-          itemId: string;
+        data: RuntimeItemData & {
           role: "assistant";
           text: string;
           createdAt: string;
@@ -225,18 +243,28 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "reasoning.delta";
-        data: { itemId: string; delta: string; createdAt: string };
+        data: RuntimeItemData & { delta: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "steering.consumed";
-        data: { itemId: string; messageId: string; text: string; createdAt: string };
+        data: RuntimeItemData & { messageId: string; text: string; createdAt: string };
+      }
+    | {
+        eventId: string;
+        method: "run.diagnostic";
+        data: RuntimeItemData & {
+          message: string;
+          category: "runtime";
+          code: "agent_workspace_mcp_cleanup";
+          retryable: false;
+          createdAt: string;
+        };
       }
     | {
         eventId: string;
         method: "tool.started";
-        data: {
-          itemId: string;
+        data: RuntimeItemData & {
           callId: string;
           name: string;
           arguments: unknown;
@@ -246,26 +274,42 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "tool.completed";
-        data: { itemId: string; callId: string; name: string; output: unknown; createdAt: string };
+        data: RuntimeItemData & {
+          callId: string;
+          name: string;
+          output: unknown;
+          createdAt: string;
+        };
       }
     | {
         eventId: string;
         method: "tool.failed";
-        data: { itemId: string; callId: string; name: string; error: string; createdAt: string };
+        data: RuntimeItemData & { callId: string; name: string; error: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "interruption.requested";
-        data: { itemId: string; interruption: AgentInterruptionDto };
+        data: RuntimeItemData & { interruption: AgentInterruptionDto };
+      }
+    | {
+        /** A CLI item was answered, expired, or cancelled (approval broker). */
+        eventId: string;
+        method: "interruption.updated";
+        data: RuntimeItemData & { interruption: AgentInterruptionDto };
       }
     | { eventId: string; method: "usage.updated"; data: AgentUsageDto }
-    | { eventId: string; method: "run.completed"; data: { completedAt: string } }
-    | { eventId: string; method: "run.cancelled"; data: { completedAt: string } }
+    | {
+        eventId: string;
+        method: "run.completed" | "run.cancelled";
+        data: { completedAt: string; interruptedCallIds?: string[] };
+      }
     | {
         eventId: string;
         method: "run.failed";
         data: {
+          itemSequence: number;
           completedAt: string;
+          interruptedCallIds?: string[];
           message: string;
           category?: "tool" | "provider" | "runtime" | "context" | "credits";
           code?: string;
@@ -280,6 +324,7 @@ export type StartAgentRunRequest = {
   model: string;
   reasoningEffort?: "minimal" | "medium" | "high";
   safetyMode: AgentSafetyMode;
+  surface?: "home" | "chat";
   workspacePath: string;
   enabledSkillIds: string[];
   attachments: string[];
@@ -302,11 +347,6 @@ export type AgentRuntimeBindings = {
   listSessions(): Promise<AgentSessionDto[]>;
   getSession(sessionId: string): Promise<AgentSessionDto>;
   getLatestRun?(sessionId: string): Promise<AgentRunDto | null>;
-  compactSession?(sessionId: string): Promise<{
-    compacted: boolean;
-    removedItems: number;
-    estimatedTokens?: number;
-  }>;
   createSession(input: {
     title?: string;
     model: string;
@@ -318,11 +358,6 @@ export type AgentRuntimeBindings = {
   deleteSession(sessionId: string): Promise<void>;
   listItems(sessionId: string): Promise<AgentItemDto[]>;
   startRun(input: StartAgentRunRequest): Promise<AgentRunDto>;
-  steerRun(
-    runId: string,
-    messageId: string,
-    text: string,
-  ): Promise<{ accepted: boolean; reason?: string }>;
   cancelRun(runId: string): Promise<void>;
   retryRun(runId: string): Promise<AgentRunDto>;
   resolveInterruption(input: ResolveAgentInterruptionRequest): Promise<AgentRunDto>;

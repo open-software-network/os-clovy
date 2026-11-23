@@ -104,6 +104,23 @@ Developer org, internal repos, selected open-source pilot, rc, stable. Content-
 free telemetry and per-operation kill switches. Document exact GitHub App
 permissions and why each is needed.
 
+## GitHub CLI accounts
+
+Since [ADR-0066](../adr/0066-github-connector-can-ride-the-github-cli-login.md),
+`src-tauri/src/connectors/github_cli.rs` connects "GitHub (via gh)" on its own
+when the GitHub CLI is signed in to `github.com` and no GitHub account exists
+(app start, `connectors_github_cli_detect` when Plugins opens). The row carries
+`credentialSource: "gh"`; `github_access_token` reads
+`gh auth token --hostname github.com` for each call and nothing goes to the
+token store. Read is granted at connect; "Add access" adds write as a
+Clovy-side grant. When `gh` stops returning a token the account turns
+`reconnect_required`. Disconnecting writes `githubCliAutoConnect: false`
+(`github-cli-connector.json` in the app data directory);
+`connectors_github_cli_connect` ("Connect with GitHub CLI") connects
+explicitly and turns it back on. `list_repositories` reads `/user/repos` for
+these accounts. Tests: `cargo test --lib connectors::github_cli` (fake `gh`
+on the login PATH, fake `api.github.com`).
+
 ## ADR threshold
 
 If a backend signer holds a GitHub App private key, that is a hard-to-reverse

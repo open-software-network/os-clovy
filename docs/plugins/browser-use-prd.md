@@ -1,114 +1,38 @@
 # PRD: Browser use plugin
 
-- **Mode:** CEO
-- **Rank:** 2 of 10
-- **Score:** 91/100
-- **Date:** 2026-07-13
-- **Status:** Accepted direction in JUN-278
-- **Canonical detailed spec:** [../browser-computer-use-prd.md](../browser-computer-use-prd.md)
+Updated 2026-11-01 for the approved `melhorias-agente-audio-automacao` change.
+The [detailed contract](../browser-computer-use-prd.md) owns tool names, policy,
+transports and verification. This portfolio summary owns the product promise.
 
-**Division of authority.** This document is canonical for the *business* half:
-ranking, positioning, packaging and pricing, success measures, strategic risks.
-The detailed spec above is canonical for the *implementation* half: the
-`june_browser` tool contract and its tool names, the trust boundary, the
-transports, policy, distribution mechanics, and tests. Neither re-decides the
-other's half. An implementation detail here that disagrees with the detailed
-spec is a bug in this document.
+Browser use lets Clovy finish interactive web tasks that have no structured
+connector. Clovy uses its own separate browser and persistent login profile.
+It works in the background by default, with a visible window when an operation
+cannot run in the background. It never copies or attaches to the user's usual
+browser. Connectors remain preferable for narrow, structured workflows.
 
-## Thesis
+Users enable Browser use in Plugins or through the in-chat consent card. The
+copy explains that page text and screenshots may reach the configured AI model.
+No extension installation, pairing, store listing or tab-sharing code is needed.
 
-Browser use is Clovy's universal adapter for web work that does not yet have a
-first-party connector. It turns Clovy from an assistant that explains what to
-do into one that can do the work in visible, bounded tabs while the user keeps
-control of consequential actions.
+Login is a separate human step. Take over pauses every agent capture and action;
+the user signs in and explicitly resumes agent control. Sensitive password,
+one-time-code and payment fields stay human-only. Stop closes browser control
+and processes while preserving the saved login. The UI shows the effective
+mode and whether control is suspended. Consequential actions remain subject to
+the native approval policy, and uncertain deliveries never retry automatically.
 
-It ranks second because it multiplies every other plugin and prevents the
-portfolio from becoming a race to build one provider at a time. It does not
-replace connectors: connectors offer narrower scopes, structured data, safer
-actions, and routine support; Browser use covers the long tail and signed-in
-web flows.
+Authorized routines use a separate anonymous ephemeral profile and their own
+per-routine opt-in. They never inherit attended logins or approvals, and
+clicks, fills and key presses remain blocked. Page labels cannot prove that an
+input event is harmless; attended input uses the central approval broker.
 
-## Customer and problem
+Success means a user-confirmed or broker-verifiable task outcome, clear consent,
+zero unauthorized actions, correct isolation and reliable Stop. An agent's
+claim of completion alone is not evidence. Risks include changing page content,
+stale targets, prompt injection, private network access, browser process
+lifecycle and packaging pinned engine/browser resources across platforms.
 
-Clovy can search and fetch web pages, but users still perform interactive work:
-open a site, navigate stateful pages, fill a form, attach a file, or complete a
-workflow inside an existing login. Giving an agent an unrestricted browser
-profile would solve the capability problem by creating a larger trust problem.
-
-## Product promise
-
-Clovy works only in clearly marked tabs it creates or a tab the user explicitly
-shares. It pauses before sending, submitting, publishing, purchasing, deleting,
-or making another consequential change. Disconnect means the browser is no
-longer under Clovy's control. A crash, browser restart, or extension update ends
-automation immediately; Clovy never keeps driving a browser it has lost contact
-with, and a task fails rather than resuming silently.
-
-## V1 experience
-
-- The Plugins tile guides installation and pairing of the Clovy browser
-  extension.
-- Clovy opens task-owned tabs in a visible group and can use the user's existing
-  signed-in session there.
-- The user may share one existing tab explicitly; all other existing tabs are
-  out of bounds.
-- Clovy shows screenshots and progress in chat.
-- Sensitive fields for passwords, one-time codes, and payment data always
-  require human takeover.
-- Sandboxed routines use a separate anonymous, ephemeral managed browser for
-  public sites, never the user's profile.
-- Stop and disconnect are always visible and immediate.
-
-## Scope boundaries
-
-Launch on Chromium-family browsers on macOS. Do not bundle a browser engine,
-automate credentials or payment fields, create persistent per-site autonomy,
-or expose signed-in sessions to unattended routines. Computer use is a
-separate plugin and grant.
-
-## Privacy and trust
-
-Page content needed for reasoning follows the user's selected inference path.
-The extension, native shim, and Rust broker stay on-device. Clovy does not send
-the user's browsing history or unrelated tabs to OpenSoftware. Policy lives in
-the broker, not in a prompt.
-
-## Business model
-
-Attended Browser use should be available on Hobby during launch to maximize
-trust feedback. Routine browsing and higher automation limits are Pro. There
-is no provider API fee; model and support costs determine final packaging.
-
-## Success measures
-
-| Metric | Target |
-| --- | ---: |
-| Users completing pairing after opening the tile | 70% |
-| Browser tasks with a user-confirmed or predeclared broker-verifiable outcome | 75% |
-| Consequential actions executed without a valid approval | 0 |
-| Sessions touching an unshared pre-existing tab | 0 |
-| Median time from access request to first snapshot | under 90 seconds |
-| Users disconnecting because behavior surprised them | under 2% |
-
-A verifiable outcome is defined before execution and recorded by the broker,
-such as reaching a target state, producing the requested artifact, or receiving
-an action receipt. Agent self-reported completion does not count.
-
-## Strategic risks
-
-- Extension-store approval and independent update cadence are release risks.
-  A rejection of the debugger permission holds the attended launch; there is
-  no reduced-permission fallback. A store update can also land mid-task, so
-  tasks must fail safely when the extension reloads.
-- Browser DOMs change constantly; recovery quality matters more than demo-path
-  success.
-- Signed-in pages contain prompt injection and high-value actions. Structural
-  tab isolation and broker approvals are mandatory.
-- The plugin must never become an excuse to skip a safer structured connector
-  for high-frequency workflows.
-
-## Decision
-
-The direction is already accepted. Ship Browser use before Computer use, keep
-the user's profile attended-only, and treat the browser broker as a reusable
-policy boundary for the portfolio.
+Clovy is account-free and calls the user's configured providers directly.
+Historical subscription-tier and extension-store assumptions do not apply to
+this fork. Native acceptance and genuine provider login remain distinct from
+synthetic fixture proof.

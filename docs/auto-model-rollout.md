@@ -1,36 +1,55 @@
-# Automatic private model rollout
+# Automatic model selection
+
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
 
 Clovy supports `open-software/auto` while retaining explicit model selection. Auto persists a
-cost-to-quality preference and forwards it through the Clovy-owned agent runtime and note
-generation.
+cost-to-quality preference (`cost_quality`, 0 to 1) and forwards it through the Clovy-owned agent
+runtime and note generation.
 
-The rollout remains reversible. Production compose pins
-`CLOVY__UPSTREAMS__VENICE__BASE_URL` to `https://api.opensoftware.co/v1`; Phala's sealed
-`CLOVY__UPSTREAMS__VENICE__API_KEY` contains Clovy's dedicated os-api service key.
+Clovy API resolves Auto itself, per request, to a concrete priced OpenRouter model. Nothing named
+`open-software/auto` is sent upstream:
 
-Clovy API sends `X-Confidential-Compute: preferred` on service-managed text inference. This is an
-intentional zero-retention policy, not a TEE guarantee: os-api tries Venice private first and falls
-back to a compatible Phala TEE endpoint. It never falls below zero retention. A caller that truly
-requires hardware-backed confidential compute must send `required` directly to os-api; Clovy does
-not require that stronger contract for its normal text workloads.
+| `cost_quality` | Model |
+| - | - |
+| below 0.34 | `nvidia/nemotron-3-nano-30b-a3b` |
+| 0.34 to 0.66 | `moonshotai/kimi-k2.6` |
+| above 0.66, or absent | `z-ai/glm-5.2` |
 
-The policy is server-side and remains compatible with shipped desktop builds. Existing clients keep
-sending legacy model ids such as `zai-org-glm-5-2`; os-api resolves them to canonical models without
-breaking Clovy's existing `/v1` contract. User-supplied Venice keys continue to use Venice's
-public API directly and do not receive the os-api routing header.
+When an agent request needs image input or tools and the tier model lacks that capability (from
+the OpenRouter catalog's input modalities and supported parameters), Clovy uses
+`moonshotai/kimi-k2.6`, then any priced model that has the capability, else it fails
+`model_capability_unavailable`. An unpriced legacy text id resolves through Auto. The tier models
+live in the API's Auto resolver; changing them is a code change reviewed against the catalog.
 
-Clovy API preserves os-api's selected provider, privacy level, and endpoint as additive response
-metadata (`upstreamProvider`, `privacyLevel`, and `upstreamEndpoint`, plus `X-OS-*` chat headers).
-The existing `provider` field keeps its historical Venice adapter meaning for shipped clients.
-Legacy aliases and canonical live-catalog model IDs must both cover the most expensive enabled
-private route because settlement is currently keyed by requested model ID.
+The catalog only says some endpoint of a model supports a parameter; OpenRouter treats `tools` and
+`response_format` as a soft routing preference and silently ignores them on an endpoint that lacks
+them. So every agent request that sends `tools`, `tool_choice` or `response_format` also sends
+`provider.require_parameters: true`: the endpoint that serves it must support every parameter in
+the request, or OpenRouter does not route it at all rather than dropping the tools or the output
+schema. A plain request keeps OpenRouter's default routing.
 
-For an agent run, Auto selects a canonical model on the first inference. Tool continuations and
+Auto is Clovy-funded: a user's own OpenRouter key is stripped from an explicit Auto request, and a
+stale model id with a user key fails `openrouter_api_key_model_unavailable` instead of silently
+moving to Clovy credits. Billing uses the resolved concrete model's catalog price, and every
+Clovy-metered request asks OpenRouter for routes no more expensive than that price
+(`provider.max_price`), so the upstream cost never exceeds the charge.
+
+OpenRouter routes requests to third-party providers under its own and each provider's data
+policies. Clovy makes no confidential-compute or zero-retention claim for Auto or any other
+OpenRouter model, and sends no routing-privacy header.
+
+For an agent run, Auto selects a concrete model on the first inference. Tool continuations and
 approval resumes pin that selected model for the remainder of the agent run so provider-native
 reasoning history remains compatible. Clovy also preserves the reasoning field observed on that
 response when replaying assistant history, rather than deriving the provider wire format from a
-model ID. A later user-initiated agent run evaluates Auto again. Provider, privacy, and endpoint
-metadata remain observational and are not continuation tokens.
+model ID. A later user-initiated agent run evaluates Auto again.
 
 Build the desktop release with `OS_CLOVY_AUTO_MODE_DEFAULT=true`. Existing users retain their saved
-model. Roll back by restoring the Venice URL in production compose and removing the build flag.
+model. Roll back by removing the build flag.

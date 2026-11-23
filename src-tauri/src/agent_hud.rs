@@ -171,7 +171,7 @@ pub fn agent_hud_open_agent(
     session: Option<serde_json::Value>,
     stored_session_id: Option<String>,
 ) -> Result<(), String> {
-    show_main_window(&app);
+    crate::main_window::show(&app);
     // Rows without a full session object can still carry the stored id from
     // their status record; the main window resolves it against session history.
     let mut payload = serde_json::Map::new();
@@ -321,14 +321,6 @@ fn agent_hud_corner_origin(
         AgentHudPlacement::TopRight => (right, top),
         AgentHudPlacement::BottomLeft => (left, bottom),
         AgentHudPlacement::BottomRight => (right, bottom),
-    }
-}
-
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
     }
 }
 

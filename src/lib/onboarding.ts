@@ -97,7 +97,6 @@ export function closestOnboardingMood(personality: OnboardingPersonality): Onboa
 type OnboardingReplayEnv = {
   readonly DEV?: boolean;
   readonly VITE_CLOVY_REPLAY_ONBOARDING?: string;
-  readonly VITE_JUNE_REPLAY_ONBOARDING?: string;
 };
 
 export function applyOnboardingReplayFlag(env: OnboardingReplayEnv = import.meta.env) {
@@ -107,10 +106,7 @@ export function applyOnboardingReplayFlag(env: OnboardingReplayEnv = import.meta
 }
 
 export function shouldReplayOnboarding(env: OnboardingReplayEnv = import.meta.env) {
-  return (
-    env.DEV === true &&
-    (env.VITE_CLOVY_REPLAY_ONBOARDING ?? env.VITE_JUNE_REPLAY_ONBOARDING) === "1"
-  );
+  return env.DEV === true && env.VITE_CLOVY_REPLAY_ONBOARDING === "1";
 }
 
 export function isOnboardingComplete(): boolean {

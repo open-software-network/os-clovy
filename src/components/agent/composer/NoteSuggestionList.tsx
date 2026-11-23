@@ -8,6 +8,7 @@ import {
 } from "react";
 import { IconNoteText } from "central-icons/IconNoteText";
 
+import { intlLocale, type TFunction, useT } from "../../../i18n";
 import type { NoteListItemDto } from "../../../lib/tauri";
 import { useScrollFade } from "../../../lib/use-scroll-fade";
 
@@ -21,7 +22,7 @@ export type NoteSuggestionListProps = {
 function formatSuggestionDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  return new Intl.DateTimeFormat(intlLocale(), { month: "short", day: "numeric" }).format(date);
 }
 
 /** One-line label for a row: lead with whatever identifies the note — its
@@ -29,10 +30,13 @@ function formatSuggestionDate(value: string): string {
  * the preview inline (to the right) only when it distinctly adds to a real
  * title. Never duplicate the primary, so an empty note doesn't read its
  * placeholder twice, and rows stay a single, uniform line. */
-function noteSuggestionLabels(item: NoteListItemDto): { primary: string; secondary: string } {
+function noteSuggestionLabels(
+  t: TFunction,
+  item: NoteListItemDto,
+): { primary: string; secondary: string } {
   const title = item.title.trim();
   const preview = item.preview.trim();
-  const primary = title || preview || "New note";
+  const primary = title || preview || t("chat.composer.newNote");
   const secondary = title && preview && preview !== title ? preview : "";
   return { primary, secondary };
 }
@@ -45,6 +49,7 @@ export type NoteSuggestionListHandle = {
  * It mirrors the slash palette's keyboard contract but only lists notes. */
 export const NoteSuggestionList = forwardRef<NoteSuggestionListHandle, NoteSuggestionListProps>(
   ({ items, command }, ref) => {
+    const t = useT();
     const [selected, setSelected] = useState(0);
     const [activeSource, setActiveSource] = useState<"keyboard" | "pointer" | null>(null);
     const menuRef = useRef<HTMLDivElement | null>(null);
@@ -101,7 +106,11 @@ export const NoteSuggestionList = forwardRef<NoteSuggestionListHandle, NoteSugge
     );
 
     if (items.length === 0) {
-      return <div className="agent-category-menu agent-category-menu-empty">No notes found</div>;
+      return (
+        <div className="agent-category-menu agent-category-menu-empty">
+          {t("chat.composer.noNotesFound")}
+        </div>
+      );
     }
 
     return (
@@ -111,13 +120,13 @@ export const NoteSuggestionList = forwardRef<NoteSuggestionListHandle, NoteSugge
             ref={menuRef}
             className="agent-category-menu agent-note-suggestion-menu"
             role="listbox"
-            aria-label="Reference a note"
+            aria-label={t("chat.composer.referenceNote")}
             onScroll={() => {
               fade.update();
             }}
           >
             {items.map((item, index) => {
-              const { primary, secondary } = noteSuggestionLabels(item);
+              const { primary, secondary } = noteSuggestionLabels(t, item);
               const date = formatSuggestionDate(item.updatedAt);
               return (
                 <button

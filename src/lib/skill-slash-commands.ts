@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import type { AgentSkillDocument, AgentSkillInfo } from "./tauri";
 
 const EXPLICIT_SKILLS_START = "---EXPLICIT SKILLS---";
@@ -122,7 +123,7 @@ export function skillSlashResolutionError(resolution: SkillSlashResolution) {
       .slice(0, 4)
       .map((skill) => `/${skill.name}`)
       .join(", ");
-    return `/${resolution.token} matches more than one skill. Use ${matches}.`;
+    return t("lib.skillSlash.ambiguous", { token: resolution.token, matches });
   }
   if (resolution.status === "disabled") {
     const matches = resolution.matches
@@ -130,16 +131,16 @@ export function skillSlashResolutionError(resolution: SkillSlashResolution) {
       .map((skill) => `/${skill.name}`)
       .join(", ");
     if (!matches) {
-      return `/${resolution.token} is disabled. Enable it in Agent settings to use it.`;
+      return t("lib.skillSlash.disabledToken", { token: resolution.token });
     }
     return resolution.matches.length === 1
-      ? `${matches} is disabled. Enable it in Agent settings to use it.`
-      : `${matches} are disabled. Enable one in Agent settings to use it.`;
+      ? t("lib.skillSlash.disabledOne", { matches })
+      : t("lib.skillSlash.disabledMany", { matches });
   }
   const suggestions = resolution.suggestions.map((skill) => `/${skill.name}`).join(", ");
   return suggestions
-    ? `Could not find skill /${resolution.token}. Try ${suggestions}.`
-    : `Could not find skill /${resolution.token}.`;
+    ? t("lib.skillSlash.missingWithSuggestions", { token: resolution.token, suggestions })
+    : t("lib.skillSlash.missing", { token: resolution.token });
 }
 
 export function explicitSkillInvocationPrompt(documents: AgentSkillDocument[], request: string) {

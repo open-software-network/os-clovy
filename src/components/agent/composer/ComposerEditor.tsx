@@ -20,6 +20,7 @@ import {
   type NoteReferenceInput,
 } from "./noteReference";
 import type { ReportCategory } from "./reportCategory";
+import { useT } from "../../../i18n";
 import type { AgentSkillInfo } from "../../../lib/tauri";
 import type { BuiltinComposerSlashCommandName } from "../../../lib/agent-composer-slash-commands";
 
@@ -345,6 +346,13 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
     },
     ref,
   ) => {
+    const t = useT();
+    const editorLabel = t("chat.composer.messageClovy");
+    // The editor is created once, so its attributes read the label through a
+    // ref (ProseMirror re-evaluates them on every view update) and a language
+    // change patches the live DOM below.
+    const editorLabelRef = useRef(editorLabel);
+    editorLabelRef.current = editorLabel;
     const frameRef = useRef<HTMLDivElement | null>(null);
     const pendingEditorActionsRef = useRef<PendingEditorAction[]>([]);
     const skillsRef = useRef(skills);
@@ -562,12 +570,12 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
         createNoteReference(),
       ],
       editorProps: {
-        attributes: {
+        attributes: () => ({
           class: "agent-composer-editor",
           role: "textbox",
-          "aria-label": "Message Clovy",
+          "aria-label": editorLabelRef.current,
           "aria-multiline": "true",
-        },
+        }),
         handleScrollToSelection: (view) => {
           // ProseMirror's own scrollIntoView walks every scrollable ancestor,
           // and the composer is a DOM child of the chat scroller
@@ -706,6 +714,10 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
         detachScrollTracking?.();
       };
     }, [editor]);
+
+    useEffect(() => {
+      if (editorHasView(editor)) editor.view.dom.setAttribute("aria-label", editorLabel);
+    }, [editor, editorLabel]);
 
     useImperativeHandle(ref, () => {
       const applyOrQueue = (action: PendingEditorAction) => {

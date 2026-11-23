@@ -21,6 +21,7 @@ fn note(overrides: impl FnOnce(&mut NoteDto)) -> NoteDto {
         edited_content: None,
         transcript: None,
         transcript_coverage: None,
+        video_analysis: None,
         source_transcripts: Vec::new(),
         recording: None,
         audio: None,
@@ -87,9 +88,9 @@ fn manual_notes_for_generation_uses_preface_when_generated_note_was_appended_bel
 
 #[tokio::test]
 async fn generation_rejects_empty_transcript() {
-    let err = clovy_lib::clovy_api::generate_note_from_transcript(
-        clovy_lib::clovy_api::GenerationRequest {
-            provider: "venice".to_string(),
+    let err = clovy_lib::providers::notes::generate_note_from_transcript(
+        clovy_lib::providers::notes::GenerationRequest {
+            provider: "openrouter".to_string(),
             operation_id: None,
             title: "Empty".to_string(),
             existing_generated_note: None,
@@ -97,6 +98,8 @@ async fn generation_rejects_empty_transcript() {
             transcript_source_labels: false,
             manual_notes: None,
             language: None,
+            recorded_on: None,
+            video: None,
         },
     )
     .await

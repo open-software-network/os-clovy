@@ -5,35 +5,55 @@ use std::{
 
 const CGNAT_IPV4_SECOND_OCTET: RangeInclusive<u8> = 64..=127;
 
-pub fn validate_video_download_url(url: &str) -> Result<(reqwest::Url, Vec<SocketAddr>), String> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum DownloadUrlError {
+    Rejected(String),
+    Resolution,
+}
+impl From<String> for DownloadUrlError {
+    fn from(value: String) -> Self {
+        Self::Rejected(value)
+    }
+}
+impl From<&str> for DownloadUrlError {
+    fn from(value: &str) -> Self {
+        Self::Rejected(value.into())
+    }
+}
+
+pub fn validate_video_download_url(
+    url: &str,
+) -> Result<(reqwest::Url, Vec<SocketAddr>), DownloadUrlError> {
+    validate_with_resolver(url, |host, port| {
+        (host, port).to_socket_addrs().map(Iterator::collect)
+    })
+}
+
+fn validate_with_resolver(
+    url: &str,
+    resolve: impl FnOnce(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+) -> Result<(reqwest::Url, Vec<SocketAddr>), DownloadUrlError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| "video download URL is invalid")?;
     if parsed.scheme() != "https" {
-        return Err("video download URL must use https".to_string());
+        return Err("video download URL must use https".into());
     }
-
     let host = parsed
         .host_str()
-        .ok_or_else(|| "video download URL must include a host".to_string())?;
+        .ok_or("video download URL must include a host")?;
     let socket_host = host_without_ipv6_brackets(host);
     if let Ok(ip) = socket_host.parse::<IpAddr>() {
         reject_non_public_ip(ip)?;
     }
-
     let port = parsed
         .port_or_known_default()
-        .ok_or_else(|| "video download URL must include a resolvable port".to_string())?;
-    let addrs: Vec<_> = (socket_host, port)
-        .to_socket_addrs()
-        .map_err(|_| "video download URL host could not be resolved".to_string())?
-        .collect();
+        .ok_or("video download URL must include a resolvable port")?;
+    let addrs = resolve(socket_host, port).map_err(|_| DownloadUrlError::Resolution)?;
     if addrs.is_empty() {
-        return Err("video download URL host did not resolve".to_string());
+        return Err(DownloadUrlError::Resolution);
     }
-
     for addr in &addrs {
         reject_non_public_ip(addr.ip())?;
     }
-
     Ok((parsed, addrs))
 }
 
@@ -49,7 +69,7 @@ pub fn video_download_client_builder(
         return Err("video download URL host did not resolve".to_string());
     }
 
-    // Venice pre-signed video URLs are direct GETs. Redirects fail closed, so
+    // Provider video download URLs are direct GETs. Redirects fail closed, so
     // no hop can bypass the validation and address pinning above. If a provider
     // later needs CDN redirects, validate, resolve, and pin every hop before
     // following it.
@@ -484,11 +504,36 @@ mod tests {
         target_thread.join().unwrap();
     }
 
+    #[test]
+    fn resolution_failure_is_distinct_from_a_rejected_address() {
+        let url = "https://media.fal.media/result.mp4";
+        assert_eq!(
+            validate_with_resolver(url, |_, _| Err(std::io::ErrorKind::TimedOut.into()))
+                .unwrap_err(),
+            DownloadUrlError::Resolution
+        );
+        assert_eq!(
+            validate_with_resolver(url, |_, _| Ok(vec![])).unwrap_err(),
+            DownloadUrlError::Resolution
+        );
+        assert!(matches!(
+            validate_with_resolver(url, |_, _| Ok(vec!["127.0.0.1:443".parse().unwrap()]))
+                .unwrap_err(),
+            DownloadUrlError::Rejected(_)
+        ));
+        assert!(
+            validate_with_resolver(url, |_, _| Ok(vec!["93.184.216.34:443".parse().unwrap()]))
+                .is_ok()
+        );
+    }
+
     fn assert_non_public_urls(urls: &[&str]) {
         for url in urls {
             assert_eq!(
                 validate_video_download_url(url).unwrap_err(),
-                "video download URL host resolved to a non-public address",
+                DownloadUrlError::Rejected(
+                    "video download URL host resolved to a non-public address".into()
+                ),
                 "{url}"
             );
         }

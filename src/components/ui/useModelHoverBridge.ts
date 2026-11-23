@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
 
-import type { VeniceModelDto } from "../../lib/tauri";
+import type { ProviderModelDto } from "../../lib/tauri";
 import {
   createHoverBridgeTracker,
   type HoverBridgePoint,
@@ -11,16 +11,9 @@ import {
 
 // The picker flyout state, shared verbatim by the composer and settings pickers
 // (both declare a structurally identical alias). A row's detail card is open
-// when `kind === "model"`; the searchable catalog when `kind === "all"`; the
-// Auto preference panel when `kind === "auto"`; the Effort submenu when
-// `kind === "effort"` (the bridge itself only ever traverses to "model"
-// cards, so it ignores those kinds).
-export type ModelHoverFlyout =
-  | { kind: "model"; id: string }
-  | { kind: "all" }
-  | { kind: "auto" }
-  | { kind: "effort" }
-  | null;
+// when `kind === "model"`; the searchable catalog when `kind === "all"`.
+// The bridge only traverses model detail cards.
+export type ModelHoverFlyout = { kind: "model"; id: string } | { kind: "all" } | null;
 
 // Reports whether a safe-polygon traversal is currently anchored, so the rows
 // can suppress their own hover-intent while the pointer is bridging to a card.
@@ -77,13 +70,6 @@ export function useModelDetailHoverBridge({
         // the new card opens (when data-active transfers). Otherwise the still-
         // open card's row and the freshly hovered row both read as highlighted
         // during the delay.
-        const flyoutKind = target.dataset.flyoutKind;
-        if (flyoutKind === "auto" || flyoutKind === "effort") {
-          cancelHoverIntent();
-          onFlyoutChange({ kind: flyoutKind });
-          setBridging(false);
-          return;
-        }
         if (target.classList.contains("agent-composer-model-all")) {
           cancelHoverIntent();
           onFlyoutChange({ kind: "all" });
@@ -144,7 +130,7 @@ export function useModelDetailHoverBridge({
 // The catalog hovercard's anchoring: the hovered row's rect and the card's
 // preferred side, computed by the caller's `showCatalogHover`.
 export type CatalogHoverAnchor = {
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   rowRect: HoverBridgeRect;
   side: "left" | "right";
 };
@@ -168,8 +154,8 @@ export function useCatalogHoverBridge({
   catalogHover: CatalogHoverAnchor | null;
   cardRef: RefObject<HTMLElement | null>;
   listRef: RefObject<HTMLElement | null>;
-  resolveOption: (id: string) => VeniceModelDto | undefined;
-  showCatalogHover: (option: VeniceModelDto, row: HTMLElement) => void;
+  resolveOption: (id: string) => ProviderModelDto | undefined;
+  showCatalogHover: (option: ProviderModelDto, row: HTMLElement) => void;
   cancelHoverIntent: () => void;
   cancelCatalogClose: () => void;
   scheduleCatalogClose: () => void;

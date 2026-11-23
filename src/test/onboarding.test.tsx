@@ -1,7 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CLOVY_EYES_PATH } from "../components/brand/ClovyLogo";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   applyOnboardingReplayFlag,
@@ -10,14 +9,12 @@ import {
   markOnboardingComplete,
   ONBOARDING_COMPLETED_EVENT,
   onboardingArea,
-  onboardingMood,
   onboardingResumeStep,
   resetOnboardingForReplay,
   setOnboardingResumeStep,
   subscribeToOnboardingComplete,
 } from "../lib/onboarding";
-import { TELEMETRY_INFO_URL } from "../lib/p3a";
-import type { AccountStatus, RecordingSourceReadinessDto } from "../lib/tauri";
+import type { RecordingSourceReadinessDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
@@ -26,14 +23,7 @@ const mocks = vi.hoisted(() => ({
   openPrivacySettings: vi.fn(),
   setDictationLanguage: vi.fn(),
   setDictationShortcut: vi.fn(),
-  setP3aEnabled: vi.fn(),
-  p3aRecord: vi.fn(),
   setClovyPersona: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  clovyOpenCommunityPage: vi.fn(),
-  clovyOpenVerifyPage: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsOpenPortal: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -55,37 +45,12 @@ vi.mock("../lib/tauri", () => ({
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationLanguage: mocks.setDictationLanguage,
   setDictationShortcut: mocks.setDictationShortcut,
-  setP3aEnabled: mocks.setP3aEnabled,
-  p3aRecord: mocks.p3aRecord,
   setClovyPersona: mocks.setClovyPersona,
-  osAccountsLogin: mocks.osAccountsLogin,
-  clovyOpenCommunityPage: mocks.clovyOpenCommunityPage,
-  clovyOpenVerifyPage: mocks.clovyOpenVerifyPage,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsOpenPortal: mocks.osAccountsOpenPortal,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mocks.listen,
 }));
-
-const account: AccountStatus = {
-  signedIn: true,
-  configured: true,
-  user: { id: "u1", handle: "casey", displayName: "Casey Tester" },
-  balance: { credits: 5000, usdMillis: 5000 },
-  subscription: { subscribed: true, status: "trialing" },
-};
-
-const unsubscribedAccount: AccountStatus = {
-  ...account,
-  subscription: { subscribed: false },
-};
-
-const signedOutAccount: AccountStatus = {
-  signedIn: false,
-  configured: true,
-};
 
 type ListenHandler = (event: { payload: string }) => void;
 
@@ -161,21 +126,8 @@ describe("OnboardingFlow", () => {
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.checkRecordingSourceReadiness.mockResolvedValue(systemAudioReadiness(true));
     mocks.openPrivacySettings.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.clovyOpenCommunityPage.mockResolvedValue(undefined);
-    mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
     mocks.setDictationShortcut.mockResolvedValue(undefined);
-    mocks.setP3aEnabled.mockImplementation((enabled: boolean) =>
-      Promise.resolve({
-        settings: {
-          enabled,
-          consentVersion: 1,
-          consentedAtWeek: enabled ? "2026-W28" : null,
-        },
-      }),
-    );
-    mocks.p3aRecord.mockResolvedValue(undefined);
     mocks.setClovyPersona.mockResolvedValue(undefined);
     mocks.dictationSettings.mockResolvedValue({
       settings: {
@@ -190,8 +142,6 @@ describe("OnboardingFlow", () => {
 
   function flowProps(overrides: Partial<Parameters<typeof OnboardingFlow>[0]> = {}) {
     return {
-      account,
-      onAccountChanged: vi.fn(),
       onComplete: vi.fn(),
       ...overrides,
     };
@@ -199,13 +149,8 @@ describe("OnboardingFlow", () => {
 
   async function renderFlow(onComplete = vi.fn()) {
     render(<OnboardingFlow {...flowProps({ onComplete })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Where could I help most?" });
     await userEvent.click(screen.getByRole("radio", { name: /Work/ }));
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await userEvent.click(screen.getByRole("radio", { name: /Strategic/ }));
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Let Clovy listen and type" });
     return onComplete;
@@ -221,11 +166,17 @@ describe("OnboardingFlow", () => {
   }
 
   it("prefers the Clovy demo-step query parameter", async () => {
-    window.history.replaceState({}, "", "/?clovyDemoStep=mood&juneDemoStep=permissions");
+    window.history.replaceState({}, "", "/?clovyDemoStep=area&juneDemoStep=permissions");
 
     render(<OnboardingFlow {...flowProps()} />);
 
-    expect(await screen.findByRole("heading", { name: "Choose my personality" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Where could I help most?" })).toBeVisible();
+  });
+
+  it("resumes a legacy personality step at permissions", async () => {
+    setOnboardingResumeStep("mood");
+    render(<OnboardingFlow {...flowProps()} />);
+    expect(await screen.findByRole("heading", { name: "Let Clovy listen and type" })).toBeVisible();
   });
 
   it("accepts the June-era demo-step query parameter as a fallback", async () => {
@@ -265,7 +216,7 @@ describe("OnboardingFlow", () => {
     return stubNavigatorPlatform("MacIntel", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)");
   }
 
-  it("walks the full flow for a subscribed user", async () => {
+  it("walks the full flow", async () => {
     const user = userEvent.setup();
     const onComplete = await renderFlow();
 
@@ -276,55 +227,12 @@ describe("OnboardingFlow", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 
-    expect(mocks.p3aRecord).toHaveBeenCalledWith("onboarding.completed");
     expect(onboardingArea()).toBe("work");
-    expect(onboardingMood()).toBe("strategic");
-    expect(
-      mocks.p3aRecord.mock.calls.filter(([question]) => question.startsWith("onboarding.area.")),
-    ).toEqual([["onboarding.area.work"]]);
-    expect(mocks.setClovyPersona).toHaveBeenCalledWith({
-      area: "work",
-      voice: 45,
-      detail: 90,
-      initiative: 75,
-      humor: 20,
-    });
     // Completion is the caller's job (App marks it), not the flow's.
     expect(isOnboardingComplete()).toBe(false);
   });
 
-  it("keeps anonymous usage statistics off by default", async () => {
-    render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    expect(screen.queryByText("See exactly what is shared")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Learn how it works" })).toHaveAttribute(
-      "href",
-      TELEMETRY_INFO_URL,
-    );
-    expect(
-      screen.getByRole("switch", { name: "Share anonymous usage statistics" }),
-    ).toHaveAttribute("aria-checked", "false");
-
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(false);
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-  });
-
-  it("saves anonymous usage statistics consent when selected", async () => {
-    const user = userEvent.setup();
-    render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await user.click(screen.getByRole("switch", { name: "Share anonymous usage statistics" }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(mocks.setP3aEnabled).toHaveBeenCalledWith(true);
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-  });
-
-  it("asks where Clovy should help before choosing a personality", async () => {
+  it("asks where Clovy should help before requesting permissions", async () => {
     const user = userEvent.setup();
     setOnboardingResumeStep("area");
     render(<OnboardingFlow {...flowProps()} />);
@@ -338,105 +246,6 @@ describe("OnboardingFlow", () => {
     await user.click(continueButton);
 
     expect(onboardingArea()).toBe("thinking");
-    expect(mocks.p3aRecord).not.toHaveBeenCalledWith("onboarding.area.thinking");
-    await screen.findByRole("heading", { name: "Choose my personality" });
-  });
-
-  it("reports only the final area after going back and changing it", async () => {
-    const user = userEvent.setup();
-    const onComplete = vi.fn();
-    setOnboardingResumeStep("area");
-    render(<OnboardingFlow {...flowProps({ onComplete })} />);
-
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Work/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-
-    expect(mocks.p3aRecord).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Back" }));
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Personal/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Let Clovy listen and type" });
-
-    grantPermissions();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-
-    expect(
-      mocks.p3aRecord.mock.calls.filter(([question]) => question.startsWith("onboarding.area.")),
-    ).toEqual([["onboarding.area.personal"]]);
-    expect(mocks.p3aRecord).toHaveBeenCalledWith("onboarding.completed");
-  });
-
-  it("saves the selected mood before continuing to permissions", async () => {
-    const user = userEvent.setup();
-    setOnboardingResumeStep("mood");
-    const { container } = render(<OnboardingFlow {...flowProps()} />);
-
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    const continueButton = screen.getByRole("button", { name: "Continue" });
-    expect(continueButton).toBeEnabled();
-    expect(continueButton).toHaveClass("primary-action", "primary-solid", "onboarding-continue");
-    expect(screen.getByRole("radio", { name: /Clearheaded/ })).toBeChecked();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Clearheaded tone. What should we make clearer first?",
-    );
-
-    // One canonical character on the stage; the options stay text-only.
-    const stage = container.querySelector(".onboarding-personality-stage");
-    expect(container.querySelectorAll(".onboarding-character")).toHaveLength(1);
-    expect(stage).toContainElement(
-      screen.getByRole("group", { name: "Choose Clovy's greeting mood" }),
-    );
-    expect(container.querySelector(".onboarding-personality-check")).toBeNull();
-    expect(stage).toHaveAttribute("data-mood", "clearheaded");
-    expect(stage).toHaveTextContent("What should we make clearer first?");
-    expect(stage?.querySelector(".onboarding-character-eyes-clearheaded path")).toHaveAttribute(
-      "d",
-      CLOVY_EYES_PATH,
-    );
-
-    // Rapid changes retarget the same single stage character.
-    await user.click(screen.getByRole("radio", { name: /Calm/ }));
-    expect(stage?.querySelector(".onboarding-character-eyes-calm path")).toHaveAttribute(
-      "transform",
-      "translate(91.9873 126)",
-    );
-    expect(stage?.querySelector(".onboarding-character-eyes-calm path")?.getAttribute("d")).toMatch(
-      /^M15\.6397 0/,
-    );
-    await user.click(screen.getByRole("radio", { name: /Quick-witted/ }));
-    expect(container.querySelectorAll(".onboarding-character")).toHaveLength(1);
-    expect(stage).toHaveAttribute("data-mood", "quick-witted");
-    expect(stage?.querySelector(".onboarding-character-eyes-quick > g")).toHaveAttribute(
-      "transform",
-      "translate(94 109)",
-    );
-    expect(stage?.querySelectorAll(".onboarding-character-eyes-quick path")).toHaveLength(2);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Quick-witted tone. All right, what's first?",
-    );
-    expect(stage).toHaveTextContent("All right, what's first?");
-
-    await user.click(screen.getByRole("radio", { name: /Strategic/ }));
-    expect(stage?.querySelector(".onboarding-character-eyes-strategic > g")).toHaveAttribute(
-      "transform",
-      "translate(80.14 96.37) scale(0.78)",
-    );
-    expect(stage?.querySelectorAll(".onboarding-character-eyes-strategic path")).toHaveLength(4);
-    expect(stage?.querySelector(".onboarding-character-eyes-strategic > g > g")).toHaveAttribute(
-      "transform",
-      "translate(62 0) scale(0.86 1) translate(-62 0)",
-    );
-    await user.click(screen.getByRole("radio", { name: /Quick-witted/ }));
-    await user.click(continueButton);
-
-    expect(onboardingMood()).toBe("quick-witted");
     await screen.findByRole("heading", { name: "Let Clovy listen and type" });
   });
 
@@ -465,7 +274,7 @@ describe("OnboardingFlow", () => {
       },
     });
     render(<OnboardingFlow {...flowProps()} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
+    await screen.findByRole("heading", { name: "Where could I help most?" });
 
     await waitFor(() =>
       expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
@@ -500,83 +309,10 @@ describe("OnboardingFlow", () => {
       },
     });
     render(<OnboardingFlow {...flowProps()} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
+    await screen.findByRole("heading", { name: "Where could I help most?" });
 
     await waitFor(() => expect(mocks.dictationSettings).toHaveBeenCalledOnce());
     expect(mocks.setDictationShortcut).not.toHaveBeenCalled();
-  });
-
-  it("signs the user in from the first step", async () => {
-    const user = userEvent.setup();
-    const onAccountChanged = vi.fn();
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    const { rerender } = render(
-      <OnboardingFlow {...flowProps({ account: signedOutAccount, onAccountChanged })} />,
-    );
-
-    await screen.findByRole("heading", { name: "Welcome to Clovy" });
-    await user.click(screen.getByRole("button", { name: "Continue with OpenSoftware" }));
-
-    expect(mocks.osAccountsLogin).toHaveBeenCalledOnce();
-    await waitFor(() => expect(onAccountChanged).toHaveBeenCalledWith(account));
-    rerender(<OnboardingFlow {...flowProps({ account, onAccountChanged })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-  });
-
-  it("opens the Clovy community from the welcome step", async () => {
-    const user = userEvent.setup();
-    render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
-
-    await screen.findByRole("heading", { name: "Welcome to Clovy" });
-    await user.click(
-      screen.getByRole("button", {
-        name: "Join the Clovy community on Telegram",
-      }),
-    );
-
-    expect(mocks.clovyOpenCommunityPage).toHaveBeenCalledOnce();
-  });
-
-  it("shows Windows-accurate welcome copy", async () => {
-    const restoreNavigator = stubNavigatorPlatform(
-      "Win32",
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
-    try {
-      render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
-
-      await screen.findByRole("heading", { name: "Welcome to Clovy" });
-      expect(screen.getByText("Write with your voice")).toBeInTheDocument();
-      expect(screen.getByText("Turn speech into polished text in any app.")).toBeInTheDocument();
-      expect(screen.getByText("Capture meetings")).toBeInTheDocument();
-      expect(screen.getByText("Delegate real work")).toBeInTheDocument();
-    } finally {
-      restoreNavigator();
-    }
-  });
-
-  it("does not ask unsubscribed users for a card during onboarding", async () => {
-    const user = userEvent.setup();
-    const onComplete = vi.fn();
-    render(<OnboardingFlow {...flowProps({ account: unsubscribedAccount, onComplete })} />);
-    await screen.findByRole("heading", { name: "Help improve Clovy" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Where could I help most?" });
-    await user.click(screen.getByRole("radio", { name: /Work/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose my personality" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Let Clovy listen and type" });
-
-    grantPermissions();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-
-    expect(screen.queryByRole("heading", { name: /free trial/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Start free trial/i })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Talk to Clovy" })).toBeNull();
-    expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
   });
 
   it("resumes a legacy practice step at permissions", async () => {
@@ -617,14 +353,6 @@ describe("OnboardingFlow", () => {
 
     expect(isOnboardingComplete()).toBe(false);
     expect(onboardingResumeStep()).toBeNull();
-  });
-
-  it("accepts the June-era onboarding replay variable as a fallback", () => {
-    markOnboardingComplete();
-
-    applyOnboardingReplayFlag({ DEV: true, VITE_JUNE_REPLAY_ONBOARDING: "1" });
-
-    expect(isOnboardingComplete()).toBe(false);
   });
 
   it("requests the mic permission when the mic screen shows", async () => {

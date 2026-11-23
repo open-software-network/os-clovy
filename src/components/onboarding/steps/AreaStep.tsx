@@ -4,6 +4,7 @@ import { IconDices } from "central-icons/IconDices";
 import { IconHomeRoundDoor } from "central-icons/IconHomeRoundDoor";
 import { IconSuitcaseWork } from "central-icons/IconSuitcaseWork";
 import { useState } from "react";
+import { type MessageKey, useT } from "../../../i18n";
 import {
   ONBOARDING_AREAS,
   ONBOARDING_AREA_MOOD_PRESETS,
@@ -16,34 +17,35 @@ import { StepActions, StepCard } from "../StepChrome";
 const AREA_PRESENTATION: Record<
   OnboardingArea,
   {
-    label: string;
-    description: string;
+    label: MessageKey;
+    description: MessageKey;
     icon: typeof IconSuitcaseWork;
   }
 > = {
   work: {
-    label: "Work",
-    description: "Meetings, follow-ups, and focused work",
+    label: "onboarding.area.work.label",
+    description: "onboarding.area.work.description",
     icon: IconSuitcaseWork,
   },
   personal: {
-    label: "Personal",
-    description: "Plans, journaling, and everyday life",
+    label: "onboarding.area.personal.label",
+    description: "onboarding.area.personal.description",
     icon: IconHomeRoundDoor,
   },
   thinking: {
-    label: "Thinking",
-    description: "Ideas, writing, and clearer decisions",
+    label: "onboarding.area.thinking.label",
+    description: "onboarding.area.thinking.description",
     icon: IconBrainSideview,
   },
   play: {
-    label: "Play",
-    description: "Stories, characters, and creative projects",
+    label: "onboarding.area.play.label",
+    description: "onboarding.area.play.description",
     icon: IconDices,
   },
 };
 
 export function AreaStep({ onContinue }: { onContinue: (area: OnboardingArea) => void }) {
+  const t = useT();
   const [selected, setSelected] = useState<OnboardingArea | null>(() => onboardingArea());
   const [focusVisible, setFocusVisible] = useState<OnboardingArea | null>(null);
 
@@ -55,13 +57,13 @@ export function AreaStep({ onContinue }: { onContinue: (area: OnboardingArea) =>
 
   return (
     <StepCard
-      title="Where could I help most?"
-      subtitle="Pick the part of life you'd most like me to make easier."
+      title={t("onboarding.area.title")}
+      subtitle={t("onboarding.area.subtitle")}
       wide
       className="onboarding-card-moods onboarding-card-areas"
     >
       <fieldset className="onboarding-mood-grid onboarding-area-grid">
-        <legend className="visually-hidden">Choose where Clovy should help first</legend>
+        <legend className="visually-hidden">{t("onboarding.area.legend")}</legend>
         {ONBOARDING_AREAS.map((area) => {
           const active = area === selected;
           const { label, description, icon: Icon } = AREA_PRESENTATION[area];
@@ -93,8 +95,8 @@ export function AreaStep({ onContinue }: { onContinue: (area: OnboardingArea) =>
                 <Icon size={20} />
               </span>
               <span className="onboarding-mood-copy">
-                <span className="onboarding-mood-name">{label}</span>
-                <span className="onboarding-mood-description">{description}</span>
+                <span className="onboarding-mood-name">{t(label)}</span>
+                <span className="onboarding-mood-description">{t(description)}</span>
               </span>
             </label>
           );

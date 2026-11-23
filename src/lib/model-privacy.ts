@@ -1,5 +1,6 @@
-import { AUTO_MODEL_ID } from "./agent-model-selection";
-import type { ProviderModelMode, VeniceModelDto } from "./tauri";
+import { type MessageKey, t } from "../i18n/translate";
+const AUTO_MODEL_ID = "open-software/auto";
+import type { BuiltinProvider, ProviderModelDto, ProviderModelMode } from "./tauri";
 
 export type ModelPrivacyMode = "e2ee" | "private" | "anonymous";
 
@@ -31,6 +32,8 @@ export function dispatchProviderModelSettingsChanged(detail: ProviderModelSettin
   );
 }
 
+// English reference copy (the badge itself reads the interface language from
+// the `lib.modelPrivacy.*` catalog keys at call time).
 export const E2EE_MODEL_DESCRIPTION =
   "Private model with end-to-end encryption. Your prompt is encrypted on your device and only decrypted inside a hardware-secured enclave (TEE); the response is encrypted before it leaves the enclave. No prompt data is ever readable by the model provider or its infrastructure.";
 export const PRIVATE_MODEL_DESCRIPTION =
@@ -38,17 +41,17 @@ export const PRIVATE_MODEL_DESCRIPTION =
 export const ANONYMOUS_MODEL_DESCRIPTION =
   "The model provider may retain prompts, though they're anonymized. Your identity is stripped before anything leaves Clovy. For sensitive content, pick a Private or E2EE model.";
 
-type ModelPrivacySignals = Pick<VeniceModelDto, "privacy" | "traits"> &
-  Partial<Pick<VeniceModelDto, "capabilities">>;
+type ModelPrivacySignals = Pick<ProviderModelDto, "privacy" | "traits"> &
+  Partial<Pick<ProviderModelDto, "capabilities">>;
 
 /** The agent drives everything through tool calls, so a text model without
  * function calling bricks Clovy — prompts run but no file, shell, or memory
- * tool ever executes. Venice's E2EE models are the common case: encrypted
- * inference can't expose tools. The capability name comes from Venice's
- * catalog (`supportsFunctionCalling`); match defensively on the normalized
- * name so a rename to snake_case or "tool calling" keeps working. */
+ * tool ever executes. The capability name comes from the provider catalog
+ * (`supportsFunctionCalling`, derived from the provider's supported
+ * parameters); match defensively on the normalized name so a rename to
+ * snake_case or "tool calling" keeps working. */
 export function modelSupportsTools(
-  model: Partial<Pick<VeniceModelDto, "capabilities" | "provider">>,
+  model: Partial<Pick<ProviderModelDto, "capabilities" | "provider">>,
 ) {
   // A bring-your-own local endpoint can't be probed for function-calling
   // support from the catalog, and hard-blocking it would make the feature
@@ -64,29 +67,31 @@ export function modelSupportsTools(
 
 export function modelAvailableForMode(
   mode: ProviderModelMode,
-  model: Partial<Pick<VeniceModelDto, "id" | "capabilities" | "provider">>,
+  model: Partial<Pick<ProviderModelDto, "id" | "capabilities" | "provider">>,
 ) {
-  // Auto is Clovy's first-party router, not a concrete provider model. Its
-  // catalog row therefore does not need to duplicate every capability of the
-  // concrete model selected at request time.
-  if (mode === "generation" && model.id === AUTO_MODEL_ID) return true;
-  if (mode === "generation" && model.provider && !modelSupportsTools(model)) {
-    return false;
-  }
+  // Text models generate notes; they do not need to call tools.
+  if (mode === "generation" && model.id === AUTO_MODEL_ID) return false;
   return true;
 }
 
+/** Interface-language display name of each provider a user can save a key for. */
+export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
+  groq: "settings.providerKeys.groq.name",
+  openrouter: "settings.providerKeys.openrouter.name",
+  fal: "settings.providerKeys.fal.name",
+  tavily: "settings.providerKeys.tavily.name",
+};
+
 /** Whether the model can read image input (vision). Mirrors
  * `modelSupportsTools`: key off the authoritative capability flag on
- * `capabilities` only, never `traits`. Venice's backend emits a capability
- * string only when its boolean is true (`collect_capability_names` in
- * clovy-api), so `capabilities` reliably lists genuine vision support. `traits`
- * is descriptive/marketing text (e.g. "multimodal") that conflates image
- * OUTPUT with image INPUT — matching it would let the image-attach fallback
- * switch to a model that can't actually read the image. The capability name
- * comes from Venice's catalog (`supportsVision`); match defensively on the
- * normalized name so a rename to snake_case keeps working. */
-export function modelSupportsImageInput(model: Partial<Pick<VeniceModelDto, "capabilities">>) {
+ * `capabilities` only, never `traits`. The catalog lists a capability only when
+ * the provider catalog reports it (image input for `supportsVision`), so
+ * `capabilities` reliably lists genuine vision support. `traits` is
+ * descriptive text that conflates image OUTPUT with image INPUT — matching it
+ * would let the image-attach fallback switch to a model that can't actually
+ * read the image. Match defensively on the normalized name so a rename to
+ * snake_case keeps working. */
+export function modelSupportsImageInput(model: Partial<Pick<ProviderModelDto, "capabilities">>) {
   return (model.capabilities ?? []).some((capability) => {
     const normalized = capability.toLowerCase().replace(/[^a-z]/g, "");
     return normalized.includes("supportsvision");
@@ -102,22 +107,22 @@ export function modelPrivacyBadge(
   if (flags.e2ee) {
     return {
       mode: "e2ee",
-      label: "E2EE",
-      description: E2EE_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.e2eeLabel"),
+      description: t("lib.modelPrivacy.e2eeDescription"),
     };
   }
   if (flags.private) {
     return {
       mode: "private",
-      label: "Private mode",
-      description: PRIVATE_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.privateLabel"),
+      description: t("lib.modelPrivacy.privateDescription"),
     };
   }
   if (flags.anonymous) {
     return {
       mode: "anonymous",
-      label: "Anonymous mode",
-      description: ANONYMOUS_MODEL_DESCRIPTION,
+      label: t("lib.modelPrivacy.anonymousLabel"),
+      description: t("lib.modelPrivacy.anonymousDescription"),
     };
   }
   return undefined;

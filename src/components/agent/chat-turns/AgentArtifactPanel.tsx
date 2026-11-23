@@ -13,6 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useT } from "../../../i18n";
 import { agentFilePreview, agentFileText } from "../../../lib/tauri";
 import { useScrollFade } from "../../../lib/use-scroll-fade";
 import { SegmentedControl } from "../../ui/SegmentedControl";
@@ -39,9 +40,10 @@ export function AgentArtifactList({
   onDownload?: (artifact: AgentArtifact) => void;
   onOpen?: (artifact: AgentArtifact) => void;
 }) {
+  const t = useT();
   if (!artifacts.length) return null;
   return (
-    <div className="agent-artifact-list" aria-label="Generated files">
+    <div className="agent-artifact-list" aria-label={t("chat.files.generatedFiles")}>
       {artifacts.map((artifact) => (
         <AgentArtifactCard
           key={artifact.path}
@@ -63,6 +65,7 @@ function AgentArtifactCard({
   onDownload?: (artifact: AgentArtifact) => void;
   onOpen?: (artifact: AgentArtifact) => void;
 }) {
+  const t = useT();
   const ArtifactIcon = fileTypeIconComponent(artifact.path);
   const summary = (
     <>
@@ -84,7 +87,7 @@ function AgentArtifactCard({
         <button
           type="button"
           className="agent-artifact-open"
-          aria-label={`Open ${artifact.name}`}
+          aria-label={t("chat.openNamed", { name: artifact.name })}
           onClick={() => onOpen(artifact)}
         >
           {summary}
@@ -96,8 +99,8 @@ function AgentArtifactCard({
         <button
           type="button"
           className="agent-artifact-download"
-          aria-label={`Download ${artifact.name}`}
-          title="Download"
+          aria-label={t("chat.files.downloadNamed", { name: artifact.name })}
+          title={t("chat.media.download")}
           onClick={() => onDownload(artifact)}
         >
           <IconArrowInbox size={16} />
@@ -145,6 +148,7 @@ export function AgentArtifactPanel({
   onDownload: (artifact: AgentArtifact) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const artifact = state.view === "file" ? state.artifact : null;
   const [preview, setPreview] = useState<AgentArtifactPreview>({
     kind: "loading",
@@ -236,7 +240,7 @@ export function AgentArtifactPanel({
   // In the list the magnifier filters file names; on a text preview it finds
   // within the document. Images and binaries have nothing to search.
   const searchable = !artifact || preview.kind === "text";
-  const filterLabel = artifact ? "Find in file" : "Filter files";
+  const filterLabel = artifact ? t("chat.files.findInFile") : t("chat.files.filterFiles");
 
   // Find-in-file re-renders the whole document, so the highlight trails the
   // keystrokes slightly instead of re-parsing a near-2 MB file on each one.
@@ -305,13 +309,13 @@ export function AgentArtifactPanel({
         className="agent-files-resize-handle"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize files panel"
+        aria-label={t("chat.files.resizePanel")}
         onPointerDown={startResize}
       />
       <aside
         ref={panelRef}
         className="agent-artifact-panel"
-        aria-label="Files"
+        aria-label={t("chat.files.title")}
         data-entered={entered ? "true" : undefined}
         onAnimationEnd={(event) => {
           if (event.animationName === "agent-artifact-panel-in") setEntered(true);
@@ -322,8 +326,8 @@ export function AgentArtifactPanel({
             <button
               type="button"
               className="icon-button"
-              aria-label="All files"
-              title="All files"
+              aria-label={t("chat.files.allFiles")}
+              title={t("chat.files.allFiles")}
               onClick={onShowList}
             >
               <IconChevronLeftSmall size={16} />
@@ -365,12 +369,15 @@ export function AgentArtifactPanel({
               {artifact && query.trim() ? (
                 <span className="agent-artifact-match-navigation">
                   <output className="agent-artifact-match-status" aria-live="polite">
-                    {matchCount > 0 ? activeMatchIndex + 1 : 0} of {matchCount}
+                    {t("chat.files.matchStatus", {
+                      current: matchCount > 0 ? activeMatchIndex + 1 : 0,
+                      total: matchCount,
+                    })}
                   </output>
                   <button
                     type="button"
                     className="icon-button agent-artifact-match-button"
-                    aria-label="Previous match"
+                    aria-label={t("chat.files.previousMatch")}
                     disabled={matchCount === 0}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => navigateMatches(-1)}
@@ -380,7 +387,7 @@ export function AgentArtifactPanel({
                   <button
                     type="button"
                     className="icon-button agent-artifact-match-button"
-                    aria-label="Next match"
+                    aria-label={t("chat.files.nextMatch")}
                     disabled={matchCount === 0}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => navigateMatches(1)}
@@ -392,8 +399,8 @@ export function AgentArtifactPanel({
               <button
                 type="button"
                 className="agent-artifact-filter-clear"
-                aria-label={query ? "Clear filter" : "Close filter"}
-                title={query ? "Clear" : "Close"}
+                aria-label={query ? t("chat.files.clearFilter") : t("chat.files.closeFilter")}
+                title={query ? t("chat.files.clear") : t("common.close")}
                 // Mirrors the Esc ladder for the mouse: clear the query
                 // first, then collapse back to the magnifier. mousedown is
                 // suppressed so clearing doesn't blur (and collapse) the
@@ -408,7 +415,9 @@ export function AgentArtifactPanel({
               </button>
             </label>
           ) : (
-            <h2 className="agent-artifact-panel-title">{artifact ? artifact.name : "Files"}</h2>
+            <h2 className="agent-artifact-panel-title">
+              {artifact ? artifact.name : t("chat.files.title")}
+            </h2>
           )}
           {searchable && !filterOpen ? (
             <button
@@ -425,8 +434,8 @@ export function AgentArtifactPanel({
             <button
               type="button"
               className="icon-button"
-              aria-label={`Download ${artifact.name}`}
-              title="Download"
+              aria-label={t("chat.files.downloadNamed", { name: artifact.name })}
+              title={t("chat.media.download")}
               onClick={() => onDownload(artifact)}
             >
               <IconArrowInbox size={15} />
@@ -435,8 +444,8 @@ export function AgentArtifactPanel({
           <button
             type="button"
             className="icon-button"
-            aria-label="Close files"
-            title="Close"
+            aria-label={t("chat.files.closeFiles")}
+            title={t("common.close")}
             onClick={onClose}
           >
             <IconCrossMedium size={15} />
@@ -445,12 +454,12 @@ export function AgentArtifactPanel({
         {markdown ? (
           <div className="agent-artifact-panel-mode">
             <SegmentedControl
-              aria-label="File view"
+              aria-label={t("chat.files.fileView")}
               value={showSource ? "source" : "preview"}
               onValueChange={(value) => setShowSource(value === "source")}
               options={[
-                { value: "preview", label: "Preview" },
-                { value: "source", label: "Source" },
+                { value: "preview", label: t("chat.files.preview") },
+                { value: "source", label: t("chat.files.source") },
               ]}
             />
           </div>
@@ -487,14 +496,14 @@ export function AgentArtifactPanel({
               </pre>
             ) : (
               <div className="agent-artifact-panel-empty">
-                <p>No preview for this file.</p>
+                <p>{t("chat.files.noPreview")}</p>
                 <button
                   type="button"
                   className="btn btn-secondary"
                   onClick={() => onDownload(artifact)}
                 >
                   <IconArrowInbox size={14} />
-                  Download
+                  {t("chat.media.download")}
                 </button>
               </div>
             )}
@@ -529,7 +538,7 @@ export function AgentArtifactPanel({
                   })}
                 </ul>
               ) : (
-                <p className="agent-artifact-search-empty">No files match.</p>
+                <p className="agent-artifact-search-empty">{t("chat.files.noMatches")}</p>
               )}
             </div>
           </>

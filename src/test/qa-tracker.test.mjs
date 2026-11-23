@@ -58,29 +58,6 @@ describe("feature user-story tracker", () => {
     }
   });
 
-  it("has actionable status fields for every story", () => {
-    const required = [
-      "Story ID",
-      "Area",
-      "Feature",
-      "User story",
-      "Expected behavior",
-      "Code refs",
-      "Automated coverage",
-      "Test status",
-      "Defect status",
-      "Priority",
-    ];
-
-    for (const row of rows) {
-      for (const column of required) {
-        expect(row[columnIndex[column]], `${row[0]} ${column}`).not.toBe("");
-      }
-      expect(row[columnIndex["Test status"]]).not.toMatch(/not run|todo/i);
-      expect(row[columnIndex["Defect status"]]).not.toMatch(/not logged/i);
-    }
-  });
-
   it("keeps code and coverage references resolvable", () => {
     for (const row of rows) {
       const id = row[columnIndex["Story ID"]];

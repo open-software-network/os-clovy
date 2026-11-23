@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { useT } from "../../i18n";
 import type { RecordingStatusDto } from "../../lib/tauri";
 import { combineSourceAudioLevels, Waveform } from "./Waveform";
 import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
@@ -17,6 +18,7 @@ type GlobalRecorderPillProps = {
 // version quieter than the native HUD: a contained waveform. Click to return
 // to the note for controls.
 export function GlobalRecorderPill({ status, title, onOpen }: GlobalRecorderPillProps) {
+  const t = useT();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const recording = status.state === "recording";
   useRecordingPresenceBounds(buttonRef);
@@ -33,8 +35,8 @@ export function GlobalRecorderPill({ status, title, onOpen }: GlobalRecorderPill
       className="global-recorder-pill"
       data-state={status.state}
       onClick={onOpen}
-      aria-label={`Open recording: ${title}`}
-      title="Open recording"
+      aria-label={t("recorder.openRecordingNamed", { title })}
+      title={t("recorder.openRecording")}
     >
       <Waveform level={meterLevel} sessionId={status.sessionId} active={recording} />
     </button>

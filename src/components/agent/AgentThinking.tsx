@@ -1,4 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { useT } from "../../i18n";
 
 // Framer transforms require same-shape numeric values, so this mirrors the
 // 2px --sp-px token rather than passing that CSS variable into the mixer.
@@ -16,6 +17,7 @@ export function AgentThinking({
   visible: boolean;
   variant?: "label" | "typing-bubble";
 }) {
+  const t = useT();
   const reduceMotion = useReducedMotion();
 
   return (
@@ -41,7 +43,7 @@ export function AgentThinking({
         >
           {variant === "typing-bubble" ? (
             <>
-              <span className="visually-hidden">Clovy is typing</span>
+              <span className="visually-hidden">{t("agent.thinking.typing")}</span>
               <span className="agent-typing-dots" aria-hidden="true">
                 <span />
                 <span />
@@ -49,7 +51,9 @@ export function AgentThinking({
               </span>
             </>
           ) : (
-            <span className="text-shimmer shimmer agent-thinking-label">Thinking…</span>
+            <span className="text-shimmer shimmer agent-thinking-label">
+              {t("agent.thinking.label")}
+            </span>
           )}
         </motion.div>
       ) : null}

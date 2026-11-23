@@ -85,6 +85,8 @@ extension AudioObjectID {
 final class SystemAudioRecorder {
     private let outputURL: URL?
     private let statusURL: URL?
+    private let admissionURL: URL?
+    private var admissionConsumed = false
     private let pidURL: URL?
     private let logURL: URL?
     private let timelineOffset: TimeInterval
@@ -118,9 +120,10 @@ final class SystemAudioRecorder {
     private var powerAssertionID: IOPMAssertionID = 0
     private var rebuildScheduled = false
 
-    init(outputURL: URL?, statusURL: URL?, pidURL: URL?, logURL: URL?, timelineOffset: TimeInterval) {
+    init(outputURL: URL?, statusURL: URL?, pidURL: URL?, logURL: URL?, timelineOffset: TimeInterval, admissionURL: URL? = nil) {
         self.outputURL = outputURL
         self.statusURL = statusURL
+        self.admissionURL = admissionURL
         self.pidURL = pidURL
         self.logURL = logURL
         self.timelineOffset = timelineOffset
@@ -161,8 +164,6 @@ final class SystemAudioRecorder {
             try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
         cleanupStaleAggregateDevices(named: "Clovy System Audio")
-        // Also sweep aggregates left behind by pre-rename "June" builds.
-        cleanupStaleAggregateDevices(named: "June System Audio")
         if !checkOnly {
             acquirePowerAssertion()
         }
@@ -282,6 +283,20 @@ final class SystemAudioRecorder {
             throw "Failed to create audio IO callback: \(err)"
         }
         log("created IO callback")
+
+        // Agent starts prepare all CoreAudio resources first. Only the host
+        // can release this one-shot gate after revalidating its live turn.
+        if let admissionURL, !admissionConsumed {
+            emit(["event": "prepared", "output": outputURL?.path ?? "check"])
+            let deadline = Date().addingTimeInterval(30)
+            while !FileManager.default.fileExists(atPath: admissionURL.path) {
+                guard Date() < deadline else { throw "System audio host admission expired." }
+                // Do not re-enter graph rebuild callbacks before admission.
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            try FileManager.default.removeItem(at: admissionURL)
+            admissionConsumed = true
+        }
 
         err = AudioDeviceStart(aggregateDeviceID, deviceProcID)
         guard err == noErr else {
@@ -783,6 +798,13 @@ func emitProcessStatus(_ object: [String: String], statusPath: String?) {
     try? data.write(to: URL(fileURLWithPath: statusPath))
 }
 
+// This probe exits before permission checks, graph setup or capture. Older
+// helpers reject it without --output, allowing the host to fail closed.
+if CommandLine.arguments.contains("--admission-protocol") {
+    print("1")
+    exit(0)
+}
+
 let statusPath = argumentValue("--status", from: CommandLine.arguments)
 let logPath = argumentValue("--log", from: CommandLine.arguments)
 
@@ -812,7 +834,7 @@ let pidPath = argumentValue("--pid", from: CommandLine.arguments)
 let timelineOffsetMs = argumentValue("--timeline-offset-ms", from: CommandLine.arguments).flatMap(Double.init) ?? 0
 if !checkOnly && outputPath == nil {
     writeLog("missing output argument", logURL: logPath.map { URL(fileURLWithPath: $0) })
-    emitProcessStatus(["event": "error", "message": "Usage: june-system-audio-recorder --output /path/to/recording.wav"], statusPath: statusPath)
+    emitProcessStatus(["event": "error", "message": "Usage: clovy-system-audio-recorder --output /path/to/recording.wav"], statusPath: statusPath)
     exit(2)
 }
 
@@ -822,7 +844,8 @@ let recorder = SystemAudioRecorder(
     statusURL: statusPath.map { URL(fileURLWithPath: $0) },
     pidURL: pidPath.map { URL(fileURLWithPath: $0) },
     logURL: helperLogURL,
-    timelineOffset: max(0, timelineOffsetMs) / 1000
+    timelineOffset: max(0, timelineOffsetMs) / 1000,
+    admissionURL: argumentValue("--admission", from: CommandLine.arguments).map { URL(fileURLWithPath: $0) }
 )
 recorder.writePid()
 

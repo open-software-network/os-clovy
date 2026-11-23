@@ -12,16 +12,16 @@ use tauri::Manager;
 ///
 /// Pending renderer note saves get a bounded first step (10 s), long enough for
 /// an in-flight SQLite patch to return before the renderer acknowledges.
-/// Dictation, Computer use, and the agent runtime then stop concurrently under
+/// Dictation, Computer use, and CLI chat turns then stop concurrently under
 /// the same bounded deadline.
 const SHUTDOWN_AGGREGATE_DEADLINE_MS: u64 = 20_000;
 const SHUTDOWN_AGGREGATE_DEADLINE: Duration = Duration::from_millis(SHUTDOWN_AGGREGATE_DEADLINE_MS);
-const AGENT_RUNTIME_SHUTDOWN_BUDGET_MS: u64 = 2_000;
+const CLI_SHUTDOWN_BUDGET_MS: u64 = 5_000;
 const EXIT_FALLBACK_DEADLINE: Duration = SHUTDOWN_AGGREGATE_DEADLINE;
 #[cfg(windows)]
 const UPDATER_AGGREGATE_DEADLINE_MS: u64 = SHUTDOWN_AGGREGATE_DEADLINE_MS
     + crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS
-    + AGENT_RUNTIME_SHUTDOWN_BUDGET_MS;
+    + CLI_SHUTDOWN_BUDGET_MS;
 #[cfg(windows)]
 const UPDATER_AGGREGATE_DEADLINE: Duration = Duration::from_millis(UPDATER_AGGREGATE_DEADLINE_MS);
 const MUTEX_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -29,7 +29,7 @@ const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const _: () = assert!(
     SHUTDOWN_AGGREGATE_DEADLINE_MS
-        >= crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS + AGENT_RUNTIME_SHUTDOWN_BUDGET_MS
+        >= crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS + CLI_SHUTDOWN_BUDGET_MS
 );
 
 /// One absolute deadline shared by every leaf in a supervised cleanup run.
@@ -50,7 +50,7 @@ impl ShutdownDeadline {
         }
     }
 
-    fn remaining(self) -> Duration {
+    pub(crate) fn remaining(self) -> Duration {
         self.expires_at.saturating_duration_since(Instant::now())
     }
 
@@ -148,6 +148,41 @@ impl ShutdownCoordinator {
     fn is_idle(&self) -> bool {
         matches!(*self.lock_phase(), ShutdownPhase::Idle)
     }
+
+    /// Blocks until the in-flight shutdown either finalizes or is cancelled
+    /// (a failed note-save barrier returns the phase to Idle).
+    fn wait_for_resolution(&self) -> ShutdownResolution {
+        let mut phase = self.lock_phase();
+        loop {
+            match *phase {
+                ShutdownPhase::Idle => return ShutdownResolution::Cancelled,
+                ShutdownPhase::Finalizing(_) => return ShutdownResolution::Finalizing,
+                ShutdownPhase::Running(_) => {
+                    phase = self
+                        .phase_changed
+                        .wait(phase)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+        }
+    }
+}
+
+/// How a shutdown request ended for its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownResolution {
+    Finalizing,
+    Cancelled,
+}
+
+fn restart_result(resolution: ShutdownResolution) -> Result<(), AppError> {
+    match resolution {
+        ShutdownResolution::Finalizing => Ok(()),
+        ShutdownResolution::Cancelled => Err(AppError::new(
+            "update_relaunch_cancelled",
+            "Pending note edits could not be saved, so Clovy did not restart. Try again.",
+        )),
+    }
 }
 
 /// Intercepts ordinary Tauri exit requests while the main event loop can still
@@ -223,8 +258,20 @@ pub(crate) fn handle_exit(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn request_restart(app: &tauri::AppHandle) -> Result<(), AppError> {
-    request(app, ShutdownTarget::Restart)
+/// Starts (or joins) a restart and resolves when it either finalizes or is
+/// cancelled, so the caller can offer another try after a failed note-save
+/// barrier instead of waiting forever.
+pub(crate) async fn request_restart(app: &tauri::AppHandle) -> Result<(), AppError> {
+    request(app, ShutdownTarget::Restart)?;
+    let waiting_app = app.clone();
+    let resolution = tauri::async_runtime::spawn_blocking(move || {
+        waiting_app
+            .state::<ShutdownCoordinator>()
+            .wait_for_resolution()
+    })
+    .await
+    .map_err(|error| AppError::new("update_relaunch_failed", error.to_string()))?;
+    restart_result(resolution)
 }
 
 /// Prepares Windows for the updater's non-cancellable `install_inner` exit.
@@ -374,22 +421,32 @@ where
         .map(|_| ())
 }
 
-async fn run_cleanup(app: &tauri::AppHandle, _deadline: ShutdownDeadline) -> CleanupOutcome {
+async fn run_cleanup(app: &tauri::AppHandle, deadline: ShutdownDeadline) -> CleanupOutcome {
     // Renderer autosaves must drain while the webview and command runtime are
     // still alive. Keep this ordered before native child-process teardown.
     if !crate::note_save_flush::request(app).await {
         return CleanupOutcome::NoteSaveFlushFailed;
     }
 
+    if let Some(browser) = app.try_state::<std::sync::Arc<crate::browser_broker::BrowserBroker>>() {
+        browser.terminate_sessions(deadline);
+    }
+    crate::providers::local_transcriber::shutdown().await;
     let dictation_app = app.clone();
     let dictation =
         tauri::async_runtime::spawn_blocking(move || crate::dictation::stop_helper(&dictation_app));
     let computer_use = crate::computer_use::shutdown(app);
-    let agent_runtime = app.state::<crate::agent_runtime::AgentRuntimeHost>();
-    let (dictation_result, (), ()) =
-        tokio::join!(dictation, computer_use, agent_runtime.shutdown());
+    // CLI chat turns run in their own process groups, which application exit
+    // does not reach: stop them and wait before exiting or restarting.
+    let chat_engines = app.state::<crate::chat_engine::ChatEngineHost>();
+    let (dictation_result, (), ()) = tokio::join!(dictation, computer_use, chat_engines.shutdown());
     if let Err(error) = dictation_result {
         tracing::warn!(%error, "dictation shutdown worker could not be joined");
+    }
+    // Every CLI turn has ended (or its wait ran out): no turn token may bind
+    // an MCP connection any more.
+    if let Some(mcp) = app.try_state::<crate::mcp_server::McpServerState>() {
+        mcp.turns().revoke_all();
     }
     CleanupOutcome::Completed
 }
@@ -557,7 +614,40 @@ mod tests {
     use std::sync::Arc;
 
     fn deadline_covers_ordered_leaves(aggregate_ms: u64, leaves_ms: &[u64]) -> bool {
-        aggregate_ms >= leaves_ms.iter().sum()
+        aggregate_ms >= leaves_ms.iter().sum::<u64>()
+    }
+
+    #[test]
+    fn a_cancelled_restart_resolves_as_cancelled() {
+        let coordinator = Arc::new(ShutdownCoordinator::default());
+        coordinator.begin(ShutdownTarget::Restart);
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || coordinator.wait_for_resolution())
+        };
+        thread::sleep(Duration::from_millis(20));
+        coordinator.cancel(ShutdownTarget::Restart);
+        assert_eq!(waiter.join().unwrap(), ShutdownResolution::Cancelled);
+    }
+
+    #[test]
+    fn a_finalizing_restart_resolves_as_finalizing() {
+        let coordinator = Arc::new(ShutdownCoordinator::default());
+        coordinator.begin(ShutdownTarget::Restart);
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || coordinator.wait_for_resolution())
+        };
+        thread::sleep(Duration::from_millis(20));
+        coordinator.mark_finalizing(ShutdownTarget::Restart);
+        assert_eq!(waiter.join().unwrap(), ShutdownResolution::Finalizing);
+    }
+
+    #[test]
+    fn a_cancelled_restart_reports_a_retryable_error() {
+        let error = restart_result(ShutdownResolution::Cancelled).unwrap_err();
+        assert_eq!(error.code, "update_relaunch_cancelled");
+        assert!(restart_result(ShutdownResolution::Finalizing).is_ok());
     }
 
     #[test]
@@ -606,17 +696,34 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_deadline_covers_note_flush_and_agent_runtime_shutdown() {
+    fn aggregate_deadline_covers_note_flush_and_cli_shutdown() {
         assert!(deadline_covers_ordered_leaves(
             SHUTDOWN_AGGREGATE_DEADLINE_MS,
             &[
                 crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS,
-                AGENT_RUNTIME_SHUTDOWN_BUDGET_MS,
+                CLI_SHUTDOWN_BUDGET_MS,
             ],
         ));
         assert!(
             EXIT_FALLBACK_DEADLINE
                 >= Duration::from_millis(crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn updater_deadline_covers_cleanup_and_the_final_note_flush() {
+        assert!(deadline_covers_ordered_leaves(
+            UPDATER_AGGREGATE_DEADLINE_MS,
+            &[
+                SHUTDOWN_AGGREGATE_DEADLINE_MS,
+                crate::note_save_flush::NOTE_SAVE_FLUSH_TIMEOUT_MS,
+                CLI_SHUTDOWN_BUDGET_MS,
+            ],
+        ));
+        assert_eq!(
+            UPDATER_AGGREGATE_DEADLINE.as_millis(),
+            u128::from(UPDATER_AGGREGATE_DEADLINE_MS)
         );
     }
 
@@ -801,7 +908,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn timed_out_kill_is_eventually_reaped_by_a_detached_thread() {
+    fn zero_budget_termination_leaves_no_live_or_zombie_child() {
         use std::process::{Command, Stdio};
 
         let child = Command::new("/bin/sleep")
@@ -812,9 +919,10 @@ mod tests {
             .spawn()
             .expect("spawn child");
         let pid = child.id() as libc::pid_t;
-        assert_eq!(
+        // Reaping may complete immediately or move to the detached thread.
+        assert_ne!(
             terminate_child(child, Duration::ZERO, Duration::ZERO),
-            ChildTermination::TimedOut
+            ChildTermination::WaitFailed
         );
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -825,7 +933,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "detached reaper left the killed child as a zombie"
+                "zero-budget termination left the child alive or as a zombie"
             );
             thread::sleep(Duration::from_millis(10));
         }

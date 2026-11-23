@@ -1,51 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { modelSpecEntries } from "../components/settings/ModelPickerDialog";
-import type { VeniceModelDto } from "../lib/tauri";
+import type { ProviderModelDto } from "../lib/tauri";
 
-function model(overrides: Partial<VeniceModelDto>): VeniceModelDto {
+function model(overrides: Partial<ProviderModelDto>): ProviderModelDto {
   return {
-    provider: "venice",
+    provider: "openrouter",
     id: "test-model",
     name: "Test model",
     modelType: "text",
     traits: [],
     capabilities: [],
     ...overrides,
-  } as VeniceModelDto;
+  } as ProviderModelDto;
 }
 
 describe("modelSpecEntries", () => {
-  it("omits fixed pricing and context for the Auto router", () => {
-    const entries = modelSpecEntries(
-      model({
-        id: "open-software/auto",
-        priceUnit: "tokens",
-        inputCreditsPerMillionTokens: 2_100,
-        outputCreditsPerMillionTokens: 6_900,
-        contextTokens: 2_000_000,
-      }),
-    );
-
-    expect(entries).toEqual([]);
-  });
-
-  it("shows Clovy's billed credit price, never the raw upstream pricing", () => {
-    // Raw upstream pricing ($2/$6) is present but must be ignored: the backend
-    // keeps `pricing` as reference metadata and bills from the credit price
-    // (with margin), which here formats to $30 / $60.
+  it("shows provider USD per million tokens without credits", () => {
     const entries = modelSpecEntries(
       model({
         priceUnit: "tokens",
-        pricing: { input: { usd: 2 }, output: { usd: 6 } },
-        inputCreditsPerMillionTokens: 30_000,
-        outputCreditsPerMillionTokens: 60_000,
+        pricing: { unit: "per_million_tokens", input: { usd: 2 }, output: { usd: 6 } },
       }),
     );
-    expect(entries).toContainEqual({ label: "Input", value: "$30.00 /1M" });
-    expect(entries).toContainEqual({ label: "Output", value: "$60.00 /1M" });
-    const joined = entries.map((entry) => entry.value).join(" ");
-    expect(joined).not.toContain("$2.00");
-    expect(joined).not.toContain("$6.00");
+    expect(entries).toContainEqual({ label: "Input", value: "$2.00 /1M" });
+    expect(entries).toContainEqual({ label: "Output", value: "$6.00 /1M" });
   });
 
   it("falls back to the shared pricing label when there is no credit split", () => {

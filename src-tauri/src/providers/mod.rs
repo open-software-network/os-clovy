@@ -1,58 +1,204 @@
 //! Model-picker state. The Tauri side persists which transcription /
-//! generation models the user selected. Remote provider keys and URLs live in
-//! Clovy API; the opt-in "bring your own inference" local model stores an
-//! OpenAI-compatible endpoint (any http/https host) here. Advanced users may
-//! also store their own Venice API key locally; responses only expose whether
-//! one is present, never the key itself.
+//! generation / image / video models the user selected. Groq, OpenRouter and
+//! fal requests use the user's provider keys directly.
+//! The user's own providers (named OpenAI-compatible endpoints, agent CLIs, and
+//! the provider chosen per use) are the `llm` registry, also persisted here.
+//! Keys never live in `provider-settings.json`: endpoint keys and a user's own
+//! Groq / OpenRouter / fal / Tavily keys live in the Keychain store
+//! (`crate::llm::secrets`), and settings only record that one is saved.
+
+mod catalog;
+mod direct;
+#[cfg(test)]
+pub(crate) use direct::TEST_ORIGIN;
+pub(crate) mod fal;
+pub mod groq;
+pub mod local_transcriber;
+pub mod notes;
+pub mod openrouter;
+pub mod transcription;
 
 use crate::domain::types::AppError;
+use crate::llm::{
+    cli::CliKind,
+    registry::{LlmEndpointRecord, LlmRegistry, LlmUsageSelection, ProviderRef},
+    StructuredOutputLevel,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex, OnceLock},
     time::Duration,
 };
 use tauri::{AppHandle, Manager, State};
 
-pub const PROVIDER_OPENAI: &str = "openai";
-pub const PROVIDER_VENICE: &str = "venice";
+pub const PROVIDER_GROQ: &str = "groq";
+pub const PROVIDER_OPENROUTER: &str = "openrouter";
 pub const PROVIDER_LOCAL: &str = "local";
-pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
-pub const DEFAULT_GENERATION_MODEL: &str = "zai-org-glm-5-2";
-pub const AUTO_GENERATION_MODEL: &str = "open-software/auto";
-const LOCAL_AUTO_VISION_FALLBACK_MODEL: &str = "kimi-k2-6";
-pub const DEFAULT_COST_QUALITY: u8 = 100;
-pub const DEFAULT_IMAGE_MODEL: &str = "venice-sd35";
-pub const DEFAULT_VIDEO_MODEL: &str = "wan-2.2-a14b-text-to-video";
-/// Currently curated text-to-video model ids (mirrors `VIDEO_MODELS` in
-/// `src/lib/video-models.ts` and the clovy-api `video_pricing` allowlist). A
-/// persisted `video_model` outside this set — for example the delisted Seedance
-/// default that older installs saved before it was pulled from Venice — is
-/// migrated to `DEFAULT_VIDEO_MODEL` on load so generation keeps working after
-/// an update. Keep in sync when the curated list changes.
-pub const KNOWN_VIDEO_MODELS: &[&str] = &[
-    DEFAULT_VIDEO_MODEL,
-    "grok-imagine-text-to-video-private",
-    "ltx-2-19b-full-text-to-video",
+/// Groq Whisper default: multilingual and the lowest price per audio hour.
+pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "whisper-large-v3-turbo";
+/// The Groq Whisper models Clovy offers for dictation and notes (Groq
+/// speech-to-text docs). A persisted transcription model outside this set,
+/// such as an id saved before the Groq cutover, loads as the default so the
+/// next recording always uses a supported transcription model.
+pub const KNOWN_TRANSCRIPTION_MODELS: &[&str] = &[DEFAULT_TRANSCRIPTION_MODEL, "whisper-large-v3"];
+pub const DEFAULT_GENERATION_MODEL: &str = "z-ai/glm-5.2";
+pub const LEGACY_AUTO_GENERATION_MODEL: &str = "open-software/auto";
+/// Text ids saved before the OpenRouter cutover with matching OpenRouter ids. Settings migrate through this table once (see
+/// `remote_models_migrated`); any other pre-cutover id moves to the default.
+const LEGACY_TEXT_MODEL_EQUIVALENTS: &[(&str, &str)] = &[
+    ("zai-org-glm-5-2", "z-ai/glm-5.2"),
+    ("zai-org-glm-5-1", "z-ai/glm-5.1"),
+    ("zai-org-glm-5", "z-ai/glm-5"),
+    ("kimi-k2-6", "moonshotai/kimi-k2.6"),
+    ("kimi-k3", "moonshotai/kimi-k3"),
+    (
+        "nvidia-nemotron-3-nano-30b-a3b",
+        "nvidia/nemotron-3-nano-30b-a3b",
+    ),
 ];
+/// fal FLUX.1 [dev]: the default image model.
+pub const DEFAULT_IMAGE_MODEL: &str = "fal-ai/flux/dev";
+/// Curated fal image-generation endpoint ids (mirrors `IMAGE_MODELS` in
+/// `src/lib/image-models.ts`). A
+/// persisted `image_model` outside this set, such as an id saved before the fal
+/// cutover, loads as `DEFAULT_IMAGE_MODEL`. Keep in sync when the list changes.
+pub const KNOWN_IMAGE_MODELS: &[&str] = &[
+    DEFAULT_IMAGE_MODEL,
+    "fal-ai/flux/schnell",
+    "fal-ai/qwen-image",
+];
+/// fal Wan 2.2 A14B text-to-video: the default video model.
+pub const DEFAULT_VIDEO_MODEL: &str = "fal-ai/wan/v2.2-a14b/text-to-video";
+/// Curated fal text-to-video endpoint ids (mirrors `VIDEO_MODELS` in
+/// `src/lib/video-models.ts`). A
+/// persisted `video_model` outside this set, such as a delisted model or an id
+/// saved before the fal cutover, loads as `DEFAULT_VIDEO_MODEL` so generation
+/// keeps working after an update. Keep in sync when the curated list changes.
+pub const KNOWN_VIDEO_MODELS: &[&str] = &[DEFAULT_VIDEO_MODEL, "alibaba/wan-3.0/text-to-video"];
+/// The fast path's 5s / 720p / 16:9 shape is accepted by every curated video
+/// model; the direct fal adapter validates its supported ranges.
 pub const DEFAULT_VIDEO_DURATION: &str = "5s";
 pub const DEFAULT_VIDEO_RESOLUTION: &str = "720p";
-/// Some models (for example wan-2.2-a14b) reject a queue request that omits
-/// `aspect_ratio`, so the fast path injects a default when the caller names none.
 pub const DEFAULT_VIDEO_ASPECT_RATIO: &str = "16:9";
-const VENICE_API_BASE_URL: &str = "https://api.venice.ai/api/v1";
-const VENICE_API_KEY_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_VENICE_API_KEY_CHARS: usize = 4_096;
-
-// Kept exported under the legacy names so existing callers compile until they
-// migrate to the names above.
-pub use PROVIDER_OPENAI as OPENAI_PROVIDER;
-pub use PROVIDER_VENICE as VENICE_PROVIDER;
+const PROVIDER_API_KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PROVIDER_API_KEY_CHARS: usize = 4_096;
 
 static MODEL_SETTINGS: OnceLock<Mutex<ProviderModelSettings>> = OnceLock::new();
-static VENICE_VERIFY_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static PROVIDER_KEY_CHECK_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    crate::http_client::build_client(
+        crate::http_client::base_client_builder()
+            .timeout(PROVIDER_API_KEY_CHECK_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none()),
+        "provider_key_check",
+    )
+});
+
+/// Providers whose user-owned keys are stored locally. Groq transcribes,
+/// OpenRouter serves remote text, and fal generates media. Tavily credentials
+/// remain available for explicit connector configuration. Keys are sent only
+/// to their owning provider.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BuiltinProvider {
+    Groq,
+    OpenRouter,
+    Fal,
+    Tavily,
+}
+
+impl BuiltinProvider {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Groq => "groq",
+            Self::OpenRouter => "openrouter",
+            Self::Fal => "fal",
+            Self::Tavily => "tavily",
+        }
+    }
+
+    /// Keychain account of the user's key. Endpoint accounts are `ep-<uuid>`
+    /// or `local`, so the `builtin:` prefix never collides with one.
+    pub fn secret_account(self) -> &'static str {
+        match self {
+            Self::Groq => "builtin:groq",
+            Self::OpenRouter => "builtin:openrouter",
+            Self::Fal => "builtin:fal",
+            Self::Tavily => "builtin:tavily",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Groq => "Groq",
+            Self::OpenRouter => "OpenRouter",
+            Self::Fal => "fal",
+            Self::Tavily => "Tavily",
+        }
+    }
+
+    /// A documented endpoint that needs a valid key and runs no inference, so
+    /// saving a key costs nothing: Groq lists models, OpenRouter describes the
+    /// current key, fal prices the default image endpoint, and Tavily reports
+    /// the key's usage.
+    fn key_check_url(self) -> String {
+        match self {
+            Self::Groq => "https://api.groq.com/openai/v1/models".to_string(),
+            Self::OpenRouter => "https://openrouter.ai/api/v1/key".to_string(),
+            Self::Fal => {
+                let mut url = reqwest::Url::parse("https://api.fal.ai/v1/models/pricing")
+                    .expect("static fal pricing URL");
+                url.query_pairs_mut()
+                    .append_pair("endpoint_id", DEFAULT_IMAGE_MODEL);
+                url.to_string()
+            }
+            Self::Tavily => "https://api.tavily.com/usage".to_string(),
+        }
+    }
+
+    /// fal authenticates with `Key <key>`; the others take a bearer token.
+    fn authorize(self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+        match self {
+            Self::Fal => request.header(reqwest::header::AUTHORIZATION, format!("Key {api_key}")),
+            Self::Groq | Self::OpenRouter | Self::Tavily => request.bearer_auth(api_key),
+        }
+    }
+}
+
+/// Which providers have a user key saved in the Keychain store. Never the keys
+/// themselves; a saved key passed the provider's check when it was saved, and
+/// a later rejection surfaces on the request that uses it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProviderApiKeysConfigured {
+    pub groq: bool,
+    pub openrouter: bool,
+    pub fal: bool,
+    pub tavily: bool,
+}
+
+impl ProviderApiKeysConfigured {
+    pub fn get(&self, provider: BuiltinProvider) -> bool {
+        match provider {
+            BuiltinProvider::Groq => self.groq,
+            BuiltinProvider::OpenRouter => self.openrouter,
+            BuiltinProvider::Fal => self.fal,
+            BuiltinProvider::Tavily => self.tavily,
+        }
+    }
+
+    fn set(&mut self, provider: BuiltinProvider, configured: bool) {
+        let slot = match provider {
+            BuiltinProvider::Groq => &mut self.groq,
+            BuiltinProvider::OpenRouter => &mut self.openrouter,
+            BuiltinProvider::Fal => &mut self.fal,
+            BuiltinProvider::Tavily => &mut self.tavily,
+        };
+        *slot = configured;
+    }
+}
 
 pub struct ProviderSettingsState {
     path: PathBuf,
@@ -70,8 +216,6 @@ pub struct ProviderModelSettings {
     pub transcription_model: String,
     #[serde(default = "default_generation_model")]
     pub generation_model: String,
-    #[serde(default = "default_cost_quality")]
-    pub cost_quality: u8,
     #[serde(default = "default_generation_model")]
     pub remote_generation_model: String,
     // Defaulted so provider-settings.json files written before image
@@ -80,14 +224,38 @@ pub struct ProviderModelSettings {
     pub image_model: String,
     #[serde(default = "default_video_model")]
     pub video_model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub venice_api_key: Option<String>,
+    /// Which providers have a user key in the Keychain store (never the keys).
     #[serde(default)]
+    pub provider_api_keys_configured: ProviderApiKeysConfigured,
+    /// False on files saved before the Groq / OpenRouter / fal cutover: their
+    /// text model ids are migrated once on load (see `migrate_legacy_text_model`)
+    /// and the file is rewritten, which also drops the retired plaintext
+    /// `veniceApiKey` field without copying it anywhere.
+    #[serde(default)]
+    pub remote_models_migrated: bool,
+    /// The pre-registry single endpoint. Only read to migrate it into
+    /// `llm_endpoints`; kept on disk solely while the Keychain refuses its key.
+    #[serde(default, skip_serializing_if = "LocalGenerationSettings::is_empty")]
     pub local_generation: LocalGenerationSettings,
-    /// When true, Venice `safe_mode` blurs adult content on generated/edited
-    /// images. Clovy defaults it ON; the user opts out via Settings or the
-    /// generation-time consent dialog. Defaulted so settings files predating
-    /// this field still deserialize to the current default.
+    /// Named OpenAI-compatible endpoints (keys live in the Keychain).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_endpoints: Vec<LlmEndpointRecord>,
+    /// The provider chosen for each use.
+    #[serde(default)]
+    pub llm_usage: LlmUsageSelection,
+    /// Structured-output level measured by the last CLI connection test.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub llm_cli_levels: BTreeMap<CliKind, StructuredOutputLevel>,
+    #[serde(default)]
+    pub llm_registry_migrated: bool,
+    /// Chat was moved to the default CLI engine once, or the user chose a
+    /// chat engine (`crate::llm::registry::apply_cli_default`).
+    #[serde(default)]
+    pub llm_cli_default_applied: bool,
+    /// When true, image generation and editing ask the image provider to
+    /// filter adult content. Clovy defaults it ON; the user opts out via
+    /// Settings or the generation-time consent dialog. Defaulted so settings
+    /// files predating this field still deserialize to the current default.
     #[serde(default = "default_image_safe_mode")]
     pub image_safe_mode: bool,
     /// When true, the user chose "don't ask again" on the safe-mode consent
@@ -122,6 +290,29 @@ pub struct LocalGenerationSettings {
     pub api_key: String,
 }
 
+impl LocalGenerationSettings {
+    pub fn is_empty(&self) -> bool {
+        self.base_url.trim().is_empty()
+            && self.model_id.trim().is_empty()
+            && self.api_key.trim().is_empty()
+    }
+}
+
+impl ProviderModelSettings {
+    pub fn endpoint(&self, id: &str) -> Option<&LlmEndpointRecord> {
+        self.llm_endpoints.iter().find(|endpoint| endpoint.id == id)
+    }
+}
+
+/// The endpoint serving chat, as the settings UI sees it. Never carries the
+/// API key.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatEndpointDto {
+    pub base_url: String,
+    pub model_id: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileModelOverrides {
@@ -135,22 +326,21 @@ pub struct ProfileModelOverrides {
     pub video_model: Option<String>,
 }
 
-/// The client-facing view of provider settings. The Venice API key is never
-/// serialized back — only whether one is configured. The local endpoint's
-/// api key is round-tripped so the settings UI can pre-fill and edit it.
+/// The client-facing view of provider settings. API keys are never
+/// serialized back, only which providers have a saved user key.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelSettingsDto {
+    pub local_transcription_supported: bool,
     pub transcription_provider: String,
     pub generation_provider: String,
     pub transcription_model: String,
     pub generation_model: String,
-    pub cost_quality: u8,
     pub remote_generation_model: String,
     pub image_model: String,
     pub video_model: String,
-    pub venice_api_key_configured: bool,
-    pub local_generation: LocalGenerationSettings,
+    pub provider_api_keys_configured: ProviderApiKeysConfigured,
+    pub local_generation: ChatEndpointDto,
     pub image_safe_mode: bool,
     pub image_safe_mode_prompt_dismissed: bool,
     pub live_transcription: bool,
@@ -159,23 +349,33 @@ pub struct ProviderModelSettingsDto {
 impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
     fn from(settings: &ProviderModelSettings) -> Self {
         Self {
+            local_transcription_supported: local_transcription_supported(),
             transcription_provider: settings.transcription_provider.clone(),
             generation_provider: settings.generation_provider.clone(),
             transcription_model: settings.transcription_model.clone(),
             generation_model: settings.generation_model.clone(),
-            cost_quality: settings.cost_quality,
             remote_generation_model: settings.remote_generation_model.clone(),
             image_model: settings.image_model.clone(),
             video_model: settings.video_model.clone(),
-            venice_api_key_configured: settings
-                .venice_api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            local_generation: settings.local_generation.clone(),
+            provider_api_keys_configured: settings.provider_api_keys_configured,
+            local_generation: chat_endpoint_dto(settings),
             image_safe_mode: settings.image_safe_mode,
             image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
             live_transcription: settings.live_transcription,
         }
+    }
+}
+
+fn chat_endpoint_dto(settings: &ProviderModelSettings) -> ChatEndpointDto {
+    match &settings.llm_usage.chat {
+        ProviderRef::Endpoint { id } => settings
+            .endpoint(id)
+            .map(|endpoint| ChatEndpointDto {
+                base_url: endpoint.base_url.clone(),
+                model_id: endpoint.model_id.clone(),
+            })
+            .unwrap_or_default(),
+        _ => ChatEndpointDto::default(),
     }
 }
 
@@ -225,38 +425,23 @@ impl From<ProfileModelOverridesDto> for ProfileModelOverrides {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetVeniceModelRequest {
+pub struct SetProviderModelRequest {
     pub mode: ModelMode,
     pub model_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetCostQualityRequest {
-    pub value: u8,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveLocalGenerationSettingsRequest {
-    pub base_url: String,
-    pub model_id: String,
-    #[serde(default)]
-    pub api_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SetLocalGenerationEnabledRequest {
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct ProbeLocalGenerationEndpointRequest {
     pub base_url: String,
+    /// A key typed in the form; blank falls back to the key saved for
+    /// `endpoint_id`.
     #[serde(default)]
     pub api_key: String,
+    /// The registered endpoint being edited, whose Keychain key is used when
+    /// no key is typed.
+    #[serde(default)]
+    pub endpoint_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -267,28 +452,37 @@ pub struct LocalEndpointProbe {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelsRequest {
+pub struct ProviderModelsRequest {
     pub mode: ModelMode,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetVeniceApiKeyRequest {
+pub struct SetProviderApiKeyRequest {
+    pub provider: BuiltinProvider,
     pub api_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearProviderApiKeyRequest {
+    pub provider: BuiltinProvider,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelsResponse {
+pub struct ProviderModelsResponse {
     pub mode: ModelMode,
     pub model_type: String,
     pub selected_model: String,
-    pub models: Vec<VeniceModelDto>,
+    pub models: Vec<ProviderModelDto>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct VeniceModelDto {
+pub struct ProviderModelDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
     pub provider: String,
     pub id: String,
     pub name: String,
@@ -305,60 +499,10 @@ pub struct VeniceModelDto {
     pub capabilities: Vec<String>,
     pub price_unit: String,
     pub price_description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credits_per_million_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_credits_per_million_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_credits_per_million_tokens: Option<u64>,
-}
-
-impl From<crate::clovy_api::ModelDto> for VeniceModelDto {
-    fn from(value: crate::clovy_api::ModelDto) -> Self {
-        let pricing = pricing_with_display(value.pricing, &value.price_description);
-        Self {
-            description: value.description,
-            provider: value.provider,
-            id: value.id,
-            name: value.name,
-            model_type: value.model_type,
-            privacy: value.privacy,
-            pricing: Some(pricing),
-            context_tokens: value.context_tokens,
-            traits: value.traits,
-            capabilities: value.capabilities,
-            price_unit: value.price_unit,
-            price_description: value.price_description,
-            credits_per_million_seconds: value.credits_per_million_seconds,
-            input_credits_per_million_tokens: value.input_credits_per_million_tokens,
-            output_credits_per_million_tokens: value.output_credits_per_million_tokens,
-        }
-    }
-}
-
-fn pricing_with_display(pricing: Option<serde_json::Value>, display: &str) -> serde_json::Value {
-    let display = display.trim();
-    match pricing {
-        Some(serde_json::Value::Object(mut map)) => {
-            if !display.is_empty() {
-                map.insert(
-                    "display".to_string(),
-                    serde_json::Value::String(display.to_string()),
-                );
-            }
-            serde_json::Value::Object(map)
-        }
-        Some(value) => value,
-        None => serde_json::json!({ "display": display }),
-    }
 }
 
 pub fn configured_transcription_provider() -> String {
     effective_current_settings().transcription_provider
-}
-
-pub fn provider_configured() -> bool {
-    crate::clovy_api::configured()
 }
 
 pub fn transcription_model() -> String {
@@ -376,18 +520,45 @@ pub fn remote_generation_model() -> String {
     current_settings().remote_generation_model
 }
 
-pub fn cost_quality() -> f64 {
-    // Keep the wire value safe even if a user manually edits the settings file
-    // after it has been loaded but before a future accessor refactor.
-    f64::from(current_settings().cost_quality.min(100)) / 100.0
-}
-
 pub fn generation_provider() -> String {
     current_settings().generation_provider
 }
 
+/// The endpoint serving chat (the agent route), key included; empty when
+/// chat is not on an endpoint.
 pub fn local_generation_settings() -> LocalGenerationSettings {
-    current_settings().local_generation
+    let registry = llm_registry();
+    let connection = match &registry.usage.chat {
+        ProviderRef::Endpoint { id } => registry.connection(id, crate::llm::secrets::store()).ok(),
+        _ => None,
+    };
+    crate::llm::registry::legacy_settings(connection)
+}
+
+/// The endpoint an agent request for `model_id` should use: the chat
+/// endpoint when it serves that model, else any registered endpoint that does.
+pub fn local_generation_settings_for_model(model_id: &str) -> LocalGenerationSettings {
+    let registry = llm_registry();
+    let connection = registry.endpoint_for_model(model_id).and_then(|endpoint| {
+        registry
+            .connection(&endpoint.id, crate::llm::secrets::store())
+            .ok()
+    });
+    crate::llm::registry::legacy_settings(connection)
+}
+
+/// The registered endpoint `endpoint_id`, key included; empty when it no
+/// longer exists (the agent route then refuses instead of picking another).
+pub fn local_generation_settings_for_endpoint(endpoint_id: &str) -> LocalGenerationSettings {
+    let connection = llm_registry()
+        .connection(endpoint_id, crate::llm::secrets::store())
+        .ok();
+    crate::llm::registry::legacy_settings(connection)
+}
+
+/// Snapshot of the provider registry for routing one generation call.
+pub fn llm_registry() -> LlmRegistry {
+    LlmRegistry::from(&current_settings())
 }
 
 pub fn image_model() -> String {
@@ -398,13 +569,47 @@ pub fn video_model() -> String {
     effective_current_settings().video_model
 }
 
-pub fn venice_api_key() -> Option<String> {
-    current_settings().venice_api_key
+/// The user's saved key for `provider`, or `None` when none is saved.
+/// The credential store is read only when settings record a saved key.
+/// A recorded key the store cannot return is an error; there is no fallback.
+pub fn provider_api_key(provider: BuiltinProvider) -> Result<Option<String>, AppError> {
+    saved_provider_api_key(&current_settings(), crate::llm::secrets::store(), provider)
 }
 
-/// Whether Venice safe mode is on for image generation/editing. The default is
-/// `true`, so Clovy asks Venice to blur adult content unless the user opts out
-/// via Settings or the generation-time consent dialog.
+fn saved_provider_api_key(
+    settings: &ProviderModelSettings,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+) -> Result<Option<String>, AppError> {
+    if !settings.provider_api_keys_configured.get(provider) {
+        return Ok(None);
+    }
+    match store.get(provider.secret_account()) {
+        Ok(Some(api_key)) => match normalize_api_key(&api_key) {
+            Some(api_key) => Ok(Some(api_key)),
+            None => Err(provider_api_key_unavailable(provider)),
+        },
+        Ok(None) => Err(provider_api_key_unavailable(provider)),
+        Err(error) => {
+            tracing::warn!(provider = provider.id(), %error, "saved provider key unavailable");
+            Err(provider_api_key_unavailable(provider))
+        }
+    }
+}
+
+fn provider_api_key_unavailable(provider: BuiltinProvider) -> AppError {
+    AppError::new(
+        "provider_api_key_unavailable",
+        format!(
+            "Clovy could not read your saved {} key. Open Settings and save it again.",
+            provider.display_name()
+        ),
+    )
+}
+
+/// Whether image generation/editing asks the provider to filter adult content.
+/// The default is `true` unless the user opts out via Settings or the
+/// generation-time consent dialog.
 pub fn image_safe_mode() -> bool {
     current_settings().image_safe_mode
 }
@@ -415,150 +620,6 @@ pub fn image_safe_mode_prompt_dismissed() -> bool {
 
 pub fn live_transcription() -> bool {
     current_settings().live_transcription
-}
-
-/// Context window (tokens) of the configured generation model, looked up in
-/// the backend's model catalog and cached per model id. The agent provider
-/// runtime uses it to size history to the real window and compact proactively,
-/// instead of discovering the limit
-/// by bouncing off the backend's prompt_too_long rejection. Returns `None`
-/// when the catalog is unreachable (offline, signed out) or doesn't report a
-/// window for the model. Callers degrade by omitting the field and relying on
-/// normal provider error mapping.
-pub async fn generation_model_context_tokens() -> Option<i64> {
-    if generation_provider() == PROVIDER_LOCAL {
-        return None;
-    }
-    let model_id = generation_model();
-    clovy_model_runtime_capabilities(&model_id)
-        .await
-        .context_tokens
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ClovyModelRuntimeCapabilities {
-    pub context_tokens: Option<i64>,
-    pub supports_vision: bool,
-}
-
-/// Whether the configured generation model reports vision (image input) support
-/// in the Clovy API catalog. The agent runtime uses this to decide whether an
-/// image can be attached directly to model context. Returns `false`
-/// when the catalog is unreachable (offline, signed out) or the model reports no
-/// vision capability. In local dev, a persisted Auto selection can use the same
-/// catalog-backed capability fallback as Clovy API when Auto is absent. The
-/// conservative default keeps image attachment fail-closed.
-pub async fn generation_model_supports_vision() -> bool {
-    if generation_provider() == PROVIDER_LOCAL {
-        return false;
-    }
-    let model_id = generation_model();
-    clovy_model_runtime_capabilities(&model_id)
-        .await
-        .supports_vision
-}
-
-/// Resolves the model-specific limits needed by an agent run. Agent sessions
-/// can select a model independently of the global generation setting, so this
-/// cache is keyed by the run model and shared across turns.
-pub async fn clovy_model_runtime_capabilities(model_id: &str) -> ClovyModelRuntimeCapabilities {
-    if let Ok(cache) = model_runtime_capabilities_cache().lock() {
-        if let Some(capabilities) = cache.get(model_id) {
-            return *capabilities;
-        }
-    }
-    let Ok(models) = crate::clovy_api::list_models(ModelMode::Generation.api_type()).await else {
-        return ClovyModelRuntimeCapabilities::default();
-    };
-    let capabilities = ClovyModelRuntimeCapabilities {
-        context_tokens: models
-            .iter()
-            .find(|model| model.id == model_id)
-            .and_then(|model| model.context_tokens),
-        supports_vision: generation_model_supports_vision_from_catalog(
-            model_id,
-            crate::os_accounts::local_dev_enabled(),
-            models
-                .iter()
-                .map(|model| (model.id.as_str(), model.capabilities.as_slice())),
-        ),
-    };
-    if let Ok(mut cache) = model_runtime_capabilities_cache().lock() {
-        cache.insert(model_id.to_string(), capabilities);
-    }
-    capabilities
-}
-
-fn model_runtime_capabilities_cache(
-) -> &'static Mutex<BTreeMap<String, ClovyModelRuntimeCapabilities>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, ClovyModelRuntimeCapabilities>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-fn generation_model_supports_vision_from_catalog<'a>(
-    model_id: &str,
-    local_dev_enabled: bool,
-    models: impl IntoIterator<Item = (&'a str, &'a [String])>,
-) -> bool {
-    let use_local_auto_fallback = local_dev_enabled && model_id == AUTO_GENERATION_MODEL;
-    let mut preferred_fallback_is_compatible = false;
-    let mut alternate_fallback_is_compatible = false;
-
-    for (catalog_model_id, capabilities) in models {
-        if catalog_model_id == model_id {
-            return capabilities_include_vision(capabilities);
-        }
-        if use_local_auto_fallback && capabilities_support_agent_images(capabilities) {
-            if catalog_model_id == LOCAL_AUTO_VISION_FALLBACK_MODEL {
-                preferred_fallback_is_compatible = true;
-            } else {
-                alternate_fallback_is_compatible = true;
-            }
-        }
-    }
-
-    preferred_fallback_is_compatible || alternate_fallback_is_compatible
-}
-
-/// Mirrors the frontend `modelSupportsImageInput`: key off the authoritative
-/// `capabilities` list (never `traits`), matching the normalized `supportsVision`
-/// name so a rename to snake_case still resolves.
-fn capabilities_include_vision(capabilities: &[String]) -> bool {
-    capabilities_include(capabilities, "supportsvision")
-}
-
-fn capabilities_support_agent_images(capabilities: &[String]) -> bool {
-    capabilities_include_vision(capabilities)
-        && (capabilities_include(capabilities, "functioncalling")
-            || capabilities_include(capabilities, "toolcalling"))
-}
-
-fn capabilities_include(capabilities: &[String], expected: &str) -> bool {
-    capabilities.iter().any(|capability| {
-        let normalized: String = capability
-            .chars()
-            .filter(char::is_ascii_alphabetic)
-            .map(|ch| ch.to_ascii_lowercase())
-            .collect();
-        normalized.contains(expected)
-    })
-}
-
-// Legacy name kept for callers we haven't migrated yet.
-pub fn venice_generation_model() -> String {
-    generation_model()
-}
-
-pub fn transcription_provider_for_model(model: &str) -> &'static str {
-    if matches!(
-        model.trim(),
-        "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" | "whisper-1"
-    ) {
-        PROVIDER_OPENAI
-    } else {
-        PROVIDER_VENICE
-    }
 }
 
 #[tauri::command]
@@ -609,6 +670,9 @@ fn set_profile_model_overrides_impl(
     let profile = validate_profile_override_name(profile)?.to_string();
     update_settings_result(state, |settings| {
         let overrides = ProfileModelOverrides::from(overrides);
+        if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
+            transcription::require_local_ready()?;
+        }
         if profile_overrides_empty(&overrides) {
             settings.profile_overrides.remove(&profile);
         } else {
@@ -639,42 +703,94 @@ fn delete_profile_model_overrides_impl(
 }
 
 #[tauri::command]
-pub fn set_venice_model(
+pub fn set_provider_model(
     state: State<'_, ProviderSettingsState>,
-    request: SetVeniceModelRequest,
+    request: SetProviderModelRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let model_id = request.model_id.trim();
+    set_provider_model_impl(&state, request)
+}
+
+/// The mode picks the provider: transcription is Groq, text is OpenRouter
+/// directly, image and video are fal. Transcription, image, and
+/// video ids must be curated; text ids come from
+/// the live OpenRouter catalog.
+fn set_provider_model_impl(
+    state: &ProviderSettingsState,
+    request: SetProviderModelRequest,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let model_id = match request.model_id.trim() {
+        LEGACY_AUTO_GENERATION_MODEL if request.mode == ModelMode::Generation => {
+            DEFAULT_GENERATION_MODEL
+        }
+        value => value,
+    }
+    .to_string();
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
-    update_settings(&state, |settings| match request.mode {
-        ModelMode::Transcription => {
-            settings.transcription_provider =
-                transcription_provider_for_model(model_id).to_string();
-            settings.transcription_model = model_id.to_string();
+    let local = request.mode == ModelMode::Transcription && model_id == transcription::LOCAL_MODEL;
+    if local {
+        transcription::require_local_ready()?;
+    }
+    let curated = match request.mode {
+        ModelMode::Transcription => Some(KNOWN_TRANSCRIPTION_MODELS),
+        ModelMode::Image => Some(KNOWN_IMAGE_MODELS),
+        ModelMode::Video => Some(KNOWN_VIDEO_MODELS),
+        ModelMode::Generation => None,
+    };
+    if !local && curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
+        return Err(AppError::new(
+            "provider_model_unavailable",
+            "This model is not available. Choose another model.",
+        ));
+    }
+    update_settings_result(state, |settings| {
+        if local {
+            transcription::require_local_ready()?;
         }
-        ModelMode::Generation => {
-            settings.generation_provider = PROVIDER_VENICE.to_string();
-            settings.generation_model = model_id.to_string();
-            settings.remote_generation_model = model_id.to_string();
+        match request.mode {
+            ModelMode::Transcription => {
+                settings.transcription_provider =
+                    if local { PROVIDER_LOCAL } else { PROVIDER_GROQ }.to_string();
+                settings.transcription_model = model_id;
+            }
+            ModelMode::Generation => {
+                // Text selection is independent from chat and note engine choices.
+                settings.generation_provider = PROVIDER_OPENROUTER.to_string();
+                settings.generation_model = model_id.clone();
+                settings.remote_generation_model = model_id;
+            }
+            ModelMode::Image => settings.image_model = model_id,
+            ModelMode::Video => settings.video_model = model_id,
         }
-        ModelMode::Image => settings.image_model = model_id.to_string(),
-        ModelMode::Video => settings.video_model = model_id.to_string(),
+        Ok(())
     })
 }
 
-#[tauri::command]
-pub fn set_cost_quality(
-    state: State<'_, ProviderSettingsState>,
-    request: SetCostQualityRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    if request.value > 100 {
-        return Err(AppError::new(
-            "cost_quality_invalid",
-            "Preference must be from 0 to 100.",
-        ));
-    }
-    update_settings(&state, |settings| settings.cost_quality = request.value)
+/// Persist the explicit model-removal transition, including profile overrides.
+pub fn local_transcription_supported() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+pub(crate) fn remove_local_transcription_selection(
+    state: &ProviderSettingsState,
+) -> Result<bool, AppError> {
+    let mut switched = false;
+    update_settings(state, |settings| {
+        if settings.transcription_provider == PROVIDER_LOCAL {
+            switched = true;
+            settings.transcription_provider = PROVIDER_GROQ.into();
+            settings.transcription_model = DEFAULT_TRANSCRIPTION_MODEL.into();
+        }
+        for overrides in settings.profile_overrides.values_mut() {
+            if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
+                switched = true;
+                overrides.transcription_provider = Some(PROVIDER_GROQ.into());
+                overrides.transcription_model = Some(DEFAULT_TRANSCRIPTION_MODEL.into());
+            }
+        }
+    })?;
+    Ok(switched)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -764,10 +880,8 @@ pub struct GenerateImageRequest {
     /// Stable logical request id supplied by the chat orchestration layer.
     #[serde(default)]
     pub request_id: Option<String>,
-    /// Optional safe-mode override pinned at turn creation. A retry must replay
-    /// the exact request shape Clovy API hashed into its replay-ledger key, so a
-    /// settings change between attempt and retry cannot mint a second charge.
-    /// Absent falls back to the live saved setting.
+    /// Optional safe-mode override pinned at turn creation. Absent uses the
+    /// live saved setting; resuming a submitted fal job keeps its original input.
     #[serde(default)]
     pub safe_mode: Option<bool>,
 }
@@ -806,18 +920,16 @@ pub struct EditImageRequest {
     pub request_id: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
-    /// Optional edit-model override; absent uses Clovy API's default edit model.
+    /// Optional edit-model override; absent uses the curated fal edit model.
     #[serde(default)]
     pub model: Option<String>,
 }
 
-/// Generates an image from a prompt via Clovy API, defaulting to the saved
-/// image model. Provider keys and the upstream call live in Clovy API; this
-/// command only resolves the model and forwards the prompt.
+/// Generates an image directly with the user's fal key and saved model.
 #[tauri::command]
 pub async fn generate_image(
     request: GenerateImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
         return Err(AppError::new("image_prompt_required", "Enter a prompt."));
@@ -832,15 +944,14 @@ pub async fn generate_image(
         .map(|request_id| request_id.trim().to_string())
         .filter(|request_id| !request_id.is_empty());
     let safe_mode = request.safe_mode.unwrap_or_else(image_safe_mode);
-    crate::clovy_api::generate_image(prompt, model, Some(safe_mode), request_id).await
+    crate::providers::fal::generate_image(prompt, model, Some(safe_mode), request_id).await
 }
 
-/// Edits a source image through Clovy API. Provider keys and the upstream call
-/// live in Clovy API; this command only validates and forwards the image bytes.
+/// Edits a source image directly with the user's fal key.
 #[tauri::command]
 pub async fn edit_image(
     request: EditImageRequest,
-) -> Result<crate::clovy_api::GeneratedImageDto, AppError> {
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let image = request.image.trim().to_string();
     if image.is_empty() {
         return Err(AppError::new(
@@ -867,7 +978,7 @@ pub async fn edit_image(
         .mime_type
         .map(|mime_type| mime_type.trim().to_string())
         .filter(|mime_type| !mime_type.is_empty());
-    crate::clovy_api::edit_image(
+    crate::providers::fal::edit_image(
         image,
         prompt,
         mime_type,
@@ -881,14 +992,14 @@ pub async fn edit_image(
 #[tauri::command]
 pub async fn video_generate(
     request: GenerateVideoRequest,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     video_generate_with_enabled(request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 async fn video_generate_with_enabled(
     request: GenerateVideoRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoJobDto, AppError> {
+) -> Result<crate::providers::fal::VideoJobDto, AppError> {
     ensure_video_generation_enabled(enabled)?;
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -918,7 +1029,7 @@ async fn video_generate_with_enabled(
         .map(|aspect_ratio| aspect_ratio.trim().to_string())
         .filter(|aspect_ratio| !aspect_ratio.is_empty())
         .or_else(|| Some(DEFAULT_VIDEO_ASPECT_RATIO.to_string()));
-    crate::clovy_api::video_generate(crate::clovy_api::VideoGenerateParams {
+    crate::providers::fal::video_generate(crate::providers::fal::VideoGenerateParams {
         prompt,
         model,
         request_id,
@@ -934,14 +1045,14 @@ async fn video_generate_with_enabled(
 pub async fn video_status(
     app: AppHandle,
     request: VideoStatusRequest,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     video_status_with_enabled(app, request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
 /// Absolute path of the generated-videos directory. Lets the frontend resolve a
 /// bare `generated-video-*.mp4` filename (the agent frequently names a finished
 /// video by filename only when asked to show it again) to an asset-scoped path
-/// the webview can load. Mirrors the directory `clovy_api::write_video_bytes`
+/// the webview can load. Mirrors the directory `providers::fal::video_status`
 /// and the agent video tool write into.
 #[tauri::command]
 pub fn generated_video_dir(app: AppHandle) -> Result<String, AppError> {
@@ -957,9 +1068,9 @@ async fn video_status_with_enabled(
     app: AppHandle,
     request: VideoStatusRequest,
     enabled: bool,
-) -> Result<crate::clovy_api::VideoStatusDto, AppError> {
+) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
     let job_id = video_status_job_id_with_enabled(request, enabled)?;
-    crate::clovy_api::video_status(&app, job_id).await
+    crate::providers::fal::video_status(&app, job_id).await
 }
 
 fn video_status_job_id_with_enabled(
@@ -992,118 +1103,106 @@ fn video_generation_disabled_error() -> AppError {
     )
 }
 
+/// Saves the user's own key for one provider. The key is checked against the
+/// provider's free documented endpoint first (see
+/// [`BuiltinProvider::key_check_url`]); only an accepted key reaches the
+/// Keychain store, and settings record just that one is saved.
 #[tauri::command]
-pub async fn set_venice_api_key(
+pub async fn set_provider_api_key(
     state: State<'_, ProviderSettingsState>,
-    request: SetVeniceApiKeyRequest,
+    request: SetProviderApiKeyRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let api_key = normalize_api_key(&request.api_key).ok_or_else(|| {
-        AppError::new(
-            "venice_api_key_required",
-            "Enter a Venice API key before saving.",
-        )
-    })?;
-    validate_venice_api_key_format(&api_key)?;
-    verify_venice_api_key(&api_key).await?;
-    update_settings(&state, |settings| {
-        settings.venice_api_key = Some(api_key);
-    })
+    let check_url = request.provider.key_check_url();
+    set_provider_api_key_impl(&state, crate::llm::secrets::store(), request, &check_url).await
 }
 
 #[tauri::command]
-pub fn clear_venice_api_key(
+pub fn clear_provider_api_key(
     state: State<'_, ProviderSettingsState>,
+    request: ClearProviderApiKeyRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings(&state, |settings| {
-        settings.venice_api_key = None;
-    })
+    clear_provider_api_key_impl(&state, crate::llm::secrets::store(), request.provider)
 }
 
-/// Persists the "bring your own inference" endpoint without switching the
-/// active provider. Enabling and disabling the local model is a separate
-/// command so that saving a draft never silently activates it, and toggling
-/// off never rewrites the stored endpoint.
-#[tauri::command]
-pub fn save_local_generation_settings(
-    state: State<'_, ProviderSettingsState>,
-    request: SaveLocalGenerationSettingsRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    save_local_generation_settings_impl(&state, request)
-}
-
-fn save_local_generation_settings_impl(
+/// Validates, checks against `check_url`, and only then writes the key and
+/// records it; a rejected or unchecked key changes nothing.
+async fn set_provider_api_key_impl(
     state: &ProviderSettingsState,
-    request: SaveLocalGenerationSettingsRequest,
+    store: &dyn crate::llm::secrets::SecretStore,
+    request: SetProviderApiKeyRequest,
+    check_url: &str,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    let raw_base_url = request.base_url.trim();
-    let model_id = request.model_id.trim().to_string();
-    let api_key = request.api_key.trim().to_string();
-    let clearing = raw_base_url.is_empty() && model_id.is_empty() && api_key.is_empty();
+    let provider = request.provider;
+    let api_key = validate_provider_api_key(provider, &request.api_key)?;
+    verify_provider_api_key(provider, &api_key, check_url).await?;
+    update_provider_credential(state, store, provider, Some(&api_key))
+}
 
-    // Validate the URL up front so a bad request never mutates stored state.
-    let base_url = if clearing {
-        String::new()
-    } else {
-        normalize_local_base_url(raw_base_url)?
+fn clear_provider_api_key_impl(
+    state: &ProviderSettingsState,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    update_provider_credential(state, store, provider, None)
+}
+
+/// Serialize secret changes with settings writes and publication. Neither
+/// settings view changes until the atomic file replacement succeeds. A failed
+/// persistence restores the previous secret (also restoring its store cache).
+fn update_provider_credential(
+    state: &ProviderSettingsState,
+    store: &dyn crate::llm::secrets::SecretStore,
+    provider: BuiltinProvider,
+    next_key: Option<&str>,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let mut published = settings_store()
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let account = provider.secret_account();
+    let prior_key = store
+        .get(account)
+        .map_err(|_| provider_api_key_store_failed(provider))?;
+    let mut candidate = settings.clone();
+    candidate
+        .provider_api_keys_configured
+        .set(provider, next_key.is_some());
+    let write_secret = |key: Option<&str>| match key {
+        Some(key) => store.set(account, key),
+        None => store.delete(account),
     };
-
-    let candidate = LocalGenerationSettings {
-        base_url,
-        model_id,
-        api_key,
-    };
-    let configured = local_generation_settings_configured(&candidate);
-
-    update_settings_result(state, |settings| {
-        let provider_is_local = settings.generation_provider == PROVIDER_LOCAL;
-        if provider_is_local && !configured {
+    write_secret(next_key).map_err(|_| provider_api_key_store_failed(provider))?;
+    if let Err(error) = save_settings(state, &candidate) {
+        if write_secret(prior_key.as_deref()).is_err() {
+            // Never hide a failed compensation or expose the store's error
+            // text (which could include a credential). Both settings views
+            // and the old file remain intact; the user must restore the key.
             return Err(AppError::new(
-                "local_model_in_use",
-                "Disable the local model first.",
+                "provider_api_key_rollback_failed",
+                format!("Settings could not be saved and your previous {} key could not be restored. Save that key again before retrying.", provider.display_name()),
             ));
         }
-        settings.local_generation = candidate.clone();
-        if provider_is_local {
-            settings.generation_model = candidate.model_id.clone();
-        }
-        Ok(())
-    })
+        return Err(error);
+    }
+    *settings = candidate.clone();
+    *published = candidate;
+    if provider == BuiltinProvider::OpenRouter {
+        catalog::invalidate();
+    }
+    Ok(ProviderModelSettingsDto::from(&*settings))
 }
 
-/// Switches the active generation provider between the saved local endpoint
-/// and the remote Venice default. Never edits the stored local endpoint, so
-/// disabling and re-enabling round-trips the same configuration.
-#[tauri::command]
-pub fn set_local_generation_enabled(
-    state: State<'_, ProviderSettingsState>,
-    request: SetLocalGenerationEnabledRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    set_local_generation_enabled_impl(&state, request)
-}
-
-fn set_local_generation_enabled_impl(
-    state: &ProviderSettingsState,
-    request: SetLocalGenerationEnabledRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings_result(state, |settings| {
-        if request.enabled {
-            if !local_generation_settings_configured(&settings.local_generation) {
-                return Err(AppError::new(
-                    "local_model_not_configured",
-                    "Configure a local model endpoint and model ID first.",
-                ));
-            }
-            settings.generation_provider = PROVIDER_LOCAL.to_string();
-            settings.generation_model = settings.local_generation.model_id.trim().to_string();
-        } else {
-            settings.generation_provider = PROVIDER_VENICE.to_string();
-            settings.generation_model = non_empty_or(
-                settings.remote_generation_model.clone(),
-                DEFAULT_GENERATION_MODEL,
-            );
-        }
-        Ok(())
-    })
+fn provider_api_key_store_failed(provider: BuiltinProvider) -> AppError {
+    AppError::new(
+        "provider_api_key_store_failed",
+        format!(
+            "Clovy could not update your {} key in the Keychain. Try again.",
+            provider.display_name()
+        ),
+    )
 }
 
 /// Lists the models an OpenAI-compatible endpoint advertises, so the settings
@@ -1114,7 +1213,13 @@ pub async fn probe_local_generation_endpoint(
     request: ProbeLocalGenerationEndpointRequest,
 ) -> Result<LocalEndpointProbe, AppError> {
     let base_url = normalize_local_base_url(&request.base_url)?;
-    let api_key = request.api_key.trim().to_string();
+    let api_key = crate::llm::registry::listing_key(
+        &llm_registry(),
+        request.endpoint_id.as_deref(),
+        &request.api_key,
+        crate::llm::secrets::store(),
+    )
+    .unwrap_or_default();
     let url = format!("{base_url}/models");
 
     let client = reqwest::Client::builder()
@@ -1178,36 +1283,27 @@ fn parse_local_models_response(body: &[u8]) -> Result<LocalEndpointProbe, AppErr
 }
 
 #[tauri::command]
-pub async fn list_venice_models(
+pub async fn list_provider_models(
     state: State<'_, ProviderSettingsState>,
-    request: VeniceModelsRequest,
-) -> Result<VeniceModelsResponse, AppError> {
+    request: ProviderModelsRequest,
+) -> Result<ProviderModelsResponse, AppError> {
+    list_provider_models_impl(&state, request).await
+}
+
+async fn list_provider_models_impl(
+    state: &ProviderSettingsState,
+    request: ProviderModelsRequest,
+) -> Result<ProviderModelsResponse, AppError> {
     let model_type = request.mode.api_type();
-    let selected_model = selected_model_for_mode(&state, request.mode)?;
-    // Image models aren't part of the priced catalog the backend serves (image
-    // billing is deferred); the picker uses a curated frontend list instead.
-    // Short-circuit so a direct caller never gets unrelated text/asr models
-    // back, and we skip a pointless catalog round-trip.
-    if request.mode == ModelMode::Image {
-        return Ok(VeniceModelsResponse {
-            mode: request.mode,
-            model_type: model_type.to_string(),
-            selected_model,
-            models: Vec::new(),
-        });
-    }
-    let mut models = crate::clovy_api::list_models(model_type)
-        .await?
-        .into_iter()
-        .map(VeniceModelDto::from)
-        .collect::<Vec<_>>();
+    let selected_model = selected_model_for_mode(state, request.mode)?;
+    let mut models = catalog::models(request.mode).await?;
     models.sort_by(|left, right| {
         left.name
             .to_ascii_lowercase()
             .cmp(&right.name.to_ascii_lowercase())
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(VeniceModelsResponse {
+    Ok(ProviderModelsResponse {
         mode: request.mode,
         model_type: model_type.to_string(),
         selected_model,
@@ -1216,18 +1312,85 @@ pub async fn list_venice_models(
 }
 
 pub fn setup(app: &mut tauri::App) {
+    // Resolve the real app identity once, before any Agy child gets a private
+    // HOME. Authentication and every generation route share these paths.
+    let agy_paths = crate::app_paths::app_data_dir(app.handle())
+        .map_err(|error| error.to_string())
+        .and_then(|data| {
+            let host_env = std::env::vars().collect();
+            crate::llm::agy::HostContext::new(data, &host_env)
+                .and_then(crate::llm::agy::HostContext::configure)
+                .map_err(|error| error.to_string())
+        });
+    if let Err(error) = agy_paths {
+        tracing::warn!(%error, "could not resolve the Clovy Antigravity profile");
+    }
     let path = provider_settings_path(app.handle())
         .unwrap_or_else(|| PathBuf::from("provider-settings.json"));
-    let settings = load_settings_from_disk(app.handle());
+    let (settings, migrated_now) = load_settings_from_disk(app.handle());
     replace_current_settings(settings.clone());
-    app.manage(ProviderSettingsState {
+    let state = ProviderSettingsState {
         path,
-        settings: Mutex::new(settings),
+        settings: Mutex::new(settings.clone()),
+    };
+    if migrated_now {
+        // Rewrite the file so a migrated endpoint key, the pre-cutover model
+        // ids, and the retired plaintext Venice key no longer sit in it.
+        if let Err(error) = save_settings(&state, &settings) {
+            tracing::warn!(code = %error.code, "could not persist the migrated provider settings");
+        }
+    }
+    app.manage(state);
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        ensure_cli_default(&handle.state::<ProviderSettingsState>()).await;
     });
 }
 
+/// Moves chat to the default CLI engine once (ADR-0062,
+/// `crate::llm::registry::apply_cli_default`). Runs at launch and before the
+/// default chat engine is read, so a session created right after launch
+/// already gets it. Nothing is written when nothing changes.
+pub async fn ensure_cli_default(state: &ProviderSettingsState) {
+    let Ok(snapshot) = settings_snapshot(state) else {
+        return;
+    };
+    if snapshot.llm_cli_default_applied
+        && matches!(snapshot.llm_usage.chat, ProviderRef::Cli { .. })
+    {
+        return;
+    }
+    let env = crate::llm::shell_env::login_env().await;
+    let installed = |kind: CliKind| env.which(kind.id()).is_some();
+    let mut candidate = snapshot.clone();
+    crate::llm::registry::apply_cli_default(&mut candidate, installed);
+    if candidate == snapshot {
+        return;
+    }
+    let mut moved = None;
+    match update_llm_registry(state, |settings| {
+        moved = crate::llm::registry::apply_cli_default(settings, installed);
+        Ok(())
+    }) {
+        Ok(_) => match moved {
+            Some(kind) => {
+                tracing::info!(cli = kind.id(), "chat moved to the default CLI engine")
+            }
+            None => tracing::info!("chat engine already chosen; default CLI migration recorded"),
+        },
+        Err(error) => {
+            tracing::warn!(code = %error.code, "could not record the default CLI chat engine")
+        }
+    }
+}
+
+/// The selected chat engine, including an explicitly chosen unavailable CLI.
+pub fn selected_chat_engine_model() -> String {
+    crate::chat_engine::default_engine_of(&current_settings()).model_id
+}
+
 pub fn load_local_env() {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
 }
 
 fn current_settings() -> ProviderModelSettings {
@@ -1237,7 +1400,7 @@ fn current_settings() -> ProviderModelSettings {
         .unwrap_or_else(|_| default_settings())
 }
 
-fn effective_current_settings() -> ProviderModelSettings {
+pub(crate) fn effective_current_settings() -> ProviderModelSettings {
     let settings = current_settings();
     effective_settings_for_profile(&settings, "default")
 }
@@ -1248,18 +1411,27 @@ fn settings_store() -> &'static Mutex<ProviderModelSettings> {
 
 fn replace_current_settings(settings: ProviderModelSettings) {
     if let Ok(mut current) = settings_store().lock() {
+        if current.live_transcription != settings.live_transcription {
+            crate::meeting_assist::invalidate_preview(true);
+        }
         *current = settings;
     }
 }
 
 /// Test-only hook: installs settings into the process-wide store that
 /// `current_settings()` reads, so live integration tests (see
-/// `clovy_api::live_local_tests`) can activate the local provider without a
+/// `providers::notes::live_local_tests`) can activate the local provider without a
 /// running Tauri app.
 #[cfg(test)]
 pub(crate) fn replace_current_settings_for_tests(settings: ProviderModelSettings) {
     replace_current_settings(settings);
 }
+
+/// Test-only: serializes tests that install process-wide settings, so they
+/// never observe each other's provider selection.
+#[cfg(test)]
+pub(crate) static GLOBAL_SETTINGS_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Test-only companion to [`replace_current_settings_for_tests`]: the default
 /// (remote) settings, for restoring the store after a live test.
@@ -1268,18 +1440,32 @@ pub(crate) fn default_settings_for_tests() -> ProviderModelSettings {
     default_settings()
 }
 
+/// Test-only: parse, migrate (with `store`), and sanitize a settings file.
+#[cfg(test)]
+pub(crate) fn settings_from_json_for_tests(
+    raw: &str,
+    store: &dyn crate::llm::secrets::SecretStore,
+) -> Option<ProviderModelSettings> {
+    settings_from_json(raw, store).map(|(settings, _)| settings)
+}
+
 fn default_settings() -> ProviderModelSettings {
     ProviderModelSettings {
-        transcription_provider: PROVIDER_VENICE.to_string(),
-        generation_provider: PROVIDER_VENICE.to_string(),
+        transcription_provider: PROVIDER_GROQ.to_string(),
+        generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
-        generation_model: default_generation_model_for_release(),
-        cost_quality: DEFAULT_COST_QUALITY,
-        remote_generation_model: default_generation_model_for_release(),
+        generation_model: default_generation_model(),
+        remote_generation_model: default_generation_model(),
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
         video_model: DEFAULT_VIDEO_MODEL.to_string(),
-        venice_api_key: None,
+        provider_api_keys_configured: ProviderApiKeysConfigured::default(),
+        remote_models_migrated: true,
         local_generation: LocalGenerationSettings::default(),
+        llm_endpoints: Vec::new(),
+        llm_usage: LlmUsageSelection::default(),
+        llm_cli_levels: BTreeMap::new(),
+        llm_registry_migrated: true,
+        llm_cli_default_applied: false,
         image_safe_mode: true,
         image_safe_mode_prompt_dismissed: false,
         image_safe_mode_set_by_user: false,
@@ -1293,11 +1479,11 @@ fn default_live_transcription() -> bool {
 }
 
 fn default_transcription_provider() -> String {
-    PROVIDER_VENICE.to_string()
+    PROVIDER_GROQ.to_string()
 }
 
 fn default_generation_provider() -> String {
-    PROVIDER_VENICE.to_string()
+    PROVIDER_OPENROUTER.to_string()
 }
 
 fn default_transcription_model() -> String {
@@ -1306,21 +1492,6 @@ fn default_transcription_model() -> String {
 
 fn default_generation_model() -> String {
     DEFAULT_GENERATION_MODEL.to_string()
-}
-
-fn default_cost_quality() -> u8 {
-    DEFAULT_COST_QUALITY
-}
-
-fn default_generation_model_for_release() -> String {
-    let enabled = option_env!("OS_CLOVY_AUTO_MODE_DEFAULT")
-        .or(option_env!("OS_JUNE_AUTO_MODE_DEFAULT"))
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
-    if enabled {
-        AUTO_GENERATION_MODEL.to_string()
-    } else {
-        DEFAULT_GENERATION_MODEL.to_string()
-    }
 }
 
 fn default_image_model() -> String {
@@ -1345,48 +1516,107 @@ fn provider_settings_path_from_config_dir(directory: PathBuf) -> PathBuf {
     directory.join("provider-settings.json")
 }
 
-fn load_settings_from_disk(app: &AppHandle) -> ProviderModelSettings {
-    let defaults = default_settings();
-    let Some(path) = provider_settings_path(app) else {
-        return defaults;
-    };
+/// Loads the saved settings; the flag is true when this load migrated the
+/// legacy endpoint or pre-cutover model ids and the file should be rewritten.
+fn load_settings_from_disk(app: &AppHandle) -> (ProviderModelSettings, bool) {
+    provider_settings_path(app)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| settings_from_json(&raw, crate::llm::secrets::store()))
+        .unwrap_or_else(|| (default_settings(), false))
+}
 
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|settings| serde_json::from_str::<ProviderModelSettings>(&settings).ok())
-        .map(|settings| sanitize_settings(settings, &defaults))
-        .unwrap_or(defaults)
+fn settings_from_json(
+    raw: &str,
+    store: &dyn crate::llm::secrets::SecretStore,
+) -> Option<(ProviderModelSettings, bool)> {
+    let document: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let retired_usage = document["llmUsage"]["notes"]["kind"] == "clovy"
+        || document["llmUsage"].get("dictationCleanup").is_some();
+    let retired_cost_quality = document.get("costQuality").is_some();
+    let retired_auto = document["generationModel"] == LEGACY_AUTO_GENERATION_MODEL
+        || document["remoteGenerationModel"] == LEGACY_AUTO_GENERATION_MODEL;
+    let missing_chat = document["llmUsage"].get("chat").is_none();
+    let parsed = serde_json::from_value::<ProviderModelSettings>(document).ok()?;
+    let retired_chat = missing_chat || !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
+    let was_migrated = parsed.llm_registry_migrated;
+    let remote_models_migrated = parsed.remote_models_migrated;
+    let migrated = crate::llm::registry::migrate_legacy_local_generation(parsed, store);
+    let migrated_now = retired_chat
+        || retired_usage
+        || retired_auto
+        || retired_cost_quality
+        || migrated.llm_registry_migrated != was_migrated
+        || !remote_models_migrated;
+    Some((
+        sanitize_settings(migrated, &default_settings()),
+        migrated_now,
+    ))
+}
+
+fn normalize_transcription(provider: &str, model: String) -> (String, String) {
+    if provider == PROVIDER_LOCAL && local_transcription_supported() {
+        (PROVIDER_LOCAL.into(), transcription::LOCAL_MODEL.into())
+    } else {
+        (
+            PROVIDER_GROQ.into(),
+            curated_or_default(
+                model,
+                KNOWN_TRANSCRIPTION_MODELS,
+                DEFAULT_TRANSCRIPTION_MODEL,
+            ),
+        )
+    }
 }
 
 fn sanitize_settings(
     settings: ProviderModelSettings,
     defaults: &ProviderModelSettings,
 ) -> ProviderModelSettings {
-    let transcription_model =
-        non_empty_or(settings.transcription_model, &defaults.transcription_model);
-    let mut remote_generation_model = non_empty_or(
+    // Text ids are migrated once (the OpenRouter catalog is live, so there is
+    // no fixed allowlist); transcription, image, and video ids are checked
+    // against their curated sets on every load.
+    let migrate_text = !settings.remote_models_migrated;
+    let migrate = |model: String| {
+        if model == LEGACY_AUTO_GENERATION_MODEL {
+            DEFAULT_GENERATION_MODEL.to_string()
+        } else if migrate_text {
+            migrate_legacy_text_model(model)
+        } else {
+            model
+        }
+    };
+    let (transcription_provider, transcription_model) = normalize_transcription(
+        &settings.transcription_provider,
+        settings.transcription_model,
+    );
+    let mut remote_generation_model = migrate(non_empty_or(
         settings.remote_generation_model,
         &defaults.remote_generation_model,
-    );
+    ));
     let local_generation = sanitize_local_generation(settings.local_generation);
-    let persisted_provider_local = settings.generation_provider == PROVIDER_LOCAL;
-    let local_active =
-        persisted_provider_local && local_generation_settings_configured(&local_generation);
-
-    let generation_model = if local_active {
-        local_generation.model_id.clone()
-    } else if persisted_provider_local {
-        // Local was selected but is no longer valid. Fall back to the remote
-        // model. The persisted `generation_model` holds the stale LOCAL model
-        // id, so it must not leak into the remote fallback.
+    // A historical chat endpoint must not leak its stale local model id into
+    // the independent OpenRouter model. The endpoint itself remains for notes.
+    let generation_model = if settings.generation_provider == PROVIDER_LOCAL {
         remote_generation_model.clone()
     } else {
-        // Venice, legacy, or missing provider: honor the saved generation model
-        // and back-fill remote_generation_model from it.
-        let configured = non_empty_or(settings.generation_model, &remote_generation_model);
+        // Remote or missing provider: honor the saved generation model and
+        // back-fill remote_generation_model from it.
+        let configured = match normalize_optional_model_field(Some(settings.generation_model)) {
+            Some(model) => migrate(model),
+            None => remote_generation_model.clone(),
+        };
         remote_generation_model = configured.clone();
         configured
     };
+    let llm_endpoints = settings
+        .llm_endpoints
+        .into_iter()
+        .filter_map(|mut endpoint| {
+            endpoint.base_url = normalize_local_base_url(&endpoint.base_url).ok()?;
+            endpoint.model_id = endpoint.model_id.trim().to_string();
+            (!endpoint.id.trim().is_empty() && !endpoint.model_id.is_empty()).then_some(endpoint)
+        })
+        .collect();
 
     let image_safe_mode = if settings.image_safe_mode_set_by_user {
         settings.image_safe_mode
@@ -1394,27 +1624,38 @@ fn sanitize_settings(
         true
     };
 
-    ProviderModelSettings {
-        transcription_provider: transcription_provider_for_model(&transcription_model).to_string(),
-        generation_provider: if local_active {
-            PROVIDER_LOCAL.to_string()
-        } else {
-            PROVIDER_VENICE.to_string()
-        },
+    let mut sanitized = ProviderModelSettings {
+        transcription_provider,
+        generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model,
         generation_model,
-        cost_quality: settings.cost_quality.min(100),
         remote_generation_model,
-        image_model: non_empty_or(settings.image_model, &defaults.image_model),
-        video_model: sanitize_video_model(settings.video_model, &defaults.video_model),
-        venice_api_key: normalize_api_key_option(settings.venice_api_key),
+        image_model: curated_or_default(
+            settings.image_model,
+            KNOWN_IMAGE_MODELS,
+            &defaults.image_model,
+        ),
+        video_model: curated_or_default(
+            settings.video_model,
+            KNOWN_VIDEO_MODELS,
+            &defaults.video_model,
+        ),
+        provider_api_keys_configured: settings.provider_api_keys_configured,
+        remote_models_migrated: true,
         local_generation,
+        llm_endpoints,
+        llm_usage: settings.llm_usage,
+        llm_cli_levels: settings.llm_cli_levels,
+        llm_registry_migrated: settings.llm_registry_migrated,
+        llm_cli_default_applied: settings.llm_cli_default_applied,
         image_safe_mode,
         image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
         image_safe_mode_set_by_user: settings.image_safe_mode_set_by_user,
         live_transcription: settings.live_transcription,
         profile_overrides: sanitize_profile_overrides(settings.profile_overrides),
-    }
+    };
+    crate::llm::registry::normalize(&mut sanitized);
+    sanitized
 }
 
 fn sanitize_profile_overrides(
@@ -1426,41 +1667,78 @@ fn sanitize_profile_overrides(
             let profile = validate_profile_override_name(&profile).ok()?.to_string();
             let overrides = ProfileModelOverrides {
                 transcription_provider: normalize_optional_model_field(
-                    overrides.transcription_provider,
+                    overrides.transcription_provider.clone(),
+                )
+                .map(|provider| normalize_transcription(&provider, String::new()).0),
+                transcription_model: if overrides.transcription_provider.as_deref()
+                    == Some(PROVIDER_LOCAL)
+                {
+                    Some(normalize_transcription(PROVIDER_LOCAL, String::new()).1)
+                } else {
+                    curated_override(
+                        overrides.transcription_model,
+                        KNOWN_TRANSCRIPTION_MODELS,
+                        DEFAULT_TRANSCRIPTION_MODEL,
+                    )
+                },
+                image_model: curated_override(
+                    overrides.image_model,
+                    KNOWN_IMAGE_MODELS,
+                    DEFAULT_IMAGE_MODEL,
                 ),
-                transcription_model: normalize_optional_model_field(overrides.transcription_model),
-                image_model: normalize_optional_model_field(overrides.image_model),
-                video_model: normalize_optional_model_field(overrides.video_model),
+                video_model: curated_override(
+                    overrides.video_model,
+                    KNOWN_VIDEO_MODELS,
+                    DEFAULT_VIDEO_MODEL,
+                ),
             };
             (!profile_overrides_empty(&overrides)).then_some((profile, overrides))
         })
         .collect()
 }
 
-/// Migrates a persisted video model that is no longer curated (for example the
-/// delisted Seedance default older installs saved) to the current default, so an
-/// updated install never carries a stale id that Clovy API rejects as
-/// `model_not_priced`. A recognized selection is kept; empty falls back to the
-/// default like the other model fields.
-fn sanitize_video_model(persisted: String, default: &str) -> String {
+/// Keeps a supported curated model id and loads anything else as the default.
+/// This includes empty, delisted, and pre-cutover model ids.
+fn curated_or_default(persisted: String, curated: &[&str], default: &str) -> String {
     let candidate = non_empty_or(persisted, default);
-    if KNOWN_VIDEO_MODELS.contains(&candidate.as_str()) {
+    if curated.contains(&candidate.as_str()) {
         candidate
     } else {
         default.to_string()
     }
 }
 
-fn normalize_api_key_option(value: Option<String>) -> Option<String> {
-    value.and_then(|value| normalize_api_key_for_save(&value))
+/// [`curated_or_default`] for a profile override; an absent override stays
+/// absent so the profile keeps following the global choice.
+fn curated_override(value: Option<String>, curated: &[&str], default: &str) -> Option<String> {
+    normalize_optional_model_field(value).map(|model| curated_or_default(model, curated, default))
 }
 
-fn normalize_api_key_for_save(value: &str) -> Option<String> {
-    let value = normalize_api_key(value)?;
-    if value.chars().count() > MAX_VENICE_API_KEY_CHARS || value.chars().any(char::is_control) {
-        None
+/// The OpenRouter id for a text model id saved before the
+/// OpenRouter cutover (`kimi-k2-6` → `moonshotai/kimi-k2.6`); any other id,
+/// Auto included, is returned unchanged. Agent sessions and stored runs keep
+/// the id they recorded, so the remote boundary resolves it here instead of
+/// relying on a server-side alias.
+pub fn current_text_model_id(model: &str) -> &str {
+    let model = model.trim();
+    LEGACY_TEXT_MODEL_EQUIVALENTS
+        .iter()
+        .find(|(legacy, _)| *legacy == model)
+        .map_or(model, |&(_, current)| current)
+}
+
+/// Maps a text model id from a settings file saved before the OpenRouter
+/// cutover. Auto and unknown legacy ids become the explicit default; known
+/// equivalents retain their OpenRouter model identity.
+fn migrate_legacy_text_model(model: String) -> String {
+    if model == LEGACY_AUTO_GENERATION_MODEL {
+        return DEFAULT_GENERATION_MODEL.to_string();
+    }
+    let current = current_text_model_id(&model);
+    if current == model.trim() {
+        DEFAULT_GENERATION_MODEL.to_string()
     } else {
-        Some(value)
+        current.to_string()
     }
 }
 
@@ -1473,56 +1751,62 @@ fn normalize_api_key(value: &str) -> Option<String> {
     }
 }
 
-fn validate_venice_api_key_format(value: &str) -> Result<(), AppError> {
-    if value.chars().count() > MAX_VENICE_API_KEY_CHARS
-        || value.chars().any(|character| character.is_control())
+/// Keys are opaque: any non-empty value without control characters and within
+/// the size cap is sent to the provider's check.
+fn validate_provider_api_key(provider: BuiltinProvider, value: &str) -> Result<String, AppError> {
+    let name = provider.display_name();
+    let api_key = normalize_api_key(value).ok_or_else(|| {
+        AppError::new(
+            "provider_api_key_required",
+            format!("Enter your {name} API key before saving."),
+        )
+    })?;
+    if api_key.chars().count() > MAX_PROVIDER_API_KEY_CHARS || api_key.chars().any(char::is_control)
     {
         return Err(AppError::new(
-            "venice_api_key_invalid",
-            "Enter a valid Venice API key.",
+            "provider_api_key_invalid",
+            format!("Enter a valid {name} API key."),
         ));
     }
-    Ok(())
+    Ok(api_key)
 }
 
-async fn verify_venice_api_key(api_key: &str) -> Result<(), AppError> {
-    let url = format!("{VENICE_API_BASE_URL}/models");
-    let response = venice_verify_http_client()
-        .get(&url)
-        .query(&[("type", "text")])
-        .bearer_auth(api_key)
+/// Asks `url` (the provider's key check) whether it accepts `api_key`. 401/403
+/// is a rejection; anything else that is not a success is reported as a failed
+/// check, never as a valid key.
+async fn verify_provider_api_key(
+    provider: BuiltinProvider,
+    api_key: &str,
+    url: &str,
+) -> Result<(), AppError> {
+    let name = provider.display_name();
+    let response = provider
+        .authorize(PROVIDER_KEY_CHECK_HTTP_CLIENT.get(url), api_key)
         .send()
         .await
         .map_err(|_| {
             AppError::new(
-                "venice_api_key_verification_failed",
-                "Could not verify the Venice API key. Check your connection and try again.",
+                "provider_api_key_verification_failed",
+                format!("Could not check the {name} API key. Check your connection and try again."),
             )
         })?;
-    match response.status() {
-        reqwest::StatusCode::OK => Ok(()),
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(AppError::new(
-            "venice_api_key_rejected",
-            "Venice rejected this API key. Check the key and try again.",
-        )),
-        _ => Err(AppError::new(
-            "venice_api_key_verification_failed",
-            "Could not verify the Venice API key. Try again later.",
-        )),
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
     }
-}
-
-fn venice_verify_http_client() -> &'static reqwest::Client {
-    VENICE_VERIFY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(VENICE_API_KEY_VERIFY_TIMEOUT)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent("clovy/0.1")
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(AppError::new(
+            "provider_api_key_rejected",
+            format!("{name} rejected this API key. Check the key and try again."),
+        ));
+    }
+    Err(AppError::new(
+        "provider_api_key_verification_failed",
+        format!("Could not check the {name} API key. Try again later."),
+    ))
 }
 
 fn non_empty_or(value: String, fallback: &str) -> String {
@@ -1571,6 +1855,13 @@ fn effective_settings_for_profile(
     if let Some(model) = overrides.video_model.as_deref() {
         effective.video_model = model.to_string();
     }
+    (
+        effective.transcription_provider,
+        effective.transcription_model,
+    ) = normalize_transcription(
+        &effective.transcription_provider,
+        effective.transcription_model,
+    );
     effective
 }
 
@@ -1616,21 +1907,43 @@ fn update_settings(
     })
 }
 
-/// Like [`update_settings`] but lets the closure reject the change. The closure
-/// must perform every fallible check before mutating `settings`, so an early
-/// error leaves the persisted state untouched (nothing is saved on `Err`).
+/// Apply a candidate atomically; errors never mutate the managed or published
+/// view. Secret operations need `update_provider_credential` for compensation.
 fn update_settings_result(
     state: &ProviderSettingsState,
     update: impl FnOnce(&mut ProviderModelSettings) -> Result<(), AppError>,
 ) -> Result<ProviderModelSettingsDto, AppError> {
+    let settings = update_llm_registry(state, update)?;
+    local_transcriber::selection_changed();
+    Ok(ProviderModelSettingsDto::from(&settings))
+}
+
+/// Applies a registry change atomically: the closure works on a copy, and
+/// only a successful change is saved and published.
+pub(crate) fn update_llm_registry(
+    state: &ProviderSettingsState,
+    update: impl FnOnce(&mut ProviderModelSettings) -> Result<(), AppError>,
+) -> Result<ProviderModelSettings, AppError> {
     let mut settings = state
         .settings
         .lock()
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
-    update(&mut settings)?;
-    save_settings(state, &settings)?;
-    replace_current_settings(settings.clone());
-    Ok(ProviderModelSettingsDto::from(&*settings))
+    let mut candidate = settings.clone();
+    update(&mut candidate)?;
+    save_settings(state, &candidate)?;
+    *settings = candidate.clone();
+    replace_current_settings(candidate.clone());
+    Ok(candidate)
+}
+
+pub(crate) fn settings_snapshot(
+    state: &ProviderSettingsState,
+) -> Result<ProviderModelSettings, AppError> {
+    state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))
 }
 
 fn save_settings(
@@ -1643,8 +1956,26 @@ fn save_settings(
     }
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))?;
-    fs::write(&state.path, serialized)
-        .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))
+    // A failed write must not truncate the saved settings. Stage on the same
+    // filesystem, then atomically replace; tempfile cleans up on any error.
+    use std::io::Write;
+    let parent = state.path.parent().ok_or_else(|| {
+        AppError::new(
+            "provider_settings_save_failed",
+            "Settings directory is missing.",
+        )
+    })?;
+    let save_error =
+        |error: std::io::Error| AppError::new("provider_settings_save_failed", error.to_string());
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(save_error)?;
+    temporary
+        .write_all(serialized.as_bytes())
+        .map_err(save_error)?;
+    temporary.as_file().sync_all().map_err(save_error)?;
+    temporary
+        .persist(&state.path)
+        .map_err(|error| save_error(error.error))?;
+    Ok(())
 }
 
 fn sanitize_local_generation(settings: LocalGenerationSettings) -> LocalGenerationSettings {
@@ -1659,15 +1990,11 @@ fn sanitize_local_generation(settings: LocalGenerationSettings) -> LocalGenerati
     }
 }
 
-fn local_generation_settings_configured(settings: &LocalGenerationSettings) -> bool {
-    !settings.base_url.trim().is_empty() && !settings.model_id.trim().is_empty()
-}
-
-/// Validates a local model base URL. Accepts any http/https URL that has a
-/// host (trailing slashes trimmed). The loopback-only restriction was removed
-/// so LAN endpoints work; the frontend surfaces the "requests leave your
-/// device" warning.
-fn normalize_local_base_url(value: &str) -> Result<String, AppError> {
+/// Validates an OpenAI-compatible endpoint base URL. Accepts any http/https
+/// URL that has a host (trailing slashes trimmed). The loopback-only
+/// restriction was removed so LAN endpoints work; the frontend surfaces the
+/// "requests leave your device" warning.
+pub(crate) fn normalize_local_base_url(value: &str) -> Result<String, AppError> {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(AppError::new(
@@ -1755,138 +2082,26 @@ impl ModelMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::secrets::SecretStore;
 
     #[test]
     fn provider_settings_path_derives_from_the_isolated_config_dir() {
-        let isolated_config_dir = PathBuf::from("/tmp/co.opensoftware.june-dev");
+        let isolated_config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy-dev");
 
         assert_eq!(
             provider_settings_path_from_config_dir(isolated_config_dir),
-            PathBuf::from("/tmp/co.opensoftware.june-dev/provider-settings.json")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev/provider-settings.json")
         );
     }
 
     #[test]
-    fn legacy_settings_default_cost_quality_to_higher_quality() {
+    fn retired_cost_quality_is_not_persisted_or_exposed_to_the_renderer() {
         let settings: ProviderModelSettings =
-            serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(settings.cost_quality, 100);
-    }
-
-    #[test]
-    fn capabilities_include_vision_matches_normalized_supports_vision() {
-        // Mirrors the frontend `modelSupportsImageInput`: normalize (lowercase,
-        // strip non-letters) then match `supportsvision`, so a rename to
-        // snake_case still resolves. Never keys off marketing `traits`.
-        assert!(capabilities_include_vision(&["supportsVision".to_string()]));
-        assert!(capabilities_include_vision(&[
-            "supportsTools".to_string(),
-            "supports_vision".to_string(),
-        ]));
-        assert!(!capabilities_include_vision(&["supportsTools".to_string()]));
-        assert!(!capabilities_include_vision(&[]));
-    }
-
-    #[test]
-    fn generation_vision_uses_selected_catalog_model() {
-        let vision = vec!["supportsVision".to_string()];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            "vision-model",
-            false,
-            [("vision-model", vision.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_uses_catalog_backed_kimi_when_auto_is_absent() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_non_local_auto_does_not_use_kimi_fallback() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            false,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_rejects_kimi_without_tool_support() {
-        let vision_only = vec!["supportsVision".to_string()];
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, vision_only.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_accepts_an_alternate_compatible_model() {
-        let compatible = vec![
-            "parent.supportsVision".to_string(),
-            "features.toolCalling".to_string(),
-        ];
-
-        assert!(generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [("replacement-model", compatible.as_slice())],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_without_catalog_fallback_is_false() {
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            std::iter::empty(),
-        ));
-    }
-
-    #[test]
-    fn generation_vision_present_auto_wins_over_local_kimi_fallback() {
-        let compatible = vec![
-            "supportsVision".to_string(),
-            "supportsFunctionCalling".to_string(),
-        ];
-        let no_capabilities = Vec::new();
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [
-                (LOCAL_AUTO_VISION_FALLBACK_MODEL, compatible.as_slice()),
-                (AUTO_GENERATION_MODEL, no_capabilities.as_slice()),
-            ],
-        ));
-    }
-
-    #[test]
-    fn generation_vision_local_auto_requires_a_compatible_catalog_model() {
-        let no_capabilities = Vec::new();
-
-        assert!(!generation_model_supports_vision_from_catalog(
-            AUTO_GENERATION_MODEL,
-            true,
-            [(LOCAL_AUTO_VISION_FALLBACK_MODEL, no_capabilities.as_slice(),)],
-        ));
+            serde_json::from_value(serde_json::json!({"costQuality": 42})).unwrap();
+        let stored = serde_json::to_value(&settings).unwrap();
+        let dto = serde_json::to_value(ProviderModelSettingsDto::from(&settings)).unwrap();
+        assert!(stored.get("costQuality").is_none());
+        assert!(dto.get("costQuality").is_none());
     }
 
     #[test]
@@ -2093,11 +2308,11 @@ mod tests {
     }
 
     #[test]
-    fn venice_models_response_serializes_canonical_mode() {
-        let response = VeniceModelsResponse {
+    fn provider_models_response_serializes_canonical_mode() {
+        let response = ProviderModelsResponse {
             mode: ModelMode::Transcription,
             model_type: "asr".to_string(),
-            selected_model: "nvidia/parakeet-tdt-0.6b-v3".to_string(),
+            selected_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
             models: Vec::new(),
         };
 
@@ -2107,52 +2322,650 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provider_settings_deserialize_legacy_shape() {
-        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "custom-remote-model"
-        }))
-        .unwrap();
-        let sanitized = sanitize_settings(settings, &default_settings());
+    /// A file written by a pre-cutover build, shaped like a real profile:
+    /// Venice transcription, text, and media, a plaintext Venice key, Claude CLI
+    /// for chat and activity, Clovy for notes and cleanup, an endpoint whose key
+    /// is in the Keychain, a measured CLI level, and a profile override.
+    const LEGACY_VENICE_SETTINGS: &str = r#"{
+      "transcriptionProvider": "venice",
+      "generationProvider": "venice",
+      "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
+      "generationModel": "zai-org-glm-5-2",
+      "remoteGenerationModel": "zai-org-glm-5-2",
+      "costQuality": 40,
+      "imageModel": "venice-sd35",
+      "videoModel": "wan-2.2-a14b-text-to-video",
+      "veniceApiKey": "legacy-venice-secret",
+      "llmRegistryMigrated": true,
+      "llmEndpoints": [{
+        "id": "ep-lan", "name": "LAN", "baseUrl": "http://192.168.1.5:11434/v1",
+        "modelId": "llama3.1:8b", "hasApiKey": true
+      }],
+      "llmUsage": {
+        "chat": { "kind": "cli", "id": "claude" },
+        "notes": { "kind": "clovy" },
+        "dictationCleanup": { "kind": "clovy" },
+        "activity": { "kind": "cli", "id": "claude" }
+      },
+      "llmCliLevels": { "claude": "json_schema" },
+      "imageSafeMode": false,
+      "imageSafeModeSetByUser": true,
+      "liveTranscription": false,
+      "profileOverrides": {
+        "work": {
+          "transcriptionProvider": "openai",
+          "transcriptionModel": "gpt-4o-transcribe",
+          "imageModel": "lustify-v8"
+        }
+      }
+    }"#;
 
-        assert_eq!(sanitized.generation_provider, PROVIDER_VENICE);
-        assert_eq!(sanitized.generation_model, "custom-remote-model");
-        assert_eq!(sanitized.remote_generation_model, "custom-remote-model");
+    #[test]
+    fn legacy_settings_migrate_to_the_new_providers_and_keep_every_other_choice() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let (migrated, migrated_now) = settings_from_json(LEGACY_VENICE_SETTINGS, &store).unwrap();
+
+        assert!(migrated_now, "a pre-cutover file must be rewritten");
+        assert_eq!(migrated.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(migrated.transcription_model, DEFAULT_TRANSCRIPTION_MODEL);
+        assert_eq!(migrated.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(migrated.generation_model, "z-ai/glm-5.2");
+        assert_eq!(migrated.remote_generation_model, "z-ai/glm-5.2");
+        assert_eq!(migrated.image_model, DEFAULT_IMAGE_MODEL);
+        assert_eq!(migrated.video_model, DEFAULT_VIDEO_MODEL);
+        assert_eq!(
+            migrated.provider_api_keys_configured,
+            ProviderApiKeysConfigured::default(),
+            "a Venice key never becomes a key for another provider"
+        );
+
+        // Everything that is not a Venice selection survives untouched.
+        assert_eq!(
+            migrated.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(
+            migrated.llm_usage.activity,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(migrated.llm_usage.notes, ProviderRef::OpenRouter);
+        assert_eq!(
+            migrated.llm_usage.dictation_cleanup,
+            ProviderRef::OpenRouter
+        );
+        assert_eq!(migrated.llm_endpoints.len(), 1);
+        assert_eq!(migrated.llm_endpoints[0].id, "ep-lan");
+        assert!(migrated.llm_endpoints[0].has_api_key);
+        assert_eq!(
+            migrated.llm_cli_levels.get(&CliKind::Claude),
+            Some(&StructuredOutputLevel::JsonSchema)
+        );
+        assert!(!migrated.image_safe_mode);
+        assert!(migrated.image_safe_mode_set_by_user);
+        assert!(!migrated.live_transcription);
+        let work = migrated
+            .profile_overrides
+            .get("work")
+            .expect("override kept");
+        assert_eq!(work.transcription_provider.as_deref(), Some(PROVIDER_GROQ));
+        assert_eq!(
+            work.transcription_model.as_deref(),
+            Some(DEFAULT_TRANSCRIPTION_MODEL)
+        );
+        assert_eq!(work.image_model.as_deref(), Some(DEFAULT_IMAGE_MODEL));
+        assert_eq!(work.video_model, None);
+
+        // No secret moved into the Keychain store, and the rewritten file no
+        // longer carries the plaintext Venice key.
+        for provider in [
+            BuiltinProvider::Groq,
+            BuiltinProvider::OpenRouter,
+            BuiltinProvider::Fal,
+            BuiltinProvider::Tavily,
+        ] {
+            assert_eq!(store.get(provider.secret_account()).unwrap(), None);
+        }
+        let rewritten = serde_json::to_string_pretty(&migrated).unwrap();
+        assert!(!rewritten.contains("veniceApiKey"));
+        assert!(!rewritten.contains("legacy-venice-secret"));
+
+        // Restart: the rewritten file loads to the same settings and is not
+        // migrated again.
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, migrated);
     }
 
     #[test]
-    fn venice_api_key_format_treats_credentials_as_opaque() {
-        assert!(validate_venice_api_key_format("VENICE_INFERENCE_KEY_valid").is_ok());
-        assert!(validate_venice_api_key_format("VENICE_ADMIN_KEY_valid").is_ok());
-        assert!(validate_venice_api_key_format("legacy-or-future-key-format").is_ok());
-        assert_eq!(
-            validate_venice_api_key_format("invalid\tkey")
-                .unwrap_err()
-                .code,
-            "venice_api_key_invalid"
-        );
-        assert_eq!(
-            validate_venice_api_key_format(&"x".repeat(MAX_VENICE_API_KEY_CHARS + 1))
-                .unwrap_err()
-                .code,
-            "venice_api_key_invalid"
-        );
+    fn legacy_text_models_retire_auto_and_keep_same_model_equivalents() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        for (legacy, expected) in [
+            (LEGACY_AUTO_GENERATION_MODEL, DEFAULT_GENERATION_MODEL),
+            ("kimi-k2-6", "moonshotai/kimi-k2.6"),
+            ("venice-uncensored", DEFAULT_GENERATION_MODEL),
+        ] {
+            let raw = serde_json::json!({
+                "generationProvider": "venice",
+                "generationModel": legacy,
+                "remoteGenerationModel": legacy
+            })
+            .to_string();
+            let (migrated, _) = settings_from_json(&raw, &store).unwrap();
+            assert_eq!(migrated.generation_model, expected, "{legacy}");
+            assert_eq!(migrated.remote_generation_model, expected, "{legacy}");
+        }
     }
 
     #[test]
-    fn sanitize_settings_preserves_legacy_venice_api_key_for_actionable_error() {
-        let settings = ProviderModelSettings {
-            venice_api_key: Some("not-a-venice-inference-key".to_string()),
-            ..default_settings()
+    fn retired_provider_usage_and_auto_migrate_once_without_changing_cli_chat() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "generationProvider": "openrouter",
+            "generationModel": "open-software/auto",
+            "remoteGenerationModel": "open-software/auto",
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmCliDefaultApplied": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "clovy" },
+                "dictationCleanup": { "kind": "clovy" },
+                "activity": { "kind": "none" }
+            }
+        })
+        .to_string();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("provider-settings.json");
+        fs::write(&path, raw).unwrap();
+        let (settings, migrated) =
+            settings_from_json(&fs::read_to_string(&path).unwrap(), &store).unwrap();
+        let state = ProviderSettingsState {
+            path: path.clone(),
+            settings: Mutex::new(settings.clone()),
         };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
+        save_settings(&state, &settings).unwrap();
+        let rewritten = fs::read_to_string(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(written["llmUsage"]["notes"]["kind"], "openrouter");
+        assert!(written["llmUsage"].get("dictationCleanup").is_none());
+        assert_eq!(settings.generation_model, DEFAULT_GENERATION_MODEL);
+        assert_eq!(settings.remote_generation_model, DEFAULT_GENERATION_MODEL);
         assert_eq!(
-            sanitized.venice_api_key.as_deref(),
-            Some("not-a-venice-inference-key")
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
         );
+        assert_eq!(settings.llm_usage.activity, ProviderRef::None);
+        assert!(migrated);
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, settings);
+    }
+
+    #[test]
+    fn retired_dictation_cleanup_choice_is_fixed_openrouter_and_not_persisted() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmUsage": {
+                "chat": { "kind": "cli", "id": "claude" },
+                "notes": { "kind": "cli", "id": "codex" },
+                "dictationCleanup": { "kind": "endpoint", "id": "old" }
+            }
+        })
+        .to_string();
+        let (settings, migrated) = settings_from_json(&raw, &store).unwrap();
+        assert_eq!(
+            settings
+                .llm_usage
+                .get(crate::llm::registry::LlmUsage::DictationCleanup)
+                .key(),
+            "openrouter"
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(serde_json::to_value(&settings).unwrap()["llmUsage"]
+            .get("dictationCleanup")
+            .is_none());
+        assert!(migrated);
+    }
+
+    #[test]
+    fn migrated_settings_keep_the_chosen_models_on_every_load() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let raw = serde_json::json!({
+            "transcriptionProvider": PROVIDER_GROQ,
+            "transcriptionModel": "whisper-large-v3",
+            "generationProvider": PROVIDER_OPENROUTER,
+            "generationModel": "moonshotai/kimi-k3",
+            "remoteGenerationModel": "moonshotai/kimi-k3",
+            "providerApiKeysConfigured": { "groq": true },
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true
+        })
+        .to_string();
+
+        let (loaded, migrated_now) = settings_from_json(&raw, &store).unwrap();
+
+        // The pre-cut file still needs its missing/native chat choice retired.
+        assert!(migrated_now);
+        let rewritten = serde_json::to_string(&loaded).unwrap();
+        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(reloaded, loaded);
+        assert_eq!(loaded.transcription_model, "whisper-large-v3");
+        assert_eq!(loaded.generation_model, "moonshotai/kimi-k3");
+        assert_eq!(loaded.remote_generation_model, "moonshotai/kimi-k3");
+        assert!(loaded.provider_api_keys_configured.groq);
+        assert!(!loaded.provider_api_keys_configured.openrouter);
+    }
+
+    #[tokio::test]
+    async fn text_model_selection_preserves_chat_and_note_engines() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let previous = current_settings();
+        let directory = tempfile::tempdir().unwrap();
+        let state = ProviderSettingsState {
+            path: directory.path().join("provider-settings.json"),
+            settings: Mutex::new(default_settings()),
+        };
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.llm_usage.chat = ProviderRef::Cli {
+                id: CliKind::Claude,
+            };
+            settings.llm_usage.notes = ProviderRef::Cli { id: CliKind::Codex };
+        }
+        set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Generation,
+                model_id: "example/text-only".to_string(),
+            },
+        )
+        .unwrap();
+        let settings = state.settings.lock().unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert_eq!(
+            settings.llm_usage.notes,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert_eq!(settings.remote_generation_model, "example/text-only");
+        let saved = fs::read_to_string(&state.path).unwrap();
+        let (reloaded, _) =
+            settings_from_json(&saved, &crate::llm::secrets::MemorySecretStore::default()).unwrap();
+        assert_eq!(reloaded.remote_generation_model, "example/text-only");
+        assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
+        assert_eq!(reloaded.llm_usage.notes, settings.llm_usage.notes);
+        replace_current_settings(previous);
+    }
+
+    #[test]
+    fn local_transcription_selection_without_model_is_rejected_without_mutation() {
+        let state = test_state();
+        let error = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "parakeet-ultra".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            if local_transcription_supported() {
+                "local_model_not_installed"
+            } else {
+                "local_transcription_unsupported"
+            }
+        );
+        assert_eq!(
+            state.settings.lock().unwrap().transcription_provider,
+            "groq"
+        );
+        assert!(!state.path.exists());
+    }
+
+    #[test]
+    fn local_transcription_saved_choice_and_override_survive_supported_platform_load() {
+        let mut settings = default_settings();
+        settings.transcription_provider = "local".into();
+        settings.transcription_model = "old-model".into();
+        settings.profile_overrides.insert(
+            "work".into(),
+            ProfileModelOverrides {
+                transcription_provider: Some("local".into()),
+                transcription_model: Some("old-model".into()),
+                ..Default::default()
+            },
+        );
+        let settings = sanitize_settings(settings, &default_settings());
+        let expected_provider = if local_transcription_supported() {
+            "local"
+        } else {
+            "groq"
+        };
+        let expected_model = if local_transcription_supported() {
+            "parakeet-ultra"
+        } else {
+            DEFAULT_TRANSCRIPTION_MODEL
+        };
+        assert_eq!(settings.transcription_provider, expected_provider);
+        assert_eq!(settings.transcription_model, expected_model);
+        let profile = effective_settings_for_profile(&settings, "work");
+        assert_eq!(profile.transcription_provider, expected_provider);
+        assert_eq!(profile.transcription_model, expected_model);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn local_profile_override_without_model_fails_before_groq_credentials_or_network() {
+        let mut settings = default_settings();
+        settings.profile_overrides.insert(
+            "work".into(),
+            ProfileModelOverrides {
+                transcription_provider: Some(PROVIDER_LOCAL.into()),
+                transcription_model: Some("parakeet-ultra".into()),
+                ..Default::default()
+            },
+        );
+        let profile = effective_settings_for_profile(&settings, "work");
+        assert_eq!(settings.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(profile.transcription_provider, PROVIDER_LOCAL);
+        let sentinel = local_transcriber::NetworkSentinel::start().await;
+        TEST_ORIGIN
+            .scope(sentinel.origin.clone(), async {
+                let error =
+                    transcription::effective_transcription_backend(&profile, None, true, || {
+                        panic!("Missing Local profile model must not read Groq credentials")
+                    })
+                    .unwrap_err();
+                assert_eq!(error.code, "local_model_not_installed");
+            })
+            .await;
+        sentinel.assert_unused();
+    }
+
+    #[test]
+    fn local_model_removal_persists_groq_and_clears_local_profile_overrides() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.transcription_provider = PROVIDER_LOCAL.into();
+            settings.transcription_model = "parakeet-ultra".into();
+            settings.profile_overrides.insert(
+                "work".into(),
+                ProfileModelOverrides {
+                    transcription_provider: Some(PROVIDER_LOCAL.into()),
+                    transcription_model: Some("parakeet-ultra".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(remove_local_transcription_selection(&state).unwrap());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state.path).unwrap()).unwrap();
+        assert_eq!(saved["transcriptionProvider"], "groq");
+        assert_eq!(saved["transcriptionModel"], DEFAULT_TRANSCRIPTION_MODEL);
+        assert_eq!(
+            saved["profileOverrides"]["work"]["transcriptionProvider"],
+            "groq"
+        );
+        assert!(!remove_local_transcription_selection(&state).unwrap());
+    }
+
+    #[test]
+    fn set_provider_model_accepts_curated_ids_and_rejects_others() {
+        let state = test_state();
+
+        let error = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "nvidia/parakeet-tdt-0.6b-v3".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "provider_model_unavailable");
+        assert_eq!(
+            state.settings.lock().unwrap().transcription_model,
+            DEFAULT_TRANSCRIPTION_MODEL
+        );
+
+        let updated = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: " whisper-large-v3 ".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(updated.transcription_model, "whisper-large-v3");
+
+        let updated = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Generation,
+                model_id: "moonshotai/kimi-k3".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(updated.generation_model, "moonshotai/kimi-k3");
+        assert_eq!(updated.remote_generation_model, "moonshotai/kimi-k3");
+    }
+
+    #[test]
+    fn provider_api_key_format_treats_credentials_as_opaque() {
+        for key in [
+            "gsk_example",
+            "sk-or-v1-example",
+            "legacy-or-future-key-format",
+        ] {
+            assert_eq!(
+                validate_provider_api_key(BuiltinProvider::Groq, &format!("  {key}  ")).unwrap(),
+                key
+            );
+        }
+        assert_eq!(
+            validate_provider_api_key(BuiltinProvider::Fal, "   ")
+                .unwrap_err()
+                .code,
+            "provider_api_key_required"
+        );
+        assert_eq!(
+            validate_provider_api_key(BuiltinProvider::Tavily, "invalid\tkey")
+                .unwrap_err()
+                .code,
+            "provider_api_key_invalid"
+        );
+        assert_eq!(
+            validate_provider_api_key(
+                BuiltinProvider::OpenRouter,
+                &"x".repeat(MAX_PROVIDER_API_KEY_CHARS + 1)
+            )
+            .unwrap_err()
+            .code,
+            "provider_api_key_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_save_checks_the_provider_and_stores_only_that_key() {
+        use crate::llm::endpoint::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_: &serde_json::Value| {
+            (200, serde_json::json!({ "data": [] }))
+        }))
+        .await;
+        let state = test_state();
+        let store = crate::llm::secrets::MemorySecretStore::default();
+
+        set_provider_api_key_impl(
+            &state,
+            &store,
+            SetProviderApiKeyRequest {
+                provider: BuiltinProvider::OpenRouter,
+                api_key: " sk-or-user-key ".to_string(),
+            },
+            &format!("{}/key", server.base_url),
+        )
+        .await
+        .unwrap();
+        let dto = set_provider_api_key_impl(
+            &state,
+            &store,
+            SetProviderApiKeyRequest {
+                provider: BuiltinProvider::Fal,
+                api_key: "fal-user-key".to_string(),
+            },
+            &format!("{}/models/pricing", server.base_url),
+        )
+        .await
+        .unwrap();
+
+        // Each provider's own auth scheme reached its check.
+        assert_eq!(
+            server.authorizations.lock().unwrap().as_slice(),
+            [
+                Some("Bearer sk-or-user-key".to_string()),
+                Some("Key fal-user-key".to_string()),
+            ]
+        );
+        assert_eq!(
+            dto.provider_api_keys_configured,
+            ProviderApiKeysConfigured {
+                openrouter: true,
+                fal: true,
+                ..ProviderApiKeysConfigured::default()
+            }
+        );
+        assert_eq!(
+            store.get("builtin:openrouter").unwrap().as_deref(),
+            Some("sk-or-user-key")
+        );
+        assert_eq!(
+            store.get("builtin:fal").unwrap().as_deref(),
+            Some("fal-user-key")
+        );
+        assert_eq!(store.get("builtin:groq").unwrap(), None);
+        assert_eq!(store.get("builtin:tavily").unwrap(), None);
+
+        // The settings file records only that keys exist.
+        let on_disk = fs::read_to_string(&state.path).unwrap();
+        assert!(!on_disk.contains("sk-or-user-key"));
+        assert!(!on_disk.contains("fal-user-key"));
+        let reloaded: ProviderModelSettings = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(
+            reloaded.provider_api_keys_configured,
+            dto.provider_api_keys_configured
+        );
+        let settings = state.settings.lock().unwrap().clone();
+        assert_eq!(
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Fal).unwrap(),
+            Some("fal-user-key".to_string())
+        );
+        assert_eq!(
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Tavily).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_rejected_or_unchecked_changes_nothing() {
+        use crate::llm::endpoint::test_server;
+        for (status, expected) in [
+            (401, "provider_api_key_rejected"),
+            (403, "provider_api_key_rejected"),
+            (500, "provider_api_key_verification_failed"),
+        ] {
+            let server = test_server::start(std::sync::Arc::new(move |_: &serde_json::Value| {
+                (status, serde_json::json!({ "error": "no" }))
+            }))
+            .await;
+            let state = test_state();
+            let store = crate::llm::secrets::MemorySecretStore::default();
+
+            let error = set_provider_api_key_impl(
+                &state,
+                &store,
+                SetProviderApiKeyRequest {
+                    provider: BuiltinProvider::Groq,
+                    api_key: "gsk-bad".to_string(),
+                },
+                &format!("{}/models", server.base_url),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.code, expected, "status {status}");
+            assert!(!error.message.contains("gsk-bad"));
+            assert_eq!(store.get("builtin:groq").unwrap(), None);
+            assert!(
+                !state
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .provider_api_keys_configured
+                    .groq
+            );
+            assert!(!state.path.exists(), "nothing is saved on a failed check");
+        }
+    }
+
+    #[test]
+    fn provider_api_key_clear_removes_only_that_provider() {
+        let state = test_state();
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        store.set("builtin:groq", "gsk-user").unwrap();
+        store.set("builtin:tavily", "tvly-user").unwrap();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.provider_api_keys_configured.groq = true;
+            settings.provider_api_keys_configured.tavily = true;
+        }
+
+        let dto = clear_provider_api_key_impl(&state, &store, BuiltinProvider::Groq).unwrap();
+
+        assert!(!dto.provider_api_keys_configured.groq);
+        assert!(dto.provider_api_keys_configured.tavily);
+        assert_eq!(store.get("builtin:groq").unwrap(), None);
+        assert_eq!(
+            store.get("builtin:tavily").unwrap().as_deref(),
+            Some("tvly-user")
+        );
+    }
+
+    #[test]
+    fn recorded_provider_key_missing_from_the_store_is_an_error_without_fallback() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let mut settings = default_settings();
+        // A key left in the store without a record is never sent.
+        store.set("builtin:groq", "gsk-orphan").unwrap();
+        assert_eq!(
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Groq).unwrap(),
+            None
+        );
+
+        settings.provider_api_keys_configured.openrouter = true;
+        let error =
+            saved_provider_api_key(&settings, &store, BuiltinProvider::OpenRouter).unwrap_err();
+        assert_eq!(error.code, "provider_api_key_unavailable");
     }
 
     #[test]
@@ -2168,17 +2981,33 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_settings_keeps_a_curated_video_model() {
-        // A non-default curated id must survive load unchanged — otherwise the
+    fn sanitize_settings_keeps_every_curated_model() {
+        // A curated non-default id must survive load unchanged; otherwise an
         // allowlist would silently collapse every pick to the default.
-        let curated = "grok-imagine-text-to-video-private";
-        assert!(KNOWN_VIDEO_MODELS.contains(&curated));
-        let settings = ProviderModelSettings {
-            video_model: curated.to_string(),
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-        assert_eq!(sanitized.video_model, curated);
+        for &model in KNOWN_TRANSCRIPTION_MODELS {
+            let settings = ProviderModelSettings {
+                transcription_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.transcription_model, model);
+        }
+        for &model in KNOWN_IMAGE_MODELS {
+            let settings = ProviderModelSettings {
+                image_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.image_model, model);
+        }
+        for &model in KNOWN_VIDEO_MODELS {
+            let settings = ProviderModelSettings {
+                video_model: model.to_string(),
+                ..default_settings()
+            };
+            let sanitized = sanitize_settings(settings, &default_settings());
+            assert_eq!(sanitized.video_model, model);
+        }
     }
 
     #[test]
@@ -2222,51 +3051,57 @@ mod tests {
     }
 
     #[test]
-    fn invalid_saved_local_settings_do_not_activate() {
-        // A genuinely unparseable base_url cannot activate local generation, and
-        // the stale local model id must not leak into the remote fallback.
-        let settings = ProviderModelSettings {
-            generation_provider: PROVIDER_LOCAL.to_string(),
-            generation_model: "llama3.1:8b".to_string(),
-            remote_generation_model: "remote-model".to_string(),
-            local_generation: LocalGenerationSettings {
-                base_url: "not a url".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
-        assert_eq!(sanitized.generation_provider, PROVIDER_VENICE);
-        assert_eq!(sanitized.local_generation.base_url, "");
+    fn llm_invalid_legacy_local_endpoint_does_not_activate() {
+        // An unparseable legacy base_url cannot activate an endpoint, and the
+        // stale local model id must not leak into the remote fallback.
+        let raw = r#"{
+            "generationProvider": "local",
+            "generationModel": "llama3.1:8b",
+            "remoteGenerationModel": "remote-model",
+            "remoteModelsMigrated": true,
+            "localGeneration": { "baseUrl": "not a url", "modelId": "llama3.1:8b" }
+        }"#;
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
+        assert_eq!(sanitized.generation_provider, PROVIDER_OPENROUTER);
+        assert!(sanitized.llm_endpoints.is_empty());
         assert_eq!(sanitized.generation_model, "remote-model");
         assert_eq!(sanitized.remote_generation_model, "remote-model");
     }
 
     #[test]
-    fn lan_local_settings_activate() {
-        let settings = ProviderModelSettings {
-            generation_provider: PROVIDER_LOCAL.to_string(),
-            generation_model: "llama3.1:8b".to_string(),
-            remote_generation_model: "remote-model".to_string(),
-            local_generation: LocalGenerationSettings {
-                base_url: "http://192.168.1.5:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: "secret".to_string(),
-            },
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-
-        assert_eq!(sanitized.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(sanitized.generation_model, "llama3.1:8b");
+    fn llm_lan_endpoint_chat_migrates_without_changing_the_text_model() {
+        let raw = r#"{
+            "generationProvider": "openrouter",
+            "generationModel": "remote-model",
+            "remoteGenerationModel": "remote-model",
+            "remoteModelsMigrated": true,
+            "llmRegistryMigrated": true,
+            "llmEndpoints": [{
+                "id": "lan", "name": "LAN", "baseUrl": "http://192.168.1.5:11434/v1/",
+                "modelId": "llama3.1:8b", "hasApiKey": false
+            }],
+            "llmUsage": { "chat": { "kind": "endpoint", "id": "lan" } }
+        }"#;
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let sanitized = settings_from_json_for_tests(raw, &store).unwrap();
+        assert_eq!(sanitized.generation_provider, PROVIDER_OPENROUTER);
+        assert_eq!(sanitized.generation_model, "remote-model");
+        assert_eq!(
+            sanitized.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
         assert_eq!(sanitized.remote_generation_model, "remote-model");
         assert_eq!(
-            sanitized.local_generation.base_url,
+            sanitized.llm_endpoints[0].base_url,
             "http://192.168.1.5:11434/v1"
         );
-        assert_eq!(sanitized.local_generation.api_key, "secret");
+        assert_eq!(sanitized.llm_usage.notes, ProviderRef::OpenRouter);
+        assert_eq!(sanitized.llm_usage.activity, ProviderRef::None);
+        let dto = ProviderModelSettingsDto::from(&sanitized);
+        assert!(dto.local_generation.model_id.is_empty());
     }
 
     #[test]
@@ -2323,28 +3158,28 @@ mod tests {
     #[test]
     fn profile_overrides_resolve_fallbacks_and_partial_overrides() {
         let mut settings = default_settings();
-        settings.transcription_provider = PROVIDER_VENICE.to_string();
+        settings.transcription_provider = PROVIDER_GROQ.to_string();
         settings.transcription_model = "global-asr".to_string();
         settings.image_model = "global-image".to_string();
         settings.video_model = "global-video".to_string();
         settings.profile_overrides.insert(
             "writing".to_string(),
             ProfileModelOverrides {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
-                transcription_model: Some("gpt-4o-transcribe".to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
+                transcription_model: Some("whisper-large-v3".to_string()),
                 image_model: None,
                 video_model: Some("profile-video".to_string()),
             },
         );
 
         let effective = effective_settings_for_profile(&settings, "writing");
-        assert_eq!(effective.transcription_provider, PROVIDER_OPENAI);
-        assert_eq!(effective.transcription_model, "gpt-4o-transcribe");
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
+        assert_eq!(effective.transcription_model, "whisper-large-v3");
         assert_eq!(effective.image_model, "global-image");
         assert_eq!(effective.video_model, "profile-video");
 
         let effective = effective_settings_for_profile(&settings, "unknown");
-        assert_eq!(effective.transcription_provider, PROVIDER_VENICE);
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
         assert_eq!(effective.image_model, "global-image");
         assert_eq!(effective.video_model, "global-video");
@@ -2360,7 +3195,7 @@ mod tests {
         settings.profile_overrides.insert(
             "default".to_string(),
             ProfileModelOverrides {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: Some("profile-asr".to_string()),
                 image_model: Some("profile-image".to_string()),
                 video_model: Some("profile-video".to_string()),
@@ -2368,7 +3203,7 @@ mod tests {
         );
 
         let effective = effective_settings_for_profile(&settings, "default");
-        assert_eq!(effective.transcription_provider, PROVIDER_VENICE);
+        assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
         assert_eq!(effective.image_model, DEFAULT_IMAGE_MODEL);
     }
@@ -2381,8 +3216,8 @@ mod tests {
             &state,
             "research",
             ProfileModelOverridesDto {
-                transcription_provider: Some(format!(" {PROVIDER_OPENAI} ")),
-                transcription_model: Some(" gpt-4o-transcribe ".to_string()),
+                transcription_provider: Some(format!(" {PROVIDER_GROQ} ")),
+                transcription_model: Some(" whisper-large-v3 ".to_string()),
                 image_model: Some(" profile-image ".to_string()),
                 video_model: Some(" profile-video ".to_string()),
             },
@@ -2396,14 +3231,14 @@ mod tests {
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_provider.as_deref()),
-            Some(PROVIDER_OPENAI)
+            Some(PROVIDER_GROQ)
         );
         assert_eq!(
             saved
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
-            Some("gpt-4o-transcribe")
+            Some("whisper-large-v3")
         );
         assert_eq!(
             saved
@@ -2418,7 +3253,7 @@ mod tests {
             "research",
             ProfileModelOverridesDto {
                 transcription_provider: None,
-                transcription_model: Some("whisper-1".to_string()),
+                transcription_model: Some(DEFAULT_TRANSCRIPTION_MODEL.to_string()),
                 image_model: None,
                 video_model: None,
             },
@@ -2442,7 +3277,7 @@ mod tests {
                 .profile_overrides
                 .get("research")
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
-            Some("whisper-1")
+            Some(DEFAULT_TRANSCRIPTION_MODEL)
         );
 
         delete_profile_model_overrides_impl(&state, "research").unwrap();
@@ -2467,7 +3302,7 @@ mod tests {
             &state,
             "default",
             ProfileModelOverridesDto {
-                transcription_provider: Some(PROVIDER_OPENAI.to_string()),
+                transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: None,
                 image_model: None,
                 video_model: None,
@@ -2539,169 +3374,212 @@ mod tests {
     }
 
     #[test]
-    fn save_local_generation_settings_persists_without_activating() {
+    fn llm_registry_update_persists_and_rejected_change_leaves_state_untouched() {
         let state = test_state();
-        let updated = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://192.168.1.5:11434/v1/".to_string(),
-                model_id: "  llama3.1:8b  ".to_string(),
-                api_key: "  secret  ".to_string(),
-            },
-        )
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let saved = update_llm_registry(&state, |settings| {
+            crate::llm::registry::save_endpoint(
+                settings,
+                crate::llm::registry::SaveEndpointRequest {
+                    id: None,
+                    name: "Ollama".to_string(),
+                    base_url: "http://localhost:11434/v1/".to_string(),
+                    model_id: "llama3.1:8b".to_string(),
+                    api_key: None,
+                    clear_api_key: false,
+                },
+                &store,
+            )
+            .map(|_| ())
+        })
         .unwrap();
-
-        // Provider is untouched; endpoint is stored trimmed and normalized.
-        assert_eq!(updated.generation_provider, PROVIDER_VENICE);
+        let id = saved.llm_endpoints[0].id.clone();
+        let on_disk: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
         assert_eq!(
-            updated.local_generation.base_url,
-            "http://192.168.1.5:11434/v1"
+            on_disk.llm_endpoints[0].base_url,
+            "http://localhost:11434/v1"
         );
-        assert_eq!(updated.local_generation.model_id, "llama3.1:8b");
-        assert_eq!(updated.local_generation.api_key, "secret");
-    }
 
-    #[test]
-    fn save_local_generation_settings_rejects_invalid_url_without_wiping() {
-        let state = test_state();
-        // Seed a valid saved endpoint.
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap();
-
-        let error = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "not a url".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
+        let error = update_llm_registry(&state, |settings| {
+            crate::llm::registry::save_endpoint(
+                settings,
+                crate::llm::registry::SaveEndpointRequest {
+                    id: Some(id.clone()),
+                    name: "Ollama".to_string(),
+                    base_url: "not a url".to_string(),
+                    model_id: "llama3.1:8b".to_string(),
+                    api_key: None,
+                    clear_api_key: false,
+                },
+                &store,
+            )
+            .map(|_| ())
+        })
         .unwrap_err();
         assert_eq!(error.code, "local_model_base_url_invalid");
-
-        // The previously saved endpoint is intact, not wiped to "".
         let settings = state.settings.lock().unwrap();
         assert_eq!(
-            settings.local_generation.base_url,
+            settings.llm_endpoints[0].base_url,
             "http://localhost:11434/v1"
         );
     }
 
-    #[test]
-    fn save_local_generation_settings_blocks_clearing_while_active() {
-        let state = test_state();
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap();
-        set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap();
-
-        let error = save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: String::new(),
-                model_id: String::new(),
-                api_key: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "local_model_in_use");
-
-        // Endpoint remains configured after the rejected clear.
-        let settings = state.settings.lock().unwrap();
-        assert_eq!(settings.local_generation.model_id, "llama3.1:8b");
-    }
-
-    #[test]
-    fn enable_disable_local_generation_round_trips_without_touching_endpoint() {
-        let state = test_state();
-        save_local_generation_settings_impl(
-            &state,
-            SaveLocalGenerationSettingsRequest {
-                base_url: "http://localhost:11434/v1".to_string(),
-                model_id: "llama3.1:8b".to_string(),
-                api_key: "secret".to_string(),
-            },
-        )
-        .unwrap();
-
-        let enabled = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap();
-        assert_eq!(enabled.generation_provider, PROVIDER_LOCAL);
-        assert_eq!(enabled.generation_model, "llama3.1:8b");
-
-        let disabled = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: false },
-        )
-        .unwrap();
-        assert_eq!(disabled.generation_provider, PROVIDER_VENICE);
-        assert_eq!(disabled.generation_model, DEFAULT_GENERATION_MODEL);
-        // Disabling must NOT touch the stored endpoint.
-        assert_eq!(
-            disabled.local_generation.base_url,
-            "http://localhost:11434/v1"
-        );
-        assert_eq!(disabled.local_generation.model_id, "llama3.1:8b");
-        assert_eq!(disabled.local_generation.api_key, "secret");
-    }
-
-    #[test]
-    fn enable_local_generation_requires_configuration() {
-        let state = test_state();
-        let error = set_local_generation_enabled_impl(
-            &state,
-            SetLocalGenerationEnabledRequest { enabled: true },
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "local_model_not_configured");
-    }
-
-    #[test]
-    fn api_model_conversion_prefers_retail_price_description_display() {
-        let model = VeniceModelDto::from(crate::clovy_api::ModelDto {
-            provider: "openai".to_string(),
-            id: "asr-model".to_string(),
-            name: "ASR model".to_string(),
-            model_type: "asr".to_string(),
-            description: None,
-            privacy: None,
-            pricing: Some(serde_json::json!({ "display": "$0.001/sec audio" })),
-            context_tokens: None,
-            traits: Vec::new(),
-            capabilities: Vec::new(),
-            price_unit: "seconds".to_string(),
-            price_description: "$0.00006 per second audio".to_string(),
-            credits_per_million_seconds: Some(60_000),
-            input_credits_per_million_tokens: None,
-            output_credits_per_million_tokens: None,
+    #[tokio::test]
+    async fn llm_listing_models_of_a_saved_endpoint_sends_its_keychain_key() {
+        use crate::llm::endpoint::test_server;
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let server = test_server::start(std::sync::Arc::new(|_: &serde_json::Value| {
+            (
+                200,
+                serde_json::json!({ "data": [{ "id": "private-model" }] }),
+            )
+        }))
+        .await;
+        let id = format!("ep-list-{}", uuid::Uuid::new_v4().simple());
+        crate::llm::secrets::store()
+            .set(&id, "sk-saved-key")
+            .unwrap();
+        let mut settings = default_settings();
+        settings.llm_endpoints.push(LlmEndpointRecord {
+            id: id.clone(),
+            name: "Private".to_string(),
+            base_url: server.base_url.clone(),
+            model_id: "private-model".to_string(),
+            has_api_key: true,
+            structured_output: None,
+            rpm_limit: None,
         });
+        replace_current_settings_for_tests(settings);
 
+        let probe = probe_local_generation_endpoint(ProbeLocalGenerationEndpointRequest {
+            base_url: server.base_url.clone(),
+            api_key: String::new(),
+            endpoint_id: Some(id.clone()),
+        })
+        .await;
+        replace_current_settings_for_tests(default_settings());
+        assert_eq!(probe.unwrap().models, vec!["private-model"]);
         assert_eq!(
-            model.pricing.and_then(|pricing| pricing
-                .get("display")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)),
-            Some("$0.00006 per second audio".to_string())
+            server.authorizations.lock().unwrap().as_slice(),
+            [Some("Bearer sk-saved-key".to_string())]
         );
+    }
+
+    /// Restores the process-wide settings and login environment on drop.
+    struct RestoreGlobals;
+
+    impl Drop for RestoreGlobals {
+        fn drop(&mut self) {
+            replace_current_settings(default_settings());
+            crate::llm::shell_env::set_login_env_for_tests(None);
+        }
+    }
+
+    fn login_path_with(clis: &[&str]) -> tempfile::TempDir {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for cli in clis {
+            let path = bin.path().join(cli);
+            fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        crate::llm::shell_env::set_login_env_for_tests(Some(
+            crate::llm::shell_env::LoginEnv::from_vars(BTreeMap::from([(
+                "PATH".to_string(),
+                bin.path().display().to_string(),
+            )])),
+        ));
+        bin
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn selection_launch_resolves_only_the_installed_cli_without_invoking_any_cli() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        for only in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+            let bin = login_path_with(&[only.id()]);
+            let calls = bin.path().join("calls");
+            fs::write(
+                bin.path().join(only.id()),
+                format!(
+                    "#!/bin/sh\necho invoked >> '{}'\nexit 91\n",
+                    calls.display()
+                ),
+            )
+            .unwrap();
+            let state = test_state();
+            ensure_cli_default(&state).await;
+            let saved: ProviderModelSettings =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            assert_eq!(crate::chat_engine::default_engine_of(&saved).cli, only);
+            assert_eq!(saved.llm_usage.notes, ProviderRef::OpenRouter);
+            assert_eq!(saved.generation_model, default_settings().generation_model);
+            assert!(!calls.exists(), "selection must never invoke a CLI");
+            fs::remove_dir_all(state.path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_moves_chat_to_the_installed_default_cli_and_saves_it() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        let _bin = login_path_with(&["codex"]);
+        let state = test_state();
+
+        ensure_cli_default(&state).await;
+
+        let settings = settings_snapshot(&state).unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(settings.llm_cli_default_applied);
+        let saved: ProviderModelSettings =
+            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
+        assert_eq!(
+            saved.llm_usage.chat,
+            ProviderRef::Cli { id: CliKind::Codex }
+        );
+        assert!(saved.llm_cli_default_applied);
+        // Chat starts on the CLI; the text picker keeps its independent model.
+        assert_eq!(
+            crate::chat_engine::default_engine_of(&settings).model_id,
+            "__clovy_cli_engine__:codex"
+        );
+        assert_eq!(
+            selected_model_for_mode(&state, ModelMode::Generation).unwrap(),
+            settings.generation_model
+        );
+        let _ = fs::remove_dir_all(state.path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn launch_without_claude_or_codex_selects_claude_without_remote_fallback() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        let _bin = login_path_with(&["pi"]);
+        let state = test_state();
+
+        ensure_cli_default(&state).await;
+
+        let settings = settings_snapshot(&state).unwrap();
+        assert_eq!(
+            settings.llm_usage.chat,
+            ProviderRef::Cli {
+                id: CliKind::Claude
+            }
+        );
+        assert!(settings.llm_cli_default_applied);
+        assert!(state.path.exists());
+        let engine = crate::chat_engine::default_engine_of(&settings);
+        assert_eq!(engine.model_id, "__clovy_cli_engine__:claude");
+        assert!(!crate::llm::registry::LlmProvidersDto::from(&settings).cli_default_pending);
     }
 }
+
+#[cfg(all(test, unix))]
+mod transaction_regressions;

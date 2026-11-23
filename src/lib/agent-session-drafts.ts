@@ -58,6 +58,11 @@ export function clearPendingAgentSessionDraft(creationRequestId: string) {
   draftsByCreationRequestId.delete(creationRequestId);
 }
 
+/** Stored ids are never reused. Fence delayed list/hydration results after deletion. */
+export function isAgentSessionDeleted(storedSessionId: string): boolean {
+  return invalidatedStoredSessionIds.has(storedSessionId);
+}
+
 export function invalidateAgentSessionDraft(storedSessionId: string) {
   invalidatedStoredSessionIds.add(storedSessionId);
   draftsByStoredSessionId.delete(storedSessionId);
@@ -71,8 +76,59 @@ export function clearAgentSessionDraftRevision(storedSessionId: string, revision
 
 /** Test-only reset because workspace tests intentionally reuse stored session ids. */
 export function resetAgentSessionDraftsForTests() {
+  deliveredDictationRequests.clear();
   draftsByStoredSessionId.clear();
   draftsByCreationRequestId.clear();
   invalidatedStoredSessionIds.clear();
   nextRevision = 0;
+}
+
+export const AGENT_DICTATION_DRAFT_WILL_CHANGE = "clovy:agent-dictation-draft-will-change";
+export const AGENT_DICTATION_DRAFT_CHANGED = "clovy:agent-dictation-draft-changed";
+const deliveredDictationRequests = new Set<string>();
+
+/** Pinned host destination, appended once without submitting a new chat turn. */
+export function deliverAgentDictation(delivery: {
+  takeId: string;
+  composerRequestId: string;
+  conversationId: string;
+  profile: string;
+  text: string;
+}): boolean {
+  const { takeId, composerRequestId, conversationId, profile, text } = delivery;
+  if (
+    !takeId ||
+    !composerRequestId ||
+    !conversationId ||
+    !profile ||
+    !text.trim() ||
+    invalidatedStoredSessionIds.has(conversationId)
+  )
+    return false;
+  const key = `${takeId}:${composerRequestId}`;
+  if (deliveredDictationRequests.has(key)) return true;
+  // Flush the destination editor synchronously, preserving text typed during
+  // transcription. An unfinished IME composition refuses replacement.
+  if (
+    !window.dispatchEvent(
+      new CustomEvent(AGENT_DICTATION_DRAFT_WILL_CHANGE, {
+        cancelable: true,
+        detail: { conversationId, profile },
+      }),
+    )
+  )
+    return false;
+  const previous = readAgentSessionDraft(conversationId) ?? "";
+  writeAgentSessionDraft(conversationId, previous ? `${previous}\n${text}` : text);
+  deliveredDictationRequests.add(key);
+  if (deliveredDictationRequests.size > 128) {
+    const first = deliveredDictationRequests.values().next().value;
+    if (first) deliveredDictationRequests.delete(first);
+  }
+  window.dispatchEvent(
+    new CustomEvent(AGENT_DICTATION_DRAFT_CHANGED, {
+      detail: { conversationId, profile },
+    }),
+  );
+  return true;
 }

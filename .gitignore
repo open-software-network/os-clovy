@@ -30,6 +30,7 @@ keys/
 .tmp/
 coverage
 .tauri-hermes/
+# Retired sidecar build cache: keep old local artifacts out of the product.
 .tauri-agent-runtime/
 /artifacts/windows-unsigned/
 
@@ -47,11 +48,16 @@ __pycache__/
 AGENTS.override.md
 CLAUDE.local.md
 
-# Ephemeral Phala CVM state (holds a per-run bearer token; mode 600).
-# The glob also covers write_state's atomic-rename temps (.json.XXXXXX).
-.ephemeral-clovy-api.json*
-.ephemeral-june-api.json*
-
 # Local agent working files: task briefs and review/report scratch
 .briefs
 .reviews
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Orchestrator harness exports/uploads (session transcripts) — local only.
+/.orchestrator/
+
+# Pinned browser resources and reproducible build cache, prepared locally.
+/.tauri-agent-browser/
+/resources/agent-browser/

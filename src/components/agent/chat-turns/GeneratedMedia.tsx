@@ -1,9 +1,9 @@
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { useT } from "../../../i18n";
 import type { AgentChatPart } from "../../../lib/agent-chat-runtime";
 import { agentFilePreview, localVideoFileSrc } from "../../../lib/tauri";
 import { CLOVY_MARK_HEIGHT, CLOVY_MARK_PATH, CLOVY_MARK_WIDTH } from "../../brand/ClovyLogo";
-import { HoverTip } from "../../ui/HoverTip";
 
 const GENERATED_MEDIA_MARK_ROWS = 28;
 const GENERATED_MEDIA_MARK_COLS = Math.round(
@@ -335,7 +335,11 @@ function GeneratedMediaDotField() {
 /** A quiet particle dot-field canvas carrying the Clovy mark, with
  * its working label in a separate footer. */
 function AgentGeneratedMediaPlaceholder({ kind }: { kind: "image" | "video" }) {
-  const label = kind === "image" ? "Generating image…" : "Generating video…";
+  const t = useT();
+  const label =
+    kind === "image"
+      ? t("chat.media.generatingImageEllipsis")
+      : t("chat.media.generatingVideoEllipsis");
   return (
     <div className="agent-generated-media-placeholder-card">
       <div className={`agent-generated-${kind}-placeholder`} aria-hidden>
@@ -384,6 +388,7 @@ export function AgentGeneratedImage({
   onDownload?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
   onRetry?: () => void;
 }) {
+  const t = useT();
   const [pathPreviewDataUrl, setPathPreviewDataUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -414,7 +419,7 @@ export function AgentGeneratedImage({
         className="agent-generated-image"
         data-status="running"
         role="status"
-        aria-label="Generating image"
+        aria-label={t("chat.media.generatingImage")}
         aria-live="polite"
       >
         <AgentGeneratedMediaPlaceholder kind="image" />
@@ -425,24 +430,26 @@ export function AgentGeneratedImage({
     return (
       <div className="agent-generated-image" data-status="error">
         <p className="agent-generated-image-error">
-          {part.error?.trim() || "Could not generate the image."}
+          {part.error?.trim() || t("chat.media.imageFailed")}
         </p>
         {onRetry && part.requestId ? (
           <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
-            Try again
+            {t("common.tryAgain")}
           </button>
         ) : null}
       </div>
     );
   }
-  const label = part.name?.trim() || "Generated image";
+  const label = part.name?.trim() || t("chat.media.generatedImage");
   // "Open" enlarges filesystem-backed images in the artifact viewer. MCP image
   // blocks have only inline bytes, so they render as a plain frame. Legacy
   // MEDIA references have a path and lazily fetch their preview data url above.
   const image = imageSrc ? (
     <img src={imageSrc} alt={part.prompt} draggable={false} />
   ) : part.path ? (
-    <span className="agent-generated-image-loading text-shimmer shimmer">Loading image...</span>
+    <span className="agent-generated-image-loading text-shimmer shimmer">
+      {t("chat.media.loadingImage")}
+    </span>
   ) : null;
   const reveal = revealing ? (
     <span className="agent-generated-media-reveal" aria-hidden>
@@ -460,8 +467,8 @@ export function AgentGeneratedImage({
           type="button"
           className="agent-generated-image-frame"
           onClick={() => onOpen?.(part)}
-          aria-label={`Open ${label}`}
-          title="Open image"
+          aria-label={t("chat.openNamed", { name: label })}
+          title={t("chat.media.openImage")}
         >
           {image}
           {reveal}
@@ -481,11 +488,11 @@ export function AgentGeneratedImage({
             type="button"
             className="agent-generated-image-download"
             onClick={() => onDownload(part)}
-            aria-label="Download image"
-            title="Download image"
+            aria-label={t("chat.media.downloadImage")}
+            title={t("chat.media.downloadImage")}
           >
             <IconArrowInbox size={15} aria-hidden />
-            <span>Download</span>
+            <span>{t("chat.media.download")}</span>
           </button>
         ) : null}
       </figcaption>
@@ -497,13 +504,12 @@ export function AgentGeneratedVideo({
   part,
   onDownload,
   onRetry,
-  retryDisabledReason,
 }: {
   part: Extract<AgentChatPart, { type: "video" }>;
   onDownload?: (part: Extract<AgentChatPart, { type: "video" }>) => void;
   onRetry?: () => void;
-  retryDisabledReason?: string;
 }) {
+  const t = useT();
   const src = part.status === "complete" && part.path ? localVideoFileSrc(part.path) : undefined;
   const [capturedPoster, setCapturedPoster] = useState<{ src: string; dataUrl: string }>();
   const poster =
@@ -531,7 +537,7 @@ export function AgentGeneratedVideo({
         className="agent-generated-video"
         data-status="running"
         role="status"
-        aria-label="Generating video"
+        aria-label={t("chat.media.generatingVideo")}
         aria-live="polite"
       >
         <AgentGeneratedMediaPlaceholder kind="video" />
@@ -542,25 +548,17 @@ export function AgentGeneratedVideo({
     return (
       <div className="agent-generated-video" data-status="error">
         <p className="agent-generated-image-error">
-          {part.error?.trim() || "Could not generate the video."}
+          {part.error?.trim() || t("chat.media.videoFailed")}
         </p>
         {onRetry && part.requestId ? (
-          retryDisabledReason ? (
-            <HoverTip tip={retryDisabledReason} tabIndex={0}>
-              <button type="button" className="agent-generated-image-retry" disabled>
-                Try again
-              </button>
-            </HoverTip>
-          ) : (
-            <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
-              Try again
-            </button>
-          )
+          <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
+            {t("common.tryAgain")}
+          </button>
         ) : null}
       </div>
     );
   }
-  const label = part.name?.trim() || "Generated video";
+  const label = part.name?.trim() || t("chat.media.generatedVideo");
   return (
     <figure
       className="agent-generated-video"
@@ -572,7 +570,7 @@ export function AgentGeneratedVideo({
           <video controls src={firstFrameVideoSource(src)} poster={poster} preload="metadata" />
         ) : (
           <span className="agent-generated-image-loading text-shimmer shimmer">
-            Loading video...
+            {t("chat.media.loadingVideo")}
           </span>
         )}
         {revealing ? (
@@ -590,11 +588,11 @@ export function AgentGeneratedVideo({
             type="button"
             className="agent-generated-image-download"
             onClick={() => onDownload(part)}
-            aria-label="Download video"
-            title="Download video"
+            aria-label={t("chat.media.downloadVideo")}
+            title={t("chat.media.downloadVideo")}
           >
             <IconArrowInbox size={15} aria-hidden />
-            <span>Download</span>
+            <span>{t("chat.media.download")}</span>
           </button>
         ) : null}
       </figcaption>
@@ -611,10 +609,6 @@ function firstFrameVideoSource(src: string) {
 // the in-flight promise per src so the capture runs at most once per app run,
 // even across remounts.
 const generatedVideoPosterCache = new Map<string, Promise<string | undefined>>();
-
-export function resetGeneratedVideoPosterCacheForTest() {
-  generatedVideoPosterCache.clear();
-}
 
 function capturedGeneratedVideoPoster(src: string): Promise<string | undefined> {
   const cached = generatedVideoPosterCache.get(src);

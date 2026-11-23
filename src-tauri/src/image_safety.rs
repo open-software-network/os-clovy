@@ -1,12 +1,10 @@
-use crate::domain::types::AppError;
 use serde::{Deserialize, Serialize};
-use std::{future::Future, time::Duration};
-use tokio::time::timeout;
 
 // Deliberately conservative (ADR 0008 addendum, JUN-209): this list only
-// gates the safe-mode consent dialog, never what gets generated - Venice
-// `safe_mode` is the enforcement. Keep terms unambiguous; euphemisms are an
-// accepted miss, and broadening the list mostly buys false-positive dialogs.
+// gates the safe-mode consent dialog, never what gets generated - the image
+// provider's safety filter, requested through `safe_mode`, is the enforcement.
+// Keep terms unambiguous; euphemisms are an accepted miss, and broadening the
+// list mostly buys false-positive dialogs.
 const EXPLICIT_TERMS: &[&str] = &[
     "bdsm",
     "bottomless",
@@ -76,30 +74,9 @@ pub fn may_request_explicit_content(prompt: &str) -> bool {
 pub async fn image_prompt_may_be_explicit(
     request: ImagePromptScreenRequest,
 ) -> ImagePromptScreenResponse {
-    screen_image_prompt(&request.prompt, |prompt| async move {
-        crate::clovy_api::classify_image_prompt_explicit(&prompt).await
-    })
-    .await
-}
-
-async fn screen_image_prompt<F, Fut>(prompt: &str, classify: F) -> ImagePromptScreenResponse
-where
-    F: FnOnce(String) -> Fut,
-    Fut: Future<Output = Result<bool, AppError>>,
-{
-    if may_request_explicit_content(prompt) {
-        return ImagePromptScreenResponse {
-            may_be_explicit: true,
-        };
+    ImagePromptScreenResponse {
+        may_be_explicit: may_request_explicit_content(&request.prompt),
     }
-
-    let may_be_explicit = match timeout(Duration::from_secs(8), classify(prompt.to_string())).await
-    {
-        Ok(Ok(verdict)) => verdict,
-        Ok(Err(_)) | Err(_) => false,
-    };
-
-    ImagePromptScreenResponse { may_be_explicit }
 }
 
 fn contains_token_sequence(tokens: &[&str], sequence: &[&str]) -> bool {
@@ -111,11 +88,8 @@ fn contains_token_sequence(tokens: &[&str], sequence: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{may_request_explicit_content, screen_image_prompt};
-    use crate::domain::types::AppError;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    use super::{
+        image_prompt_may_be_explicit, may_request_explicit_content, ImagePromptScreenRequest,
     };
 
     #[test]
@@ -159,41 +133,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wordlist_hit_skips_classifier() {
-        let called = Arc::new(AtomicBool::new(false));
-        let called_for_classifier = Arc::clone(&called);
-
-        let response = screen_image_prompt("portrait of a nude figure", move |_| async move {
-            called_for_classifier.store(true, Ordering::SeqCst);
-            Ok(false)
-        })
-        .await;
-
-        assert!(response.may_be_explicit);
-        assert!(!called.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn classifier_true_propagates() {
-        let response = screen_image_prompt("portret bez ubrania", |_| async { Ok(true) }).await;
-
-        assert!(response.may_be_explicit);
-    }
-
-    #[tokio::test]
-    async fn classifier_false_propagates() {
-        let response = screen_image_prompt("a red bicycle", |_| async { Ok(false) }).await;
-
-        assert!(!response.may_be_explicit);
-    }
-
-    #[tokio::test]
-    async fn classifier_error_falls_back_to_false() {
-        let response = screen_image_prompt("portret bez ubrania", |_| async {
-            Err(AppError::new("classifier_failed", "classifier failed"))
-        })
-        .await;
-
-        assert!(!response.may_be_explicit);
+    async fn wordlist_screen_uses_no_model_for_hits_or_misses() {
+        for (prompt, expected) in [
+            ("portrait of a nude figure", true),
+            ("a red bicycle", false),
+            ("", false),
+        ] {
+            let response = image_prompt_may_be_explicit(ImagePromptScreenRequest {
+                prompt: prompt.to_string(),
+            })
+            .await;
+            assert_eq!(response.may_be_explicit, expected);
+        }
     }
 }

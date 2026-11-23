@@ -8,11 +8,11 @@ import {
   modelPrivacyBadge,
   modelSupportsImageInput,
 } from "../lib/model-privacy";
-import type { VeniceModelDto } from "../lib/tauri";
+import type { ProviderModelDto } from "../lib/tauri";
 
 // Excess-property checks would reject a `traits` field on the narrowed
 // capabilities-only param, so route test shapes through a Partial helper.
-const model = (partial: Partial<VeniceModelDto>): Partial<VeniceModelDto> => partial;
+const model = (partial: Partial<ProviderModelDto>): Partial<ProviderModelDto> => partial;
 
 describe("model privacy labels", () => {
   it("uses e2ee mode over private — the stronger claim wins", () => {
@@ -76,14 +76,14 @@ describe("private catalog filter", () => {
 });
 
 describe("model mode availability", () => {
-  it("keeps Clovy Auto available without pretending it is a concrete tool model", () => {
+  it("excludes the retired Auto router", () => {
     expect(
       modelAvailableForMode("generation", {
         id: "open-software/auto",
         provider: "june",
         capabilities: [],
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

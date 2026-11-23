@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import type { RecordNoticesDemoApi } from "../lib/record-notices-demo";
-import type { UpdateCardDemoApi } from "../lib/update-card-demo";
-import type { ReferralNudgeMoment } from "../components/referral/ReferralNudge";
 import type { RecordingStatusDto } from "../lib/tauri";
 import { RECORD_NOTICES_DEMO_SESSION_ID } from "./processing-demo-ids";
 import type { UseAppDevDemosDependencies } from "./use-app-dev-demos-types";
@@ -13,16 +11,8 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
     getSelectedNoteId,
     recordingStatusRef,
     setActiveView,
-    setAgentSessions,
-    setCheckingUpdate,
-    setCompletedSessions,
     setLiveTranscriptEvents,
-    setPreparingUpdate,
     setRecordingNote,
-    setRelaunchingUpdate,
-    setReadyUpdate,
-    setUpdateProgress,
-    setUpdateStatus,
   } = dependencies;
 
   const [demoRecorderStatus, setDemoRecorderStatus] = useState<RecordingStatusDto | null>(null);
@@ -63,39 +53,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
       dispose?.();
     };
   }, []);
-  // Dev-only console driver (window.__completedDemo) that seeds synthetic
-  // agent sessions with a completed slice, so the sidebar's Completed row and
-  // the sessions page's Completed group render in a plain browser.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/completed-sessions-demo").then(({ registerCompletedSessionsDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerCompletedSessionsDemo({
-        seedSessions: (sessions, completedAt) => {
-          setAgentSessions((current) => [...current, ...sessions]);
-          setCompletedSessions((prev) => ({ ...prev, ...completedAt }));
-        },
-        clearSessions: (idPrefix) => {
-          setAgentSessions((current) =>
-            current.filter((session) => !session.id.startsWith(idPrefix)),
-          );
-          setCompletedSessions((prev) => {
-            const next: Record<string, string> = {};
-            for (const [id, completedAt] of Object.entries(prev)) {
-              if (!id.startsWith(idPrefix)) next[id] = completedAt;
-            }
-            return next;
-          });
-        },
-      }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, [setAgentSessions, setCompletedSessions]);
   // Dev-only console driver (window.__recordNoticesDemo) that parks the
   // recorder-area notices (consent reminder, source warning, mic-blocked) on the
   // selected note without a real recording, so their styling can be inspected.
@@ -144,55 +101,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
       recordNoticesDemoRef.current = null;
     };
   }, [setRecordingNote]);
-  // The referral delight nudge (bottom-left card). Real shows come from the
-  // trigger layer (useReferralNudgeTriggers below); the dev console driver
-  // (window.__referralNudge) parks the card without touching the persisted
-  // caps, which is why the source is tracked — only trigger-shown cards may
-  // record a click-through.
-  const [referralNudgeMoment, setReferralNudgeMoment] = useState<ReferralNudgeMoment | null>(null);
-  const referralNudgeSourceRef = useRef<"trigger" | "demo">("trigger");
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void import("../lib/referral-nudge-demo").then(({ registerReferralNudgeDemo }) => {
-      if (cancelled) return;
-      ({ dispose } = registerReferralNudgeDemo({
-        setMoment: (moment) => {
-          referralNudgeSourceRef.current = "demo";
-          setReferralNudgeMoment(moment);
-        },
-      }));
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
-  }, []);
-  // Dev console driver for the sidebar update cards (window.__updateCard).
-  // Pushes synthetic values into the real update state so each card's styling
-  // can be parked and inspected without a live update.
-  const updateCardDemoRef = useRef<UpdateCardDemoApi | null>(null);
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    void import("../lib/update-card-demo").then(({ registerUpdateCardDemo }) => {
-      if (cancelled) return;
-      updateCardDemoRef.current = registerUpdateCardDemo({
-        setReadyUpdate,
-        setStatus: setUpdateStatus,
-        setRelaunching: setRelaunchingUpdate,
-        setPreparing: setPreparingUpdate,
-        setChecking: setCheckingUpdate,
-        setProgress: setUpdateProgress,
-      });
-    });
-    return () => {
-      cancelled = true;
-      updateCardDemoRef.current?.dispose();
-      updateCardDemoRef.current = null;
-    };
-  }, [setUpdateStatus]);
   // Dev console driver (window.__toastDemo) that fires each toast variant so
   // the toast styling can be inspected without walking a real flow.
   useEffect(() => {
@@ -231,9 +139,6 @@ export function useAppDevDemos(dependencies: UseAppDevDemosDependencies) {
     recordNoticesConsentPinned,
     recordNoticesMicOverride,
     recordNoticesDemoRef,
-    referralNudgeMoment,
-    setReferralNudgeMoment,
-    referralNudgeSourceRef,
     finishingSessionsRef,
   };
 }

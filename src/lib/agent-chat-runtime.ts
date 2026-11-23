@@ -1,6 +1,3 @@
-import type { AgentItemDto } from "./agent-runtime-contract";
-import { stripProjectContext } from "./agent-project-context";
-
 export type AgentChatTextPart = { type: "text"; text: string; status?: "running" | "complete" };
 export type AgentChatReasoningPart = {
   type: "reasoning";
@@ -18,8 +15,7 @@ export type AgentChatToolPart = {
   id: string;
   name: string;
   text: string;
-  status: "running" | "complete" | "failed";
-  media?: "image" | "video";
+  status: "running" | "complete" | "failed" | "interrupted";
 };
 export type AgentApprovalChoice = "once" | "session" | "always" | "deny";
 export type AgentChatApprovalPart = {
@@ -31,8 +27,10 @@ export type AgentChatApprovalPart = {
   description: string;
   allowPermanent: boolean;
   choice?: AgentApprovalChoice;
-  status: "pending" | "resolved" | "expired";
+  status: "pending" | "resolved" | "expired" | "cancelled";
   retiredReason?: string;
+  /** Asked by a CLI turn through the approval broker. */
+  engine?: "cli";
 };
 export type AgentChatClarifyPart = {
   type: "clarify";
@@ -42,7 +40,8 @@ export type AgentChatClarifyPart = {
   question: string;
   choices: string[];
   answer?: string;
-  status: "pending" | "resolved";
+  status: "pending" | "resolved" | "expired" | "cancelled";
+  engine?: "cli";
 };
 export type AgentChatSudoPart = {
   type: "sudo";
@@ -66,8 +65,10 @@ export type AgentChatSecretPart = {
 };
 export type AgentChatNoticePart = {
   type: "notice";
-  kind: "credits" | "context-overflow" | "upstream-provider" | "tool" | "runtime";
+  kind: "context-overflow" | "upstream-provider" | "tool" | "runtime";
   text: string;
+  /** Sanitized workspace recovery observation; never a model or tool result. */
+  diagnostic?: string;
   retryable?: boolean;
 };
 export type AgentChatSteeringPart = { type: "steering"; text: string };
@@ -130,108 +131,6 @@ export type AgentChatTurn = {
   parts: AgentChatPart[];
   isScheduledRun?: boolean;
 };
-
-export type CompanionAgentMessageView = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  createdAt: string;
-  streaming: false;
-  media?: CompanionMediaReference[];
-};
-
-export type CompanionMediaReference = {
-  artifactId: string;
-  kind: "image" | "video";
-  mediaType: string;
-  widthPx?: number;
-  heightPx?: number;
-  durationMs?: number;
-  sizeBytes: number;
-};
-
-export type CompanionMediaProjection = {
-  runId?: string;
-  createdAt: string;
-  reference: CompanionMediaReference;
-};
-
-const COMPANION_MESSAGE_TEXT_BYTES = 30 * 1024;
-
-export function boundedCompanionText(text: string, maxBytes: number, suffix = "...") {
-  const encoder = new TextEncoder();
-  if (encoder.encode(text).byteLength <= maxBytes) return text;
-  const suffixBytes = encoder.encode(suffix).byteLength;
-  const pieces: string[] = [];
-  let bytes = 0;
-  for (const character of text) {
-    const characterBytes = encoder.encode(character).byteLength;
-    if (bytes + characterBytes + suffixBytes > maxBytes) break;
-    pieces.push(character);
-    bytes += characterBytes;
-  }
-  return `${pieces.join("").trimEnd()}${suffix}`;
-}
-
-/**
- * Projects persisted agent runtime items onto the companion's deliberately
- * small transcript contract. Selecting completed message items only keeps
- * reasoning, tools, approvals, secrets, and media internals on the Mac.
- */
-export function companionAgentMessagesFromItems(
-  items: AgentItemDto[],
-  mediaProjections: CompanionMediaProjection[] = [],
-): CompanionAgentMessageView[] {
-  const itemsById = new Map(items.map((item) => [item.id, item]));
-  const messages = items.flatMap((item) => {
-    if (item.kind !== "message" || item.status !== "complete") return [];
-    const text = (item.role === "user" ? stripProjectContext(item.text) : item.text).trim();
-    if (!text) return [];
-    const suffix = "\n\n[Message truncated on companion]";
-    const message: CompanionAgentMessageView = {
-      id: item.id,
-      role: item.role,
-      text: boundedCompanionText(text, COMPANION_MESSAGE_TEXT_BYTES, suffix),
-      createdAt: item.createdAt,
-      streaming: false,
-    };
-    // JSON escaping can expand control-heavy text beyond its UTF-8 size. Keep
-    // one item below the frame budget even in that pathological case.
-    if (new TextEncoder().encode(JSON.stringify(message)).byteLength > 34 * 1024) {
-      message.text = boundedCompanionText(text, 5 * 1024, suffix);
-    }
-    return [message];
-  });
-  const lastAssistantByRun = new Map<string, CompanionAgentMessageView>();
-  for (const message of messages) {
-    const item = itemsById.get(message.id);
-    if (item?.kind === "message" && item.role === "assistant" && item.runId) {
-      lastAssistantByRun.set(item.runId, message);
-    }
-  }
-  const overflow: CompanionMediaProjection[] = [];
-  for (const projection of mediaProjections) {
-    const target = projection.runId ? lastAssistantByRun.get(projection.runId) : undefined;
-    if (target && (target.media?.length ?? 0) < 8) {
-      target.media = [...(target.media ?? []), projection.reference];
-    } else {
-      overflow.push(projection);
-    }
-  }
-  const mediaOnlyMessages = overflow.map(
-    (projection): CompanionAgentMessageView => ({
-      id: `media:${projection.reference.artifactId}`,
-      role: "assistant",
-      text: "",
-      createdAt: projection.createdAt,
-      streaming: false,
-      media: [projection.reference],
-    }),
-  );
-  return [...messages, ...mediaOnlyMessages].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
-  );
-}
 
 const CONTRACTION_GLUE = /([A-Za-z])('(?:s|re|ve|ll|m|d|t))(?=[A-Za-z])/gi;
 

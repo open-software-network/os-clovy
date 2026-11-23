@@ -1,69 +1,49 @@
-import type { VeniceModelDto } from "./tauri";
+import { type MessageKey, t } from "../i18n/translate";
+import type { ProviderModelDto } from "./tauri";
 
 // Clovy's default video model. Mirrors DEFAULT_VIDEO_MODEL in the Rust providers
 // module (src-tauri/src/providers/mod.rs). Keep the two in sync.
-export const DEFAULT_VIDEO_MODEL = "wan-2.2-a14b-text-to-video";
+export const DEFAULT_VIDEO_MODEL = "fal-ai/wan/v2.2-a14b/text-to-video";
 
-type VideoModelDefinition = Omit<
-  VeniceModelDto,
-  "provider" | "modelType" | "capabilities" | "traits"
-> &
-  Pick<VeniceModelDto, "privacy"> &
-  Partial<Pick<VeniceModelDto, "capabilities" | "traits">>;
+type VideoModelDefinition = Pick<ProviderModelDto, "id" | "name"> & {
+  /** Catalog key for the description, read in the interface language. */
+  descriptionKey: MessageKey;
+};
 
-function videoModel({
-  traits = [],
-  capabilities = [],
-  ...model
-}: VideoModelDefinition): VeniceModelDto {
-  return {
-    provider: "venice",
+function videoModel({ descriptionKey, ...model }: VideoModelDefinition): ProviderModelDto {
+  const entry: ProviderModelDto = {
+    provider: "fal",
     modelType: "video",
-    capabilities,
-    traits,
+    capabilities: [],
+    traits: [],
     ...model,
   };
+  Object.defineProperty(entry, "description", {
+    enumerable: true,
+    configurable: true,
+    get: () => t(descriptionKey),
+  });
+  return entry;
 }
 
-// Curated Venice text-to-video models for the settings picker. Video models are
-// not part of the text/ASR catalog the backend serves, so the picker uses this
-// local snapshot instead of fetching (same pattern as IMAGE_MODELS).
-//
-// Deliberately kept to three, all Venice `private` (not-logged) tier — a fast
-// default, a photorealistic option, and a higher-detail option — rather than
-// the full compatible catalog. Three hard constraints govern any entry; a model
-// that breaks the first two fails at generation time, not here:
-//   1. It must be priced in clovy-api's `video_pricing` map (ADR 0015): that map
-//      doubles as the allowlist, and an unlisted model is rejected
-//      `model_not_priced`. Keep these ids in sync with that map AND with
-//      `KNOWN_VIDEO_MODELS` in src-tauri/src/providers/mod.rs.
-//   2. It must accept the fixed fast-path shape Clovy injects (5s / 720p / 16:9;
-//      see the DEFAULT_VIDEO_* constants in src-tauri/src/providers/mod.rs).
-//      Each id below is a
-//      text-to-video Venice model that lists all three in its catalog
-//      constraints; a model missing any would 400 at queue on the fast path.
-//   3. Venice `private` privacy tier, to match Clovy's privacy stance (several
-//      compatible models are `anonymized` — logged, de-identified — and are
-//      deliberately excluded).
-export const VIDEO_MODELS: VeniceModelDto[] = [
+// Curated fal text-to-video endpoints. Keep IDs in sync with KNOWN_VIDEO_MODELS
+// in the native providers module. The direct fal adapter validates supported
+// duration, resolution and aspect ratio before submitting a job. Choosing a
+// model needs no key; generation requires the user's fal key.
+// No retention claim is made for the provider.
+export const VIDEO_MODELS: ProviderModelDto[] = [
   videoModel({
-    id: "wan-2.2-a14b-text-to-video",
+    id: DEFAULT_VIDEO_MODEL,
     name: "Wan 2.2 A14B",
-    description: "Default text-to-video model for fast 5 second 720p clips.",
-    privacy: "private",
-    traits: ["default", "fastest"],
+    descriptionKey: "lib.videoModels.wan22",
   }),
   videoModel({
-    id: "grok-imagine-text-to-video-private",
-    name: "Grok Imagine",
-    description: "Photorealistic clips with audio.",
-    privacy: "private",
-  }),
-  videoModel({
-    id: "ltx-2-19b-full-text-to-video",
-    name: "LTX Video 2.0 19B",
-    description: "Higher-detail open-source model with audio.",
-    privacy: "private",
-    traits: ["highest_quality"],
+    id: "alibaba/wan-3.0/text-to-video",
+    name: "Wan 3.0",
+    descriptionKey: "lib.videoModels.wan30",
   }),
 ];
+
+export function videoModelCatalog(): ProviderModelDto[] {
+  return VIDEO_MODELS;
+}

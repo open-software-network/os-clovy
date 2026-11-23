@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "repowise": {
+      "command": "/Users/guilhermevarela/orchestrator/scripts/project-repowise.sh",
+      "args": ["mcp", "--target-env", "CLAUDE_PROJECT_DIR"],
+      "env": {
+        "DO_NOT_TRACK": "1"
+      }
+    },
+    "graft": {
+      "command": "graft",
+      "args": ["mcp"]
+    }
+  }
+}

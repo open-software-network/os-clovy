@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
+import type {
+  AgentRuntimeEvent,
+  AgentSessionDto,
+  AgentSkillDto,
+} from "../lib/agent-runtime-contract";
+import { applyInterfaceLocale } from "../i18n/locale";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -32,7 +37,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openDialog }));
 import { AgentWorkspace } from "../components/agent/AgentWorkspace";
 import { markAgentNewSessionPending } from "../components/agent/session-persistence";
 import { agentComposerClearance } from "../components/agent/composer/layout";
-import { AGENT_DELETE_SESSION_EVENT, AGENT_NEW_SESSION_EVENT } from "../lib/agent-events";
+import {
+  AGENT_DELETE_SESSION_EVENT,
+  AGENT_NEW_SESSION_EVENT,
+  AGENT_SESSION_STATUS_EVENT,
+} from "../lib/agent-events";
 import {
   resetCurrentDataPartitionForTests,
   setCurrentDataPartitionName,
@@ -74,6 +83,7 @@ function linearApprovalEvent(): AgentRuntimeEvent {
     sequence: 2,
     method: "interruption.requested",
     data: {
+      itemSequence: 2,
       itemId: "approval-item",
       interruption: {
         id: "functions.mcp_linear_save_issue:0",
@@ -113,6 +123,294 @@ function mockAgentLayoutBounds() {
 }
 
 describe("AgentWorkspace runtime wiring", () => {
+  it.each([
+    "diagnostic",
+    "clean",
+    "switch",
+  ] as const)("F10b initialSessionId hydration preserves only its own real diagnostic: %s", async (scenario) => {
+    const message = "Initial workspace cleanup needs recovery.";
+    const base = mocks.invoke.getMockImplementation();
+    let release: (value: typeof session) => void = () => undefined;
+    const initial = new Promise<typeof session>((resolve) => {
+      release = resolve;
+    });
+    const cancelled = {
+      id: "initial-cancelled-run",
+      sessionId: session.id,
+      status: "cancelled",
+      model: session.model,
+    };
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return id === session.id ? initial : Promise.resolve(newSession);
+      if (command === "list_agent_items") return Promise.resolve([]);
+      if (command === "get_latest_agent_run")
+        return Promise.resolve(id === session.id ? cancelled : null);
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSessionId={session.id} />);
+    await waitFor(() => expect(mocks.runtimeListener).toBeDefined());
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("list_agent_items", { sessionId: session.id }),
+    );
+    // listItems is already empty; getSession is still the initial held read.
+    await act(async () => Promise.resolve());
+    if (scenario !== "clean") {
+      act(() =>
+        mocks.runtimeListener?.({
+          payload: {
+            protocolVersion: 1,
+            eventId: "initial-workspace-warning",
+            sessionId: session.id,
+            runId: cancelled.id,
+            sequence: 51,
+            method: "run.diagnostic",
+            data: {
+              itemId: "initial-warning",
+              itemSequence: 2,
+              createdAt: session.createdAt,
+              message,
+              category: "runtime",
+              code: "agent_workspace_mcp_cleanup",
+              retryable: false,
+            },
+          },
+        }),
+      );
+    }
+    if (scenario === "switch") {
+      rerender(<AgentWorkspace initialSessionId={newSession.id} />);
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", {
+          sessionId: newSession.id,
+        }),
+      );
+    }
+    await act(async () => release(session));
+    if (scenario === "diagnostic") {
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getAllByText(message)).toHaveLength(1);
+    } else {
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "start_agent_run")).toBe(false);
+  });
+
+  it("F10 preserves a late cleanup diagnostic while a cancelled snapshot finishes hydrating", async () => {
+    const message = "Late workspace cleanup needs recovery.";
+    const cancelled = {
+      id: "cancelled-run",
+      sessionId: session.id,
+      status: "cancelled",
+      model: "__clovy_cli_engine__:agy",
+    };
+    const base = mocks.invoke.getMockImplementation();
+    let pending = false;
+    let release: (value: unknown[]) => void = () => undefined;
+    const artifacts = new Promise<unknown[]>((resolve) => {
+      release = resolve;
+    });
+    let storedItems: unknown[] = [];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return Promise.resolve(id === newSession.id ? newSession : session);
+      if (command === "get_latest_agent_run")
+        return Promise.resolve(id === session.id ? cancelled : null);
+      if (command === "list_agent_items")
+        return Promise.resolve(id === session.id ? storedItems : []);
+      if (command === "list_agent_artifacts" && pending) return artifacts;
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSession={session} />);
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_latest_agent_run", { sessionId: session.id }),
+    );
+    await act(async () => Promise.resolve());
+    pending = true;
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "cancel-refresh",
+          sessionId: session.id,
+          runId: cancelled.id,
+          sequence: 50,
+          method: "run.cancelled",
+          data: { completedAt: session.createdAt },
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_items"),
+      ).toHaveLength(2),
+    );
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "late-f10",
+          sessionId: session.id,
+          runId: cancelled.id,
+          sequence: 51,
+          method: "run.diagnostic",
+          data: {
+            itemId: "late-warning",
+            itemSequence: 2,
+            createdAt: session.createdAt,
+            message,
+            category: "runtime",
+            code: "agent_workspace_mcp_cleanup",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    await act(async () => {
+      release([]);
+    });
+    expect(screen.getAllByText(message)).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    storedItems = [
+      {
+        id: "late-warning",
+        sessionId: session.id,
+        runId: cancelled.id,
+        sequence: 2,
+        createdAt: session.createdAt,
+        kind: "error",
+        message,
+        category: "runtime",
+        code: "agent_workspace_mcp_cleanup",
+        retryable: false,
+      },
+    ];
+    pending = false;
+    rerender(<AgentWorkspace initialSession={newSession} />);
+    await waitFor(() => expect(screen.queryByText(message)).not.toBeInTheDocument());
+    rerender(<AgentWorkspace initialSession={session} />);
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.getAllByText(message)).toHaveLength(1);
+  });
+
+  it("F10 rejects a pending old-session diagnostic snapshot after switching to a session without errors", async () => {
+    const base = mocks.invoke.getMockImplementation();
+    let pending = false;
+    let release: (value: unknown[]) => void = () => undefined;
+    const artifacts = new Promise<unknown[]>((resolve) => {
+      release = resolve;
+    });
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return Promise.resolve(id === newSession.id ? newSession : session);
+      if (command === "get_latest_agent_run") return Promise.resolve(null);
+      if (command === "list_agent_items") return Promise.resolve([]);
+      if (command === "list_agent_artifacts" && pending && id === session.id) return artifacts;
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSession={session} />);
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    await act(async () => Promise.resolve());
+    pending = true;
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "switch-cancel",
+          sessionId: session.id,
+          runId: "old-run",
+          sequence: 50,
+          method: "run.cancelled",
+          data: { completedAt: session.createdAt },
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_items"),
+      ).toHaveLength(2),
+    );
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "switch-diagnostic",
+          sessionId: session.id,
+          runId: "old-run",
+          sequence: 51,
+          method: "run.diagnostic",
+          data: {
+            itemId: "old-warning",
+            itemSequence: 2,
+            createdAt: session.createdAt,
+            message: "Old workspace cleanup",
+            category: "runtime",
+            code: "agent_workspace_mcp_cleanup",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText("Old workspace cleanup")).toBeInTheDocument();
+    rerender(<AgentWorkspace initialSession={newSession} />);
+    await waitFor(() =>
+      expect(screen.queryByText("Old workspace cleanup")).not.toBeInTheDocument(),
+    );
+    await act(async () => release([]));
+    expect(screen.queryByText("Old workspace cleanup")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", "Workspace connection needs recovery."],
+    ["pt-BR", "A conexão da pasta de trabalho precisa de recuperação."],
+  ] as const)("shows a late cleanup diagnostic in %s without announcing a cancelled conversation as running", async (locale, heading) => {
+    applyInterfaceLocale(locale);
+    const message = "Workspace MCP cleanup needs recovery: configuration changed.";
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+    await waitFor(() => expect(mocks.runtimeListener).toBeDefined());
+    const statuses: string[] = [];
+    const status = (event: Event) => statuses.push((event as CustomEvent).detail.status);
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, status);
+    try {
+      act(() =>
+        mocks.runtimeListener?.({
+          payload: {
+            protocolVersion: 1,
+            eventId: "late-cleanup",
+            sessionId: session.id,
+            runId: "cancelled-run",
+            sequence: 51,
+            method: "run.diagnostic",
+            data: {
+              itemId: "warning",
+              itemSequence: 2,
+              createdAt: session.createdAt,
+              message,
+              category: "runtime",
+              code: "agent_workspace_mcp_cleanup",
+              retryable: false,
+            },
+          },
+        }),
+      );
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getByText(heading)).toBeInTheDocument();
+      expect(statuses).not.toContain("running");
+      expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    } finally {
+      window.removeEventListener(AGENT_SESSION_STATUS_EVENT, status);
+      act(() => applyInterfaceLocale("en"));
+    }
+  });
+
   beforeEach(() => {
     resetAgentSessionDraftsForTests();
     resetCurrentDataPartitionForTests();
@@ -146,6 +444,9 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Work with Clovy notes.",
             source: "managed",
             enabled: true,
+            configuredEnabled: true,
+            readable: true,
+            error: null,
             editable: true,
           },
           {
@@ -154,11 +455,14 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Disabled skill.",
             source: "managed",
             enabled: false,
+            configuredEnabled: false,
+            readable: true,
+            error: null,
             editable: true,
           },
-        ]);
+        ] satisfies AgentSkillDto[]);
       }
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -181,22 +485,24 @@ describe("AgentWorkspace runtime wiring", () => {
               capabilities: ["tool-calling"],
               privacy: "private",
               contextTokens: 200_000,
-              inputCreditsPerMillionTokens: 2_000,
-              outputCreditsPerMillionTokens: 4_000,
             },
           ],
         });
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          settings: {},
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
-      if (command === "set_cost_quality") {
-        const value = (args as { request?: { value?: number } } | undefined)?.request?.value ?? 100;
-        return Promise.resolve({ costQuality: value });
-      }
+
       if (command === "create_agent_session") return Promise.resolve(newSession);
       if (command === "start_agent_run") {
         return Promise.resolve({
@@ -421,7 +727,7 @@ describe("AgentWorkspace runtime wiring", () => {
         id: "run-same-message",
         sessionId: session.id,
         status: "running",
-        model: "fast",
+        model: "__clovy_cli_engine__:claude",
       });
     });
     await waitFor(() => expect(readAgentSessionDraft(session.id)).toBe("Same message"));
@@ -482,7 +788,6 @@ describe("AgentWorkspace runtime wiring", () => {
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
       if (command === "create_agent_session") return pendingCreate;
-      if (command === "clovy_home_chat") return Promise.resolve({ reply: "Working on it." });
       return defaultInvoke?.(command, args);
     });
     const user = userEvent.setup();
@@ -526,6 +831,72 @@ describe("AgentWorkspace runtime wiring", () => {
     view.unmount();
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     expect(readAgentSessionDraft(session.id)).toBeUndefined();
+  });
+
+  it("leaves an externally deleted workspace and rejects its late hydration", async () => {
+    let finishSession: ((value: AgentSessionDto) => void) | undefined;
+    const late = new Promise<AgentSessionDto>((resolve) => {
+      finishSession = resolve;
+    });
+    const fallback = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "get_agent_session" ? late : fallback?.(command, args),
+    );
+    const selected = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} onSessionSelected={selected} />);
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", { sessionId: session.id }),
+    );
+    act(() =>
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: session.id } }),
+      ),
+    );
+    await act(async () => finishSession?.(session));
+    expect(screen.queryByRole("button", { name: "Session actions" })).not.toBeInTheDocument();
+    expect(selected).toHaveBeenCalledWith(undefined);
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "New conversation");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", expect.anything()),
+    );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "start_agent_run",
+        expect.objectContaining({ request: expect.objectContaining({ sessionId: newSession.id }) }),
+      ),
+    );
+    const starts = mocks.invoke.mock.calls.filter(([name]) => name === "start_agent_run");
+    expect(
+      starts.every(
+        ([, args]) => (args as { request: { sessionId: string } }).request.sessionId !== session.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores a hydration error returned after that conversation was deleted", async () => {
+    let rejectSession: ((reason: Error) => void) | undefined;
+    const late = new Promise<AgentSessionDto>((_, reject) => {
+      rejectSession = reject;
+    });
+    const fallback = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "get_agent_session" ? late : fallback?.(command, args),
+    );
+    render(<AgentWorkspace initialSession={session} />);
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", { sessionId: session.id }),
+    );
+    act(() =>
+      window.dispatchEvent(
+        new CustomEvent(AGENT_DELETE_SESSION_EVENT, { detail: { sessionId: session.id } }),
+      ),
+    );
+    await act(async () => rejectSession?.(new Error("Deleted conversation hydration failed")));
+    expect(screen.queryByText("Deleted conversation hydration failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Session actions" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toBeInTheDocument();
   });
 
   it("does not let a late failed send recreate an externally deleted draft", async () => {
@@ -598,7 +969,7 @@ describe("AgentWorkspace runtime wiring", () => {
   it("reserves the fixed composer before Home has a persisted session", async () => {
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -627,7 +998,7 @@ describe("AgentWorkspace runtime wiring", () => {
     const pendingSession = new Promise<AgentSessionDto>(() => {});
     mocks.invoke.mockImplementation((command: string) => {
       if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -768,34 +1139,18 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("protects live queued and Home handoff paths before staging a new drop", async () => {
+  it("protects live queued paths before staging a new drop", async () => {
     const currentPath = "/tmp/current.pdf";
     const queuedPath = "/tmp/clovy-agent-attachment-staging/queued/queued.pdf";
-    const homePath = "/tmp/clovy-agent-attachment-staging/home/handoff.pdf";
     const stagedPath = "/tmp/clovy-agent-attachment-staging/new/new.pdf";
     saveQueuedAgentFollowUps({
       [newSession.id]: {
         messageId: "queued-other-session",
         prompt: "Use queued file",
         attachments: [queuedPath],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
       },
     });
-    window.localStorage.setItem(
-      "clovy:home:task-handoffs:v1",
-      JSON.stringify({
-        "home-other-session": [
-          {
-            id: "home-task-protected",
-            title: "Protected task",
-            prompt: "Use Home file",
-            status: "failed",
-            attachments: [homePath],
-          },
-        ],
-      }),
-    );
     mocks.openDialog.mockResolvedValue([currentPath]);
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
@@ -816,7 +1171,7 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("prune_staged_agent_attachments", {
         request: {
-          protectedPaths: expect.arrayContaining([currentPath, queuedPath, homePath]),
+          protectedPaths: expect.arrayContaining([currentPath, queuedPath]),
         },
       }),
     );
@@ -1006,101 +1361,6 @@ describe("AgentWorkspace runtime wiring", () => {
     });
   });
 
-  it("keeps an earlier unsent Home message while blocking another submission", async () => {
-    const firstPath = "/tmp/clovy-agent-attachment-staging/home-first/first.pdf";
-    const secondPath = "/tmp/clovy-agent-attachment-staging/home-second/second.pdf";
-    const thirdPath = "/tmp/clovy-agent-attachment-staging/home-third/third.pdf";
-    let rejectCreate!: (error: Error) => void;
-    const create = new Promise<AgentSessionDto>((_, reject) => {
-      rejectCreate = reject;
-    });
-    let stagedCount = 0;
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([]);
-      if (command === "stage_agent_attachment_bytes") {
-        stagedCount += 1;
-        return Promise.resolve(
-          stagedCount === 1 ? firstPath : stagedCount === 2 ? secondPath : thirdPath,
-        );
-      }
-      if (command === "create_agent_session") return create;
-      return defaultInvoke?.(command, args);
-    });
-    const user = userEvent.setup();
-    render(<AgentWorkspace homeMode />);
-    const form = document.querySelector<HTMLFormElement>(".agent-composer");
-    expect(form).not.toBeNull();
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["first"], "first.pdf")] },
-    });
-    expect(await screen.findByText("first.pdf")).toBeVisible();
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "First request");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["second"], "second.pdf")] },
-    });
-    expect(await screen.findByText("second.pdf")).toBeVisible();
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Second request");
-    fireEvent.submit(form as HTMLFormElement);
-
-    expect(
-      await screen.findByText("Wait for Home to finish starting, then send again."),
-    ).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-
-    await act(async () => rejectCreate(new Error("Home session creation failed")));
-
-    expect(await screen.findByText("Unsent Home message")).toBeVisible();
-    expect(screen.getByText("First request")).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-    expect(within(form as HTMLFormElement).queryByText("first.pdf")).not.toBeInTheDocument();
-
-    fireEvent.submit(form as HTMLFormElement);
-    expect(
-      await screen.findByText("Retry or discard the unsent Home message before sending another."),
-    ).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getByText("First request")).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "Second request",
-    );
-    expect(within(form as HTMLFormElement).getByText("second.pdf")).toBeVisible();
-
-    fireEvent.drop(form as HTMLFormElement, {
-      dataTransfer: { files: [new File(["third"], "third.pdf")] },
-    });
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("prune_staged_agent_attachments", {
-        request: { protectedPaths: expect.arrayContaining([firstPath, secondPath]) },
-      }),
-    );
-    expect(await screen.findByText("third.pdf")).toBeVisible();
-
-    await user.clear(screen.getByRole("textbox", { name: "Message Clovy" }));
-    await user.click(screen.getByRole("button", { name: "Remove second.pdf" }));
-    await user.click(screen.getByRole("button", { name: "Remove third.pdf" }));
-    const retry = screen.getByRole("button", { name: "Retry unsent Home message" });
-    expect(retry).toBeEnabled();
-    await user.click(retry);
-    expect(screen.queryByText("Unsent Home message")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent(
-      "First request",
-    );
-    expect(within(form as HTMLFormElement).getByText("first.pdf")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
-  });
-
   it("discards live composer paths and invalidates an in-flight drop on unmount", async () => {
     const currentPath = "/tmp/clovy-agent-attachment-staging/current/brief.pdf";
     const latePath = "/tmp/clovy-agent-attachment-staging/late/notes.pdf";
@@ -1141,211 +1401,13 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("hands Home attachments to a focused Clovy runtime session with send-time profile", async () => {
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-session",
-      title: "Home",
-      workspacePath: "/tmp/home-session",
-    };
-    const focusedSession: AgentSessionDto = {
-      ...newSession,
-      id: "focused-session",
-      title: "Summarize this file",
-      workspacePath: "/tmp/focused-session",
-    };
-    setCurrentDataPartitionName("work");
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession, focusedSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_agent_skills") return [];
-      if (command === "list_venice_models") {
-        return {
-          mode: "generation",
-          selectedModel: "open-software/auto",
-          modelType: "text",
-          models: [],
-        };
-      }
-      if (command === "provider_model_settings") {
-        return {
-          settings: { costQuality: 20 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
-        };
-      }
-      if (command === "create_agent_session") return focusedSession;
-      if (command === "start_agent_run") {
-        return {
-          id: "focused-run",
-          sessionId: focusedSession.id,
-          status: "running",
-          model: "fast",
-        };
-      }
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    expect(screen.queryByRole("button", { name: /Model:/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    await waitFor(() => expect(screen.getByText("brief.pdf")).toBeVisible());
-    await user.type(composer, "Summarize this file");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
-        request: {
-          title: "Summarize this file",
-          model: "__june_auto_generation__:20",
-          safetyMode: "sandboxed",
-          profile: "work",
-        },
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: "focused-session",
-          prompt: "Summarize this file",
-          model: "__june_auto_generation__:20",
-          reasoningEffort: "medium",
-          safetyMode: "sandboxed",
-          attachments: ["/tmp/brief.pdf"],
-        }),
-      }),
-    );
-    expect(await screen.findByRole("button", { name: "Open session" })).toBeVisible();
-  });
-
-  it("does not create another Home task for conversation after a handoff", async () => {
-    const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-ack-session",
-      title: "Home",
-      workspacePath: "/tmp/home-ack-session",
-    };
-    const focusedSession: AgentSessionDto = {
-      ...newSession,
-      id: "focused-wine-session",
-      title: "Wine research",
-      workspacePath: "/tmp/focused-wine-session",
-    };
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession, focusedSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_agent_skills") return [];
-      if (command === "list_venice_models") {
-        return {
-          mode: "generation",
-          selectedModel: "open-software/auto",
-          modelType: "text",
-          models: [],
-        };
-      }
-      if (command === "provider_model_settings") {
-        return {
-          settings: { costQuality: 20 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
-        };
-      }
-      if (command === "clovy_home_chat") {
-        return {
-          task: {
-            title: "Wine research",
-            prompt: "Research good wines near southern France.",
-          },
-        };
-      }
-      if (command === "create_agent_session") return focusedSession;
-      if (command === "start_agent_run") {
-        return {
-          id: "focused-run",
-          sessionId: focusedSession.id,
-          status: "running",
-          model: "fast",
-        };
-      }
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Research good wines near southern France");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByRole("button", { name: "Open session" })).toBeVisible();
-    await waitFor(() =>
-      expect(
-        mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-      ).toHaveLength(1),
-    );
-
-    const nextComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(nextComposer, "ok");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("Got it.")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Hey there, Clovy 👋");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("Hey! What can I help with?")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Greetings, Clovy");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() => expect(screen.getAllByText("Hey! What can I help with?")).toHaveLength(2));
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "Open session" })).toHaveLength(1);
-
-    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Plan a trip to Rome");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(await screen.findByText("I'm here. What can I help with?")).toBeVisible();
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "create_agent_session"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-    ).toHaveLength(1);
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "clovy_home_chat"),
-    ).toHaveLength(2);
-  });
-
   it("repairs a stale Home mapping when its Clovy-owned session is missing", async () => {
     writeClovyHomeStoredSessionId("default", "missing-home-session");
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "list_agent_sessions") return [];
       if (command === "get_agent_session") throw new Error("Session not found");
       if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return {
           mode: "generation",
           selectedModel: "open-software/auto",
@@ -1362,49 +1424,87 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(screen.queryByText("Session not found")).not.toBeInTheDocument();
   });
 
-  it("keeps a failed Home message when the user has already drafted another", async () => {
+  it.each([
+    { name: "native history", model: "fast", defaultCli: "codex", expectedCli: "claude" },
+    {
+      name: "endpoint history",
+      model: "__clovy_endpoint_engine__:local",
+      defaultCli: "codex",
+      expectedCli: "claude",
+    },
+    {
+      name: "saved CLI choice",
+      model: "__clovy_cli_engine__:codex",
+      defaultCli: "claude",
+      expectedCli: "codex",
+    },
+    {
+      name: "Home default",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      homeMode: true,
+    },
+    {
+      name: "Codex fallback",
+      model: "fast",
+      defaultCli: "codex",
+      expectedCli: "codex",
+      claudeInstalled: false,
+    },
+  ])("submits the engine displayed for $name", async ({
+    model,
+    defaultCli,
+    expectedCli,
+    homeMode,
+    claudeInstalled = true,
+  }) => {
     const user = userEvent.setup();
-    const homeSession: AgentSessionDto = {
-      ...session,
-      id: "home-failure-session",
-      title: "Home",
-      workspacePath: "/tmp/home-failure-session",
-    };
-    let rejectHome: ((error: Error) => void) | undefined;
-    const pendingHome = new Promise((_, reject) => {
-      rejectHome = reject;
+    const storedSession = { ...session, model };
+    const defaultInvoke = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "get_agent_session") return Promise.resolve(storedSession);
+      if (command === "chat_default_engine")
+        return Promise.resolve({ modelId: `__clovy_cli_engine__:${defaultCli}`, cli: defaultCli });
+      if (command === "chat_engine_catalog")
+        return Promise.resolve({
+          clis: [
+            {
+              id: "claude",
+              name: "Claude Code",
+              installed: claudeInstalled,
+              reason: null,
+              modelId: "__clovy_cli_engine__:claude",
+            },
+            {
+              id: "codex",
+              name: "Codex",
+              installed: true,
+              reason: null,
+              modelId: "__clovy_cli_engine__:codex",
+            },
+          ],
+        });
+      return defaultInvoke?.(command, args);
     });
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "list_agent_sessions") return [homeSession];
-      if (command === "get_agent_session") return homeSession;
-      if (command === "list_agent_items" || command === "list_agent_artifacts") return [];
-      if (command === "list_venice_models") {
-        return { mode: "generation", selectedModel: "fast", modelType: "text", models: [] };
-      }
-      if (command === "clovy_home_chat") return pendingHome;
-      return undefined;
-    });
-
-    render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const composer = await screen.findByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "First message");
+    render(<AgentWorkspace initialSession={storedSession} homeMode={homeMode} />);
+    await screen.findByText("Earlier answer");
+    const label = expectedCli === "claude" ? "Claude Code" : "Codex";
+    if (homeMode)
+      expect(screen.queryByRole("button", { name: /^Chat engine:/ })).not.toBeInTheDocument();
+    else
+      expect(
+        await screen.findByRole("button", { name: `Chat engine: ${label}` }),
+      ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message Clovy" }),
+      "Continue this conversation",
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("clovy_home_chat", expect.anything()),
-    );
-    const activeComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    activeComposer.textContent = "New draft";
-    fireEvent.input(activeComposer);
-    expect(activeComposer).toHaveTextContent("New draft");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    rejectHome?.(new Error("Home is temporarily unavailable"));
-
-    expect(await screen.findByText("First message")).toBeVisible();
-    const errorNotice = await screen.findByRole("alert");
-    expect(errorNotice).toHaveTextContent("Home is temporarily unavailable");
-    expect(errorNotice.closest(".agent-composer")).not.toBeNull();
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Message Clovy" })).toHaveTextContent("New draft"),
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: `__clovy_cli_engine__:${expectedCli}` }),
+      }),
     );
   });
 
@@ -1414,7 +1514,7 @@ describe("AgentWorkspace runtime wiring", () => {
 
     expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sandboxed" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
     expect(container.querySelector(".agent-scroll .agent-main > .agent-composer")).not.toBeNull();
     const composer = screen.getByRole("textbox", { name: "Message Clovy" });
     await user.click(composer);
@@ -1425,21 +1525,16 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
           safetyMode: "sandboxed",
           enabledSkillIds: ["notes"],
         }),
       }),
     );
-    const activeRunPicker = screen.getByRole("button", { name: "Model: Fast" });
-    expect(activeRunPicker).toBeEnabled();
-    await user.click(activeRunPicker);
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
+    expect(screen.queryByRole("button", { name: /^Model:/ })).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "list_provider_models")).toBe(
+      false,
     );
-    expect(screen.getByRole("button", { name: "Model: Auto" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop Clovy" }));
     await waitFor(() =>
@@ -1460,7 +1555,7 @@ describe("AgentWorkspace runtime wiring", () => {
       });
     });
 
-    const nextRunPicker = await screen.findByRole("button", { name: "Model: Auto" });
+    const nextRunPicker = await screen.findByRole("button", { name: "Chat engine: Claude Code" });
     expect(nextRunPicker).toBeEnabled();
     const nextComposer = screen.getByRole("textbox", { name: "Message Clovy" });
     await user.type(nextComposer, "Use the staged model");
@@ -1469,345 +1564,13 @@ describe("AgentWorkspace runtime wiring", () => {
       expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
         request: expect.objectContaining({
           prompt: "Use the staged model",
-          model: "__june_auto_generation__:100",
+          model: "__clovy_cli_engine__:claude",
         }),
       }),
     );
   });
 
-  it("restores Auto-only suggestions, root model search, and compact effort choices", async () => {
-    const user = userEvent.setup();
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_venice_models") {
-        return Promise.resolve({
-          mode: "generation",
-          selectedModel: "fast",
-          modelType: "text",
-          models: [
-            {
-              provider: "june",
-              id: "fast",
-              name: "Fast",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-            {
-              provider: "venice",
-              id: "kimi-k3",
-              name: "Kimi K3",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-            {
-              provider: "venice",
-              id: "zai-org-glm-5-2",
-              name: "GLM 5.2",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-            },
-          ],
-        });
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-    await user.click(await screen.findByRole("button", { name: "Model: Fast" }));
-
-    const suggested = screen.getByRole("listbox", { name: "Suggested text models" });
-    const autoOption = within(suggested).getByRole("option", { name: /Auto/ });
-    expect(autoOption).toBeVisible();
-    expect(autoOption.querySelector('.model-row-privacy[data-mode="private"]')).toHaveAttribute(
-      "aria-label",
-      expect.stringMatching(/^Private mode:/),
-    );
-    expect(within(suggested).queryByText("GLM 5.2")).not.toBeInTheDocument();
-    expect(within(suggested).queryByText("Kimi K3")).not.toBeInTheDocument();
-
-    const search = screen.getByRole("combobox", { name: "Search models" });
-    await user.type(search, "Kimi");
-    expect(
-      within(screen.getByRole("listbox", { name: "Matching models" })).getByRole("option", {
-        name: /Kimi K3/,
-      }),
-    ).toBeVisible();
-
-    await user.clear(search);
-    await user.type(search, "no-such-model");
-    const pickerDialog = screen.getByRole("dialog", { name: "Choose text model" });
-    expect(within(pickerDialog).getByRole("status")).toHaveTextContent(
-      "No results match your search.",
-    );
-    await user.clear(search);
-    await user.type(search, "Kimi");
-
-    await user.keyboard("{Escape}");
-    expect(search).toHaveValue("");
-    expect(search).toHaveFocus();
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    expect(screen.getByRole("group", { name: "All text models" })).toBeVisible();
-    const allModelsList = screen.getByRole("listbox", { name: "All text models" });
-    const allModelOptions = within(allModelsList).getAllByRole("option");
-    allModelOptions[0]?.focus();
-    fireEvent.keyDown(allModelsList, { key: "End" });
-    expect(allModelOptions.at(-1)).toHaveFocus();
-    fireEvent.keyDown(allModelsList, { key: "Home" });
-    expect(allModelOptions[0]).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("group", { name: "All text models" })).not.toBeInTheDocument();
-    expect(search).toHaveFocus();
-
-    const effortTrigger = screen.getByRole("button", { name: /Effort.*Medium/ });
-    fireEvent.mouseEnter(effortTrigger);
-    expect(await screen.findByRole("group", { name: "Thinking level" })).toBeVisible();
-    expect(search).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("group", { name: "Thinking level" })).not.toBeInTheDocument();
-    expect(search).toHaveFocus();
-
-    await user.click(effortTrigger);
-    const effort = screen.getByRole("group", { name: "Thinking level" });
-    expect(effort).toHaveClass("agent-composer-model-effort-panel");
-    const lowEffort = within(effort).getByRole("menuitemradio", {
-      name: /Low.*Faster responses/,
-    });
-    const mediumEffort = within(effort).getByRole("menuitemradio", {
-      name: /Medium.*Balances speed/,
-    });
-    const highEffort = within(effort).getByRole("menuitemradio", {
-      name: /High.*Deeper reasoning/,
-    });
-    expect(lowEffort).toBeVisible();
-    expect(highEffort).toBeVisible();
-    await waitFor(() => expect(mediumEffort).toHaveFocus());
-    await user.keyboard("{ArrowDown}");
-    expect(highEffort).toHaveFocus();
-    await user.keyboard("{Enter}");
-    expect(screen.queryByRole("group", { name: "Thinking level" })).not.toBeInTheDocument();
-    const trigger = screen.getByRole("button", { name: "Model: Fast" });
-    await waitFor(() => expect(trigger).toHaveFocus());
-
-    await user.click(trigger);
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("combobox", { name: "Search models" })).not.toBeInTheDocument();
-    await waitFor(() => expect(trigger).toHaveFocus());
-  });
-
-  it("restores Auto Economy, Balanced, and Quality with session-persistent routing", async () => {
-    const user = userEvent.setup();
-    const autoSession = {
-      ...session,
-      model: "__june_auto_generation__:50",
-    };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([autoSession]);
-      if (command === "get_agent_session") return Promise.resolve(autoSession);
-      if (command === "provider_model_settings") {
-        return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
-        });
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace initialSession={autoSession} />);
-    await screen.findByText("Earlier answer");
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Balanced"));
-
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Balanced/ }));
-    const preferences = screen.getByRole("group", { name: "Auto preference" });
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Economy.*Favors cheaper models/,
-      }),
-    ).toBeVisible();
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Balanced.*Weighs quality against cost/,
-      }),
-    ).toBeVisible();
-    expect(
-      within(preferences).getByRole("menuitemradio", {
-        name: /Quality.*Routes to the strongest model/,
-      }),
-    ).toBeVisible();
-
-    await user.click(within(preferences).getByRole("menuitemradio", { name: /Economy/ }));
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Economy"));
-    expect(mocks.invoke).not.toHaveBeenCalledWith("set_cost_quality", expect.anything());
-
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("group", { name: "Auto preference" })).not.toBeInTheDocument(),
-    );
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Choose text model" })).not.toBeInTheDocument(),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use Economy";
-    fireEvent.input(composer);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: autoSession.id,
-          prompt: "Use Economy",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-  });
-
-  it("persists a fresh Auto preference and applies it to the first run", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace />);
-
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Quality"));
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("group", { name: "Auto preference" })).not.toBeInTheDocument(),
-    );
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Choose text model" })).not.toBeInTheDocument(),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Fresh Economy request";
-    fireEvent.input(composer);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
-        request: expect.objectContaining({
-          title: "Fresh Economy request",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          prompt: "Fresh Economy request",
-          model: "__june_auto_generation__:20",
-        }),
-      }),
-    );
-  });
-
-  it("keeps a freshly selected Auto preference when settings hydration finishes late", async () => {
-    const user = userEvent.setup();
-    let resolveSettings: ((value: unknown) => void) | undefined;
-    const pendingSettings = new Promise((resolve) => {
-      resolveSettings = resolve;
-    });
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "provider_model_settings") return pendingSettings;
-      return defaultInvoke?.(command, args);
-    });
-
-    render(<AgentWorkspace />);
-    const trigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    await act(async () => {
-      resolveSettings?.({
-        settings: { costQuality: 100 },
-        effectiveSettings: { veniceApiKeyConfigured: false },
-      });
-      await pendingSettings;
-    });
-
-    expect(trigger).toHaveAttribute("title", expect.stringContaining("Preference: Economy"));
-  });
-
-  it("does not overwrite a session preference when a global save finishes after navigation", async () => {
-    const user = userEvent.setup();
-    const balancedSession = { ...session, model: "__june_auto_generation__:50" };
-    let resolveSave: ((value: { costQuality: number }) => void) | undefined;
-    const pendingSave = new Promise<{ costQuality: number }>((resolve) => {
-      resolveSave = resolve;
-    });
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([balancedSession]);
-      if (command === "get_agent_session") return Promise.resolve(balancedSession);
-      if (command === "set_cost_quality") return pendingSave;
-      return defaultInvoke?.(command, args);
-    });
-
-    const { rerender } = render(<AgentWorkspace />);
-    const freshTrigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await user.click(freshTrigger);
-    await user.click(screen.getByRole("button", { name: /Preference.*Quality/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Auto preference" })).getByRole("menuitemradio", {
-        name: /Economy/,
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("set_cost_quality", {
-        request: { value: 20 },
-      }),
-    );
-
-    rerender(<AgentWorkspace initialSession={balancedSession} />);
-    const sessionTrigger = await screen.findByRole("button", { name: "Model: Auto" });
-    await waitFor(() =>
-      expect(sessionTrigger).toHaveAttribute(
-        "title",
-        expect.stringContaining("Preference: Balanced"),
-      ),
-    );
-
-    await act(async () => {
-      resolveSave?.({ costQuality: 20 });
-      await pendingSave;
-    });
-
-    expect(sessionTrigger).toHaveAttribute(
-      "title",
-      expect.stringContaining("Preference: Balanced"),
-    );
-  });
-
-  it("shows context, estimated charge, and per-tool usage for the latest run", async () => {
+  it("shows reported tokens and per-tool usage without a model-based credit estimate", async () => {
     const user = userEvent.setup();
     render(
       <div className="app-shell">
@@ -1833,6 +1596,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "tool.started",
           data: {
+            itemSequence: 2,
             itemId: "tool-item-1",
             callId: "call-1",
             name: "read_file",
@@ -1867,8 +1631,8 @@ describe("AgentWorkspace runtime wiring", () => {
     const usageOverlay = usagePanel.closest(".agent-usage-overlay");
     expect(usageOverlay).not.toBeNull();
     expect(usageOverlay?.parentElement).toBe(document.querySelector(".app-shell"));
-    expect(usagePanel).toHaveTextContent("10,000 of 200,000 (5.0%)");
-    expect(usagePanel).toHaveTextContent("28 credits (about $0.0280)");
+    expect(usagePanel).toHaveTextContent("10,000");
+    expect(usagePanel).not.toHaveTextContent("28 credits (about $0.0280)");
     expect(usagePanel).toHaveTextContent("read_file");
     expect(usagePanel).toHaveTextContent("1 call");
     expect(usagePanel).toHaveTextContent("phala");
@@ -1964,488 +1728,7 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(usagePanel).toHaveTextContent("qa-fixture");
     expect(usagePanel).toHaveTextContent("isolated");
     expect(usagePanel).toHaveTextContent("localhost");
-    expect(usagePanel).toHaveTextContent("Auto");
-    expect(usagePanel).not.toHaveTextContent("__june_auto_generation__");
     expect(usagePanel).toHaveTextContent("Token counts were not reported for this request.");
-  });
-
-  it("steers an active run at the next model boundary and retires the fallback queue", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop Clovy" })).toBeVisible());
-
-    const scroller = document.querySelector<HTMLElement>(".agent-scroll");
-    expect(scroller).not.toBeNull();
-    const scrollTo = vi.fn();
-    Object.defineProperties(scroller as HTMLElement, {
-      scrollHeight: { configurable: true, get: () => 1000 },
-      clientHeight: { configurable: true, get: () => 400 },
-      scrollTop: { configurable: true, writable: true, value: 100 },
-      scrollTo: { configurable: true, value: scrollTo },
-    });
-
-    const activeComposer = screen.getByRole("textbox", { name: "Message Clovy" });
-    activeComposer.textContent = "Use the launch plan";
-    fireEvent.input(activeComposer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: "smooth" }));
-
-    const steerCall = mocks.invoke.mock.calls.find(([command]) => command === "steer_agent_run");
-    expect(steerCall?.[1]).toMatchObject({
-      runId: "run-1",
-      text: "Use the launch plan",
-      messageId: expect.any(String),
-    });
-    expect(await screen.findByText("Steering active run")).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-steering",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: "steering-1",
-            messageId: String((steerCall?.[1] as { messageId?: string })?.messageId),
-            text: "Use the launch plan",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-
-    expect(await screen.findByText("Steering: Use the launch plan")).toBeVisible();
-    expect(screen.queryByText("Steering active run")).not.toBeInTheDocument();
-  });
-
-  it("steers text with attachments and submits the attachments once after consumption", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the attached brief";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    const steerCall = mocks.invoke.mock.calls.find(([command]) => command === "steer_agent_run");
-    expect(steerCall?.[1]).toMatchObject({
-      runId: "run-1",
-      text: "Use the attached brief",
-      messageId: expect.any(String),
-    });
-    expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
-    ).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-steering-with-attachment",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: "steering-with-attachment",
-            messageId: String((steerCall?.[1] as { messageId?: string })?.messageId),
-            text: "Use the attached brief",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-
-    expect(await screen.findByText("Steering: Use the attached brief")).toBeVisible();
-    expect(screen.getByText("1 attachment queued for next turn")).toBeVisible();
-    expect(screen.getByText("brief.pdf")).toBeVisible();
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed-after-attachment-steer",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 4,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:02:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: `Use the attached brief\n\n${ATTACHMENT_FOLLOW_UP_NOTE}`,
-          attachments: ["/tmp/brief.pdf"],
-        }),
-      });
-    });
-    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-    ).toHaveLength(2);
-  });
-
-  it("merges a later steer into an attachments-only queue without dropping files", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog
-      .mockResolvedValueOnce(["/tmp/brief.pdf"])
-      .mockResolvedValueOnce(["/tmp/notes.md"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the first brief";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    let steerCalls = mocks.invoke.mock.calls.filter(([command]) => command === "steer_agent_run");
-    const firstMessageId = String(
-      (steerCalls[0]?.[1] as { messageId?: string } | undefined)?.messageId,
-    );
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-consumed-first-brief",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "steering.consumed",
-          data: {
-            itemId: `steering:${firstMessageId}`,
-            messageId: firstMessageId,
-            text: "Use the first brief",
-            createdAt: "2026-07-22T12:01:00Z",
-          },
-        },
-      });
-    });
-    expect(await screen.findByText("1 attachment queued for next turn")).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Use the latest plan";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    steerCalls = mocks.invoke.mock.calls.filter(([command]) => command === "steer_agent_run");
-    expect(steerCalls).toHaveLength(2);
-    const secondMessageId = String(
-      (steerCalls[1]?.[1] as { messageId?: string } | undefined)?.messageId,
-    );
-    await waitFor(() => {
-      const stored = JSON.parse(
-        window.localStorage.getItem("clovy.agent.queuedFollowUps") ?? "{}",
-      ) as Record<string, { messageId?: string; prompt?: string; attachments?: string[] }>;
-      expect(stored[session.id]).toMatchObject({
-        messageId: secondMessageId,
-        prompt: "Use the latest plan",
-        attachments: ["/tmp/brief.pdf", "/tmp/notes.md"],
-      });
-    });
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-consumed-latest-plan",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 4,
-          method: "steering.consumed",
-          data: {
-            itemId: `steering:${secondMessageId}`,
-            messageId: secondMessageId,
-            text: "Use the latest plan",
-            createdAt: "2026-07-22T12:01:30Z",
-          },
-        },
-      });
-    });
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed-after-merged-steer",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 5,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:02:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: `Use the latest plan\n\n${ATTACHMENT_FOLLOW_UP_NOTE}`,
-          attachments: ["/tmp/brief.pdf", "/tmp/notes.md"],
-        }),
-      });
-    });
-  });
-
-  it("falls back to the full queued follow-up when steering is rejected", async () => {
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "steer_agent_run") {
-        return Promise.resolve({ accepted: false, reason: "not_active" });
-      }
-      return defaultInvoke?.(command, args);
-    });
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-    try {
-      const user = userEvent.setup();
-      render(<AgentWorkspace initialSession={session} />);
-      await screen.findByText("Earlier answer");
-
-      let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      await user.type(composer, "Start the analysis");
-      await user.click(screen.getByRole("button", { name: "Send message" }));
-      await screen.findByRole("button", { name: "Stop Clovy" });
-
-      await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-      await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-      composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      composer.textContent = "Use the attached brief";
-      fireEvent.input(composer);
-      await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-      expect(
-        await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
-      ).toBeVisible();
-      expect(warn).toHaveBeenCalledWith(
-        "Live steering was rejected; queued the full follow-up instead.",
-        expect.objectContaining({ reason: "not_active", messageId: expect.any(String) }),
-      );
-
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-completed-after-rejected-steer",
-            sessionId: session.id,
-            runId: "run-1",
-            sequence: 3,
-            method: "run.completed",
-            data: { completedAt: "2026-07-22T12:02:00Z" },
-          },
-        });
-      });
-
-      await waitFor(() => {
-        const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-        expect(starts).toHaveLength(2);
-        expect(starts[1]?.[1]).toMatchObject({
-          request: expect.objectContaining({
-            prompt: "Use the attached brief",
-            attachments: ["/tmp/brief.pdf"],
-          }),
-        });
-      });
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("submits an unconsumed live instruction as the next run after settlement", async () => {
-    const user = userEvent.setup();
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop Clovy" })).toBeVisible());
-
-    await user.click(screen.getByRole("button", { name: "Model: Fast" }));
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
-    );
-
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Send this next";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-    await user.click(screen.getByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    await user.click(
-      within(screen.getByRole("group", { name: "All text models" })).getByRole("option", {
-        name: /Fast/,
-      }),
-    );
-
-    act(() => {
-      mocks.runtimeListener?.({
-        payload: {
-          protocolVersion: 1,
-          eventId: "event-completed",
-          sessionId: session.id,
-          runId: "run-1",
-          sequence: 3,
-          method: "run.completed",
-          data: { completedAt: "2026-07-22T12:01:00Z" },
-        },
-      });
-    });
-
-    await waitFor(() => {
-      const starts = mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run");
-      expect(starts).toHaveLength(2);
-      expect(starts[1]?.[1]).toMatchObject({
-        request: expect.objectContaining({
-          prompt: "Send this next",
-          model: "__june_auto_generation__:100",
-        }),
-      });
-    });
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
-  });
-
-  it("downgrades terminal steering and clears the queued snapshot when delivery races a new run", async () => {
-    const user = userEvent.setup();
-    mocks.openDialog.mockResolvedValue(["/tmp/brief.pdf"]);
-    render(<AgentWorkspace initialSession={session} />);
-    await screen.findByText("Earlier answer");
-
-    let composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await user.type(composer, "Start the analysis");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-    await screen.findByRole("button", { name: "Stop Clovy" });
-
-    await user.click(screen.getByRole("button", { name: "Add files or notes" }));
-    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
-    composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Deliver this after settlement";
-    fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-    expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
-    ).toBeVisible();
-
-    const frameCallbacks: FrameRequestCallback[] = [];
-    const animationFrame = vi
-      .spyOn(window, "requestAnimationFrame")
-      .mockImplementation((callback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      });
-    try {
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-terminal-before-queued-delivery",
-            sessionId: session.id,
-            runId: "run-1",
-            sequence: 3,
-            method: "run.completed",
-            data: { completedAt: "2026-07-22T12:01:00Z" },
-          },
-        });
-      });
-
-      expect(
-        await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
-      ).toBeVisible();
-      await waitFor(() => expect(frameCallbacks.length).toBeGreaterThan(0));
-
-      act(() => {
-        mocks.runtimeListener?.({
-          payload: {
-            protocolVersion: 1,
-            eventId: "event-new-run-before-queued-delivery",
-            sessionId: session.id,
-            runId: "run-2",
-            sequence: 0,
-            method: "run.started",
-            data: {
-              startedAt: "2026-07-22T12:01:01Z",
-              model: "fast",
-            },
-          },
-        });
-      });
-      const queuedFrames = frameCallbacks.splice(0);
-      act(() => {
-        for (const callback of queuedFrames) callback(0);
-      });
-
-      await waitFor(() => {
-        const steerCalls = mocks.invoke.mock.calls.filter(
-          ([command]) => command === "steer_agent_run",
-        );
-        expect(steerCalls).toHaveLength(2);
-        expect(steerCalls[1]?.[1]).toMatchObject({
-          runId: "run-2",
-          text: "Deliver this after settlement",
-        });
-      });
-
-      composer = screen.getByRole("textbox", { name: "Message Clovy" });
-      composer.textContent = "Latest live correction";
-      fireEvent.input(composer);
-      await user.click(await screen.findByRole("button", { name: "Steer active run" }));
-
-      await waitFor(() => {
-        const steerCalls = mocks.invoke.mock.calls.filter(
-          ([command]) => command === "steer_agent_run",
-        );
-        expect(steerCalls).toHaveLength(3);
-        expect(steerCalls[2]?.[1]).toMatchObject({
-          runId: "run-2",
-          text: "Latest live correction",
-        });
-        const stored = JSON.parse(
-          window.localStorage.getItem("clovy.agent.queuedFollowUps") ?? "{}",
-        ) as Record<string, { prompt?: string; attachments?: string[] }>;
-        expect(stored[session.id]).toMatchObject({
-          prompt: "Latest live correction",
-          attachments: ["/tmp/brief.pdf"],
-        });
-      });
-    } finally {
-      animationFrame.mockRestore();
-    }
   });
 
   it("keeps a queued follow-up owned by its running session across navigation", async () => {
@@ -2486,15 +1769,15 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(await screen.findByText("follow-up.pdf")).toBeVisible();
     composer.textContent = "Only send this in session A";
     fireEvent.input(composer);
-    await user.click(await screen.findByRole("button", { name: "Steer active run" }));
+    await user.click(await screen.findByRole("button", { name: "Queue next turn" }));
     expect(
-      await screen.findByText("Steering active run. 1 attachment queued for next turn"),
+      await screen.findByText("Queued follow-up. 1 attachment queued for next turn"),
     ).toBeVisible();
 
     rerender(<AgentWorkspace initialSession={newSession} />);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Stop Clovy" })).toBeNull());
     expect(
-      screen.queryByText("Steering active run. 1 attachment queued for next turn"),
+      screen.queryByText("Queued follow-up. 1 attachment queued for next turn"),
     ).not.toBeInTheDocument();
 
     act(() => {
@@ -2543,7 +1826,7 @@ describe("AgentWorkspace runtime wiring", () => {
         request: expect.objectContaining({
           sessionId: session.id,
           prompt: "Only send this in session A",
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
           attachments: ["/tmp/follow-up.pdf"],
         }),
       });
@@ -2556,8 +1839,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "restored-message",
         prompt: "Resume with this file",
         attachments: ["/tmp/restored.pdf"],
-        model: "open-software/auto",
-        thinkingLevel: "hard",
+        model: "__clovy_cli_engine__:claude",
       },
     });
 
@@ -2568,62 +1850,11 @@ describe("AgentWorkspace runtime wiring", () => {
           sessionId: session.id,
           prompt: "Resume with this file",
           attachments: ["/tmp/restored.pdf"],
-          model: "open-software/auto",
-          reasoningEffort: "high",
+          model: "__clovy_cli_engine__:claude",
         }),
       }),
     );
     expect(await screen.findByText("Resume with this file")).toBeVisible();
-  });
-
-  it("releases a queued attempt when submit becomes blocked before its frame", async () => {
-    saveQueuedAgentFollowUps({
-      [session.id]: {
-        messageId: "blocked-frame",
-        prompt: "Retry after funding refresh",
-        attachments: ["/tmp/retry.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
-      },
-    });
-    const frameCallbacks: FrameRequestCallback[] = [];
-    const animationFrame = vi
-      .spyOn(window, "requestAnimationFrame")
-      .mockImplementation((callback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      });
-    try {
-      const view = render(<AgentWorkspace initialSession={session} />);
-      await waitFor(() => expect(frameCallbacks).toHaveLength(1));
-
-      view.rerender(
-        <AgentWorkspace
-          initialSession={session}
-          creditActionsDisabledReason="Add credits to continue"
-        />,
-      );
-      act(() => frameCallbacks.shift()?.(0));
-      await waitFor(() =>
-        expect(
-          mocks.invoke.mock.calls.filter(([command]) => command === "start_agent_run"),
-        ).toHaveLength(0),
-      );
-
-      view.rerender(<AgentWorkspace initialSession={session} />);
-      await waitFor(() => expect(frameCallbacks).toHaveLength(1));
-      act(() => frameCallbacks.shift()?.(0));
-      await waitFor(() =>
-        expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-          request: expect.objectContaining({
-            prompt: "Retry after funding refresh",
-            attachments: ["/tmp/retry.pdf"],
-          }),
-        }),
-      );
-    } finally {
-      animationFrame.mockRestore();
-    }
   });
 
   it("keeps a restored follow-up when its run start fails after navigation", async () => {
@@ -2632,8 +1863,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "retry-after-navigation",
         prompt: "Retry this in session A",
         attachments: ["/tmp/retry.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
       },
     });
     let rejectFirstStart: ((error: Error) => void) | undefined;
@@ -2692,8 +1922,7 @@ describe("AgentWorkspace runtime wiring", () => {
         messageId: "already-consumed",
         prompt: "Use this restored brief",
         attachments: ["/tmp/restored-brief.pdf"],
-        model: "fast",
-        thinkingLevel: "medium",
+        model: "__clovy_cli_engine__:claude",
         delivery: "follow_up",
         steering: "accepted",
       },
@@ -2730,6 +1959,58 @@ describe("AgentWorkspace runtime wiring", () => {
     });
   });
 
+  it.each([
+    "loading",
+    "failed",
+  ])("uses the installed default for a historical session while the engine catalog is %s", async (catalogState) => {
+    const base = mocks.invoke.getMockImplementation();
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog") {
+        return catalogState === "loading"
+          ? new Promise(() => {})
+          : Promise.reject(new Error("catalog unavailable"));
+      }
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Continue history");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: "__clovy_cli_engine__:codex" }),
+      }),
+    );
+  });
+
+  it("preserves an explicit CLI choice when the engine catalog fails", async () => {
+    const base = mocks.invoke.getMockImplementation();
+    const selected = { ...session, model: "__clovy_cli_engine__:claude" };
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "chat_engine_catalog")
+        return Promise.reject(new Error("catalog unavailable"));
+      if (command === "get_agent_session") return Promise.resolve(selected);
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: "__clovy_cli_engine__:codex", cli: "codex" });
+      }
+      return base?.(command, args);
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={selected} />);
+    await screen.findByText("Earlier answer");
+    await user.type(screen.getByRole("textbox", { name: "Message Clovy" }), "Keep my engine");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: selected.model }),
+      }),
+    );
+  });
+
   it("does not let a slow global catalog overwrite a restored session model", async () => {
     let resolveCatalog:
       | ((value: {
@@ -2763,7 +2044,7 @@ describe("AgentWorkspace runtime wiring", () => {
     });
     const defaultInvoke = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_venice_models") return pendingCatalog;
+      if (command === "list_provider_models") return pendingCatalog;
       return defaultInvoke?.(command, args);
     });
 
@@ -2795,7 +2076,7 @@ describe("AgentWorkspace runtime wiring", () => {
         ],
       }),
     );
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
   });
 
   it("resolves approval interruptions against their originating run", async () => {
@@ -2818,6 +2099,89 @@ describe("AgentWorkspace runtime wiring", () => {
     );
     expect(await screen.findByText("Approved once")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", "Deny", "Denied"],
+    ["pt-BR", "Negar", "Negado"],
+  ] as const)("shows concrete untrusted browser targets before the real decision callback in %s", async (locale, denyLabel, deniedLabel) => {
+    applyInterfaceLocale(locale);
+    try {
+      const preview = (label: string) =>
+        `click Untrusted page element label: ${JSON.stringify(label)}\nElement tag: "button"; role: "button"; operation: click\nOrigin: https://mail.example.com`;
+      const event = (label: string, id: string, sequence: number): AgentRuntimeEvent => ({
+        protocolVersion: 1,
+        eventId: `browser-event-${id}`,
+        sessionId: session.id,
+        runId: "run-browser",
+        sequence,
+        method: "interruption.requested",
+        data: {
+          itemSequence: sequence,
+          itemId: `browser-item-${id}`,
+          interruption: {
+            id,
+            kind: "approval",
+            engine: "cli",
+            sessionId: session.id,
+            runId: "run-browser",
+            status: "pending",
+            createdAt: "2026-11-01T00:00:00Z",
+            toolName: "click",
+            title: "Use the browser",
+            description: "Clovy will perform one consequential action on the inspected page.",
+            command: preview(label),
+            allowAlways: false,
+          },
+        },
+      });
+      render(<AgentWorkspace initialSession={session} />);
+      await screen.findByText("Earlier answer");
+      act(() => {
+        mocks.runtimeListener?.({ payload: event("Delete draft", "delete-draft", 2) });
+        mocks.runtimeListener?.({ payload: event("Delete account", "delete-account", 3) });
+      });
+      const draftPreview = await screen.findByText(preview("Delete draft"), {
+        exact: true,
+        normalizer: (text) => text,
+      });
+      const accountPreview = await screen.findByText(preview("Delete account"), {
+        exact: true,
+        normalizer: (text) => text,
+      });
+      // Concrete targets are visible while both choices are live, without opening Details.
+      expect(draftPreview).toBeVisible();
+      expect(accountPreview).toBeVisible();
+      expect(draftPreview.tagName).toBe("PRE");
+      expect(accountPreview.tagName).toBe("PRE");
+      const draftCard = draftPreview.closest("article");
+      const accountCard = accountPreview.closest("article");
+      if (!draftCard || !accountCard) throw new Error("Missing central browser approval cards");
+      expect(draftCard).not.toBe(accountCard);
+      expect(within(draftCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      expect(within(accountCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      await userEvent.click(within(accountCard).getByRole("button", { name: denyLabel }));
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
+          request: {
+            runId: "run-browser",
+            interruptionId: "delete-account",
+            resolution: { kind: "approval", choice: "deny" },
+          },
+        }),
+      );
+      expect(await screen.findByText(deniedLabel)).toBeInTheDocument();
+      expect(within(draftCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      const decisions = mocks.invoke.mock.calls.filter(
+        ([command]) => command === "resolve_agent_interruption",
+      );
+      expect(decisions).toHaveLength(1);
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "start_agent_run")).toBe(
+        false,
+      );
+    } finally {
+      act(() => applyInterfaceLocale("en"));
+    }
   });
 
   it("keeps an approval retryable when interruption resolution fails", async () => {
@@ -2844,13 +2208,11 @@ describe("AgentWorkspace runtime wiring", () => {
   it("updates the desktop picker when a companion stages a session model", async () => {
     render(<AgentWorkspace initialSession={session} />);
     await screen.findByText("Earlier answer");
-    expect(screen.getByRole("button", { name: "Model: Fast" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeEnabled();
 
-    act(() => rememberSessionModel(session.id, "__june_auto_generation__:20"));
+    act(() => rememberSessionModel(session.id, "__clovy_cli_engine__:codex"));
 
-    expect(screen.getByRole("button", { name: "Model: Auto" }).getAttribute("title")).toContain(
-      "Preference: Economy",
-    );
+    expect(screen.getByRole("button", { name: "Chat engine: Codex" })).toBeEnabled();
   });
 
   it("resolves clarification interruptions through the typed host command", async () => {
@@ -2867,6 +2229,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "interruption.requested",
           data: {
+            itemSequence: 2,
             itemId: "clarify-item",
             interruption: {
               id: "clarify-1",
@@ -2883,7 +2246,7 @@ describe("AgentWorkspace runtime wiring", () => {
       });
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: /Clovy/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^1\s*Clovy/ }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
         request: {
@@ -2947,13 +2310,20 @@ describe("AgentWorkspace runtime wiring", () => {
       if (command === "list_agent_artifacts" || command === "list_agent_skills") {
         return Promise.resolve([]);
       }
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({ mode: "generation", models: [] });
       }
       if (command === "provider_model_settings") {
         return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: false },
+          settings: {},
+          effectiveSettings: {
+            providerApiKeysConfigured: {
+              groq: false,
+              openrouter: false,
+              fal: false,
+              tavily: false,
+            },
+          },
         });
       }
       if (command === "cancel_agent_run") {
@@ -3020,7 +2390,7 @@ describe("AgentWorkspace runtime wiring", () => {
       }
       if (command === "list_agent_artifacts") return Promise.resolve([]);
       if (command === "list_agent_skills") return Promise.resolve([]);
-      if (command === "list_venice_models") {
+      if (command === "list_provider_models") {
         return Promise.resolve({ mode: "generation", models: [] });
       }
       if (command === "retry_agent_run") {
@@ -3028,7 +2398,7 @@ describe("AgentWorkspace runtime wiring", () => {
           id: "run-retry",
           sessionId: session.id,
           status: "running",
-          model: "fast",
+          model: "__clovy_cli_engine__:claude",
         });
       }
       return Promise.resolve(undefined);
@@ -3264,6 +2634,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "message.completed",
           data: {
+            itemSequence: 2,
             itemId: "retry-answer",
             role: "assistant",
             text: "Retry answer",
@@ -3335,88 +2706,6 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(screen.queryByText("Unsent message")).not.toBeInTheDocument();
   });
 
-  it("stages model and effort changes made while a fresh session is still being created", async () => {
-    const user = userEvent.setup();
-    let resolveCreate: ((value: AgentSessionDto) => void) | undefined;
-    const pendingCreate = new Promise<AgentSessionDto>((resolve) => {
-      resolveCreate = resolve;
-    });
-    const createdSession = { ...newSession, model: "fast" };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
-    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      const sessionId = (args as { sessionId?: string } | undefined)?.sessionId;
-      if (command === "create_agent_session") return pendingCreate;
-      if (command === "get_agent_session" && sessionId === createdSession.id) {
-        return Promise.resolve(createdSession);
-      }
-      if (command === "list_agent_items" && sessionId === createdSession.id) {
-        return Promise.resolve([]);
-      }
-      return defaultInvoke?.(command, args);
-    });
-
-    const { container, rerender } = render(<AgentWorkspace />);
-    await user.click(await screen.findByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: "All models" }));
-    await user.click(
-      within(screen.getByRole("group", { name: "All text models" })).getByRole("option", {
-        name: /Fast/,
-      }),
-    );
-    const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    composer.textContent = "Create this slowly";
-    fireEvent.input(composer);
-    const send = screen.getByRole("button", { name: "Send message" });
-    await waitFor(() => expect(send).toBeEnabled());
-    await user.click(send);
-    await waitFor(
-      () =>
-        expect(container.querySelector(".agent-user-turn")).toHaveTextContent("Create this slowly"),
-      { timeout: 3_000 },
-    );
-    expect(screen.getByText("Thinking…")).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "Model: Fast" }));
-    await user.click(
-      within(screen.getByRole("listbox", { name: "Suggested text models" })).getByRole("option", {
-        name: /Auto/,
-      }),
-    );
-    await user.click(screen.getByRole("button", { name: "Model: Auto" }));
-    await user.click(screen.getByRole("button", { name: /Effort.*Medium/ }));
-    await user.click(
-      within(screen.getByRole("group", { name: "Thinking level" })).getByRole("menuitemradio", {
-        name: /High.*Deeper reasoning/,
-      }),
-    );
-
-    await act(async () => resolveCreate?.(createdSession));
-    await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({
-          sessionId: createdSession.id,
-          model: "fast",
-          reasoningEffort: "medium",
-        }),
-      }),
-    );
-    expect(screen.getByRole("button", { name: "Model: Auto" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Effort: High"),
-    );
-    expect(
-      mocks.invoke.mock.calls.filter(([command]) => command === "set_venice_model"),
-    ).toHaveLength(1);
-
-    rerender(<AgentWorkspace initialSession={session} />);
-    expect(await screen.findByRole("button", { name: "Model: Fast" })).toBeEnabled();
-    rerender(<AgentWorkspace initialSession={createdSession} />);
-    expect(await screen.findByRole("button", { name: "Model: Auto" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Effort: High"),
-    );
-  });
-
   it("does not take over the workspace when a delayed fresh session finishes after navigation", async () => {
     const user = userEvent.setup();
     let resolveCreate: ((value: AgentSessionDto) => void) | undefined;
@@ -3460,7 +2749,7 @@ describe("AgentWorkspace runtime wiring", () => {
     expect(onSessionSelected).not.toHaveBeenCalledWith(newSession);
   });
 
-  it("uses the priced Clovy Auto model id for a fresh workspace", async () => {
+  it("uses Claude Code for a fresh workspace when the default command is unavailable", async () => {
     setCurrentDataPartitionName("private");
     const user = userEvent.setup();
     render(<AgentWorkspace />);
@@ -3473,7 +2762,7 @@ describe("AgentWorkspace runtime wiring", () => {
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
         request: expect.objectContaining({
-          model: "__june_auto_generation__:100",
+          model: "__clovy_cli_engine__:claude",
           title: "Fresh request",
           profile: "private",
         }),
@@ -3481,57 +2770,140 @@ describe("AgentWorkspace runtime wiring", () => {
     );
   });
 
-  it("keeps explicit Venice BYOK text available when Clovy credits are unavailable", async () => {
-    const user = userEvent.setup();
-    const veniceSession = { ...session, model: "venice-text" };
-    const defaultInvoke = mocks.invoke.getMockImplementation();
+  it("starts a fresh workspace session on the default CLI engine", async () => {
+    const engineModel = "__clovy_cli_engine__:claude";
+    const base = mocks.invoke.getMockImplementation();
     mocks.invoke.mockImplementation((command: string, args?: unknown) => {
-      if (command === "list_agent_sessions") return Promise.resolve([veniceSession]);
-      if (command === "get_agent_session") return Promise.resolve(veniceSession);
-      if (command === "list_venice_models") {
-        return Promise.resolve({
-          mode: "generation",
-          selectedModel: "venice-text",
-          modelType: "text",
-          models: [
-            {
-              provider: "venice",
-              id: "venice-text",
-              name: "Venice text",
-              modelType: "text",
-              traits: [],
-              capabilities: ["tool-calling"],
-              privacy: "private",
-              contextTokens: 128_000,
-            },
-          ],
-        });
+      if (command === "chat_default_engine") {
+        return Promise.resolve({ modelId: engineModel, cli: "claude", legacyFallback: false });
       }
-      if (command === "provider_model_settings") {
-        return Promise.resolve({
-          settings: { costQuality: 100 },
-          effectiveSettings: { veniceApiKeyConfigured: true },
-        });
-      }
-      return defaultInvoke?.(command, args);
+      // The remote catalog is unreachable: the default needs no network.
+      if (command === "list_provider_models") return Promise.reject(new Error("offline"));
+      return base?.(command, args);
     });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
 
-    render(
-      <AgentWorkspace
-        initialSession={veniceSession}
-        creditActionsDisabledReason="Add credits to continue"
-      />,
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Chat engine: Claude Code" })).toBeVisible(),
     );
-    await screen.findByText("Earlier answer");
     const composer = screen.getByRole("textbox", { name: "Message Clovy" });
-    await waitFor(() => expect(composer).toBeEnabled());
-    await user.type(composer, "Use my Venice key");
+    await user.click(composer);
+    await user.type(composer, "Fresh request");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
-        request: expect.objectContaining({ model: "venice-text" }),
+      expect(mocks.invoke).toHaveBeenCalledWith("create_agent_session", {
+        request: expect.objectContaining({ model: engineModel, title: "Fresh request" }),
       }),
     );
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("start_agent_run", {
+        request: expect.objectContaining({ model: engineModel }),
+      }),
+    );
+  });
+
+  describe("streamed tokens", () => {
+    const event = (sessionId: string, sequence: number, payload: Partial<AgentRuntimeEvent>) =>
+      ({
+        protocolVersion: 1,
+        eventId: `event-${sessionId}-${sequence}`,
+        sessionId,
+        runId: `run-${sessionId}`,
+        sequence,
+        ...payload,
+      }) as AgentRuntimeEvent;
+    const stream = (sessionId: string, deltas: number) => {
+      const events: AgentRuntimeEvent[] = [
+        event(sessionId, 0, {
+          method: "run.started",
+          data: { startedAt: "2026-07-22T12:01:00Z", model: "fast" },
+        }),
+      ];
+      for (let index = 1; index <= deltas; index++) {
+        events.push(
+          event(sessionId, index, {
+            method: "message.delta",
+            data: {
+              itemSequence: 1,
+              itemId: `item-${sessionId}`,
+              role: "assistant",
+              delta: "token ",
+              createdAt: "2026-07-22T12:01:00Z",
+            },
+          }),
+        );
+      }
+      return events;
+    };
+    const listCalls = () =>
+      mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_sessions").length;
+
+    it("rereads the list for a background session only when its status moves", async () => {
+      render(<AgentWorkspace initialSession={session} />);
+      expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+      await waitFor(() => expect(listCalls()).toBeGreaterThan(0));
+      const before = listCalls();
+
+      await act(async () => {
+        for (const payload of stream("session-background", 20))
+          mocks.runtimeListener?.({ payload });
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(listCalls()).toBe(before + 1));
+      await act(async () => {
+        mocks.runtimeListener?.({
+          payload: event("session-background", 21, {
+            method: "run.completed",
+            data: { completedAt: "2026-07-22T12:02:00Z" },
+          }),
+        });
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(listCalls()).toBe(before + 2));
+    });
+
+    it("shows a failed reread after the open session's run ends", async () => {
+      render(<AgentWorkspace initialSession={session} />);
+      expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+      const fallback = mocks.invoke.getMockImplementation();
+      mocks.invoke.mockImplementation((command: string, args?: unknown) =>
+        command === "list_agent_items"
+          ? Promise.reject(new Error("Agent store is locked"))
+          : fallback?.(command, args),
+      );
+
+      act(() => {
+        mocks.runtimeListener?.({
+          payload: event(session.id, 1, {
+            method: "run.completed",
+            data: { completedAt: "2026-07-22T12:02:00Z" },
+          }),
+        });
+      });
+
+      expect(await screen.findByText(/Agent store is locked/)).toBeInTheDocument();
+    });
+
+    it("announces the open session's running status once per run", async () => {
+      const statuses: string[] = [];
+      const onStatus = (statusEvent: Event) =>
+        statuses.push((statusEvent as CustomEvent<{ status: string }>).detail.status);
+      window.addEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+      try {
+        render(<AgentWorkspace initialSession={session} />);
+        expect(await screen.findByText("Earlier answer")).toBeInTheDocument();
+
+        act(() => {
+          for (const payload of stream(session.id, 20)) mocks.runtimeListener?.({ payload });
+        });
+
+        expect(statuses).toEqual(["running"]);
+      } finally {
+        window.removeEventListener(AGENT_SESSION_STATUS_EVENT, onStatus);
+      }
+    });
   });
 });

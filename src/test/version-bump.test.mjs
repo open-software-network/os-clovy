@@ -115,22 +115,6 @@ describe("currentVersionFromCargoLock", () => {
     expect(currentVersionFromCargoLock(cargoLock)).toBe("0.1.0");
   });
 
-  it("prefers the canonical package when the legacy package is also present", () => {
-    const lock = `${cargoLock}\n[[package]]\nname = "os-june"\nversion = "0.0.9"\n`;
-    expect(currentVersionFromCargoLock(lock)).toBe("0.1.0");
-    expect(bumpVersionContents({ ...files, cargoLock: lock }, "0.2.0").cargoLock).toBe(
-      lock.replace('name = "clovy"\nversion = "0.1.0"', 'name = "clovy"\nversion = "0.2.0"'),
-    );
-  });
-
-  it("accepts the legacy package when the canonical package is absent", () => {
-    const lock = cargoLock.replace('name = "clovy"', 'name = "os-june"');
-    expect(currentVersionFromCargoLock(lock)).toBe("0.1.0");
-    expect(bumpVersionContents({ ...files, cargoLock: lock }, "0.2.0").cargoLock).toBe(
-      lock.replace('version = "0.1.0"', 'version = "0.2.0"'),
-    );
-  });
-
   it("fails when the clovy package is missing", () => {
     expect(() =>
       currentVersionFromCargoLock(cargoLock.replace('name = "clovy"', 'name = "other"')),
@@ -140,19 +124,6 @@ describe("currentVersionFromCargoLock", () => {
   it("fails when the clovy package is duplicated", () => {
     const duplicate = `${cargoLock}\n[[package]]\nname = "clovy"\nversion = "0.1.0"\n`;
     expect(() => currentVersionFromCargoLock(duplicate)).toThrow("multiple");
-  });
-
-  it("fails when the selected legacy package is duplicated", () => {
-    const legacy = cargoLock.replace('name = "clovy"', 'name = "os-june"');
-    const duplicate = `${legacy}\n[[package]]\nname = "os-june"\nversion = "0.1.0"\n`;
-    expect(() => currentVersionFromCargoLock(duplicate)).toThrow("multiple");
-  });
-
-  it("fails when the selected legacy package has a malformed version", () => {
-    const lock = cargoLock
-      .replace('name = "clovy"', 'name = "os-june"')
-      .replace('version = "0.1.0"', "version = 0.1.0");
-    expect(() => currentVersionFromCargoLock(lock)).toThrow("malformed version field");
   });
 
   it.each([
@@ -168,13 +139,6 @@ describe("currentVersionFromCargoLock", () => {
       'name = "clovy"\n',
       `name = "clovy"\n${field} = "registry identity"\n`,
     );
-    expect(() => currentVersionFromCargoLock(lock)).toThrow(`contains a ${field} field`);
-  });
-
-  it.each(["source", "checksum"])("rejects a legacy package with a %s field", (field) => {
-    const lock = cargoLock
-      .replace('name = "clovy"', 'name = "os-june"')
-      .replace('name = "os-june"\n', `name = "os-june"\n${field} = "registry identity"\n`);
     expect(() => currentVersionFromCargoLock(lock)).toThrow(`contains a ${field} field`);
   });
 });

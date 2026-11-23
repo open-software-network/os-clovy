@@ -1,8 +1,23 @@
 # PRD: Private connectors & away-mode relay
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 **Owner:** CEO · **Date:** 2026-07-09 · **Status:** Draft for review
 **Companion doc:** [private-connectors-implementation-plan.md](private-connectors-implementation-plan.md) (CTO)
 **One-liner:** Give Clovy Town-grade integrations — an assistant that acts in your email, calendar, and work tools, proactively — without OpenSoftware ever being able to read user data.
+
+> **Hosting note (2026-10-21).** Away mode assumed the TEE-attested Clovy API
+> on Phala, reproducible builds and `/verify`. The `desvincular-repo-ci` change
+> removed that hosted infrastructure: Clovy API now runs only locally. Local
+> mode is unaffected; away mode has no hosting target until a new one is
+> decided.
 
 ---
 
@@ -73,9 +88,8 @@ iOS companion app (fast-follow; needs the relay), team/org layer, in-enclave rou
 
 ## 6. Success metrics
 
-*(All billing-derived or aggregate — no per-user app telemetry. Clovy's only
-product telemetry is opt-in, coarse-bucketed P3A aggregates; any new question
-follows [telemetry-p3a-prd.md](telemetry-p3a-prd.md).)*
+*(All billing-derived or aggregate — no per-user app telemetry. This fork's
+desktop sends no product telemetry; P3A was removed.)*
 
 | Metric | Target | Why it matters |
 |---|---|---|

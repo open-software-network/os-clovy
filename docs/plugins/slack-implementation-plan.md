@@ -32,11 +32,11 @@ connector:
    can use a desktop-safe PKCE flow or another supported non-confidential flow.
 2. Evaluate Socket Mode and OAuth separately; Socket Mode avoids a public
    Events API URL but does not by itself solve installation secret custody.
-3. Reject embedding the secret, proxying all Slack tokens through Clovy API, or
+3. Reject embedding the secret, sending Slack tokens through a hosted intermediary, or
    using a shared static user token.
 4. If no local-safe public install exists, write an ADR for the chosen boundary
-   before implementation. Options are a TEE token exchange with explicit copy,
-   a bring-your-own Slack app for technical users, or deferral until away mode.
+   before implementation. Options within the local-only boundary are a
+   bring-your-own Slack app for technical users or deferring the connector.
 
 Exit: one supported, reviewable auth design and verified disconnect/revoke
 path. No downstream estimate is a commitment until this passes.

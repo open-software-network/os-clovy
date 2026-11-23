@@ -1,37 +1,56 @@
 # Clovy API — proxy all upstream AI traffic and fully integrate OS Accounts authorize/charge
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 > Read [`/CONTEXT.md`](../CONTEXT.md) first for the glossary. Terms in **bold**
 > below (Clovy, Clovy API, OS Accounts, upstream provider, dictation, note
 > transcription, note generation, credit price) are defined there.
 >
-> Read [`/docs/os-accounts-backend.md`](./os-accounts-backend.md) for the
-> historical sketch of this work — this PRD supersedes it.
+> **Status (2026-10-21):** historical PRD. The `desvincular-repo-ci` change
+> removed the OS Accounts token verifier and authorize/charge client, the OS
+> Platform issue sink, the attestation page, and the GHCR build, promotion and
+> deployment pipeline. Clovy API now runs only in local mode (one local bearer
+> token, no charges, `127.0.0.1` by default). The provider routing, pricing
+> table, envelope and crate layout below still describe the code; the OS
+> Accounts, CI and deployment parts are kept only as history and are marked
+> where they no longer apply.
 
 ## Problem Statement
 
-A user installing Clovy today can record meetings, get transcripts, and
-generate notes — but only if **they** supply their own OpenAI and Venice API
-keys in a local `.env`. The moment Clovy is distributed as a `.app` to anyone
-who isn't a developer:
+> **Historical context.** This section records the situation that motivated
+> Clovy API, before it existed. It is not the current state of the product.
 
-- The user has no way to acquire or configure provider keys.
-- Any keys we baked into the binary would be extractable — anyone running
-  `strings` on the `.app` could siphon our OpenAI / Venice budget and run
-  unlimited inference on our bill.
-- We have **OS Accounts credits** wired up for identity and balance display
-  (`os_accounts.rs`), but nothing actually charges the credits — the wallet
-  reads correctly and never decrements.
+A user installing Clovy before Clovy API could record meetings, get
+transcripts, and generate notes, but only if **they** supplied their own
+OpenAI and Venice API keys in a local `.env`. Distributing Clovy as a `.app` to
+anyone who isn't a developer had three problems:
 
-The result: Clovy cannot be shipped publicly as a paid product because there
-is no safe way to bill metered AI usage from a public client. It also cannot
-be used by anyone without the technical knowledge to register their own
-upstream provider accounts.
+- The user had no way to acquire or configure provider keys.
+- Any keys baked into the binary would be extractable: anyone running
+  `strings` on the `.app` could siphon the service budget and run unlimited
+  inference on Clovy's bill.
+- **OS Accounts credits** were wired up for identity and balance display
+  (`os_accounts.rs`), but nothing charged them: the wallet read correctly and
+  never decremented.
+
+The result: Clovy could not be shipped publicly as a paid product, because
+there was no safe way to bill metered AI usage from a public client, and it
+could not be used by anyone without the technical knowledge to register their
+own upstream provider accounts.
 
 ## Solution
 
 Build **Clovy API**, a confidential backend service that:
 
-1. Holds the OpenAI and Venice API keys (which Clovy no longer ships).
+1. Holds the upstream service keys (Groq for audio, OpenRouter for text, fal for
+   images and video, Tavily for web search and fetch), which Clovy never ships.
 2. Holds the OS Accounts App API key (`osk_…`) that authenticates Clovy to OS
    Accounts as a billing-capable app.
 3. Verifies every incoming request's OS Accounts access token locally
@@ -42,13 +61,27 @@ Build **Clovy API**, a confidential backend service that:
 5. Returns the work result (transcript, note, cleaned text, model list) to
    Clovy.
 
-After this lands, Clovy ships with **zero upstream provider keys**, every AI
-call is billed against the signed-in user's OS Accounts wallet at the
-configured **credit price** for the chosen **upstream model**, and the
-existing "Top up credits" affordance in the Account settings becomes the only
-way to fund usage. Users see "Insufficient credits → Top up" instead of a
-generic provider error when they run dry. Usage credit prices pass through
-upstream cost without an additional Clovy markup.
+After this lands, Clovy ships with **zero upstream provider keys**. Every
+Clovy-funded call that goes through Clovy API is billed against the signed-in
+user's OS Accounts wallet at the configured **credit price** for the chosen
+**upstream model**, and the existing "Top up credits" affordance in the Account
+settings funds that usage. Users see "Insufficient credits → Top up" instead of
+a generic provider error when they run dry.
+
+Usage outside the wallet stays available:
+
+- A user's own provider key, sent per route as `x-<provider>-api-key`, runs that
+  call on the user's provider account; Clovy API forwards it and skips wallet
+  metering. An explicit Auto request is the exception: Clovy picks the model, so
+  it drops the key and funds the call.
+- Agent CLIs and the user's own OpenAI-compatible endpoints run on the desktop
+  and never pass through Clovy API.
+
+Credit prices relate to upstream cost as follows: usage-priced text and audio
+models pass upstream cost through without a Clovy markup; image generation and
+editing are flat prices set at about 2x fal's list price; video applies a 2.0x
+markup to fal's per-request quote; web search and fetch are flat prices. The
+media prices are list-price estimates, not charges observed on an account.
 
 ## User Stories
 
@@ -101,9 +134,8 @@ upstream cost without an additional Clovy markup.
 14. As a **Clovy user using dictation**, I want the latency of dictation to
     stay tight (text appears within a fraction of a second of release), so
     that the new billing pipeline doesn't make the feature feel sluggish.
-15. As a **Clovy user**, I want to choose between OpenAI and Venice models
-    for transcription in Settings exactly as today, so that the model picker
-    UX is preserved.
+15. As a **Clovy user**, I want to choose between the Groq Whisper models
+    for transcription in Settings, so that I can trade speed for accuracy.
 16. As a **Clovy user**, I want models that Clovy hasn't priced to NOT
     appear in the picker, so that I never select an option that will fail at
     request time.
@@ -116,9 +148,11 @@ upstream cost without an additional Clovy markup.
 18. As a **Clovy developer**, I want to clone the repo and build both the
     Tauri client and Clovy API from the same `git clone`, so that
     end-to-end changes are one PR.
-19. As a **Clovy developer**, I want no upstream provider keys (`OPENAI_API_KEY`,
-    `VENICE_API_KEY`) anywhere in the Tauri-side `.env` or codebase, so that
-    a leaked Clovy build cannot drain our provider budgets.
+19. As a **Clovy developer**, I want no Clovy service keys for upstream
+    providers anywhere in the Tauri-side `.env` or codebase, so that a leaked
+    Clovy build cannot drain our provider budgets. A user's own provider key
+    stays in that user's local secret store and is sent only to the route
+    that uses it.
 
 ### Developer — Clovy API backend
 
@@ -148,18 +182,13 @@ upstream cost without an additional Clovy markup.
 26. As a **Clovy API maintainer**, I want PRs that touch only the Tauri
     side to NOT trigger Rust CI, so that a UI tweak doesn't run a 5-minute
     cargo build.
-27. As a **Clovy API maintainer**, I want pushes to `main` that touch
-    `clovy-api/**` to build and publish a `:<short-sha>` image to GHCR plus
-    update a `:staging` tag, so that staging always reflects what's on
-    `main`.
-28. As a **Clovy API maintainer**, I want a manual workflow to re-tag an
-    existing image to `:production`, so that promotion never rebuilds and
-    rollback is "promote a previous SHA".
-29. As an **on-call engineer**, I want Clovy API's `/livez` to return 200
-    when the process is alive and 5xx when it's not, so that Railway's
-    health probe can restart a wedged container.
+_Stories 27 to 29 (GHCR images, manual promotion to `:production`, a hosted
+health probe) described the removed build and deployment pipeline._
 
 ### OS Accounts perspective (for completeness)
+
+_Historical: Clovy API no longer calls OS Accounts; local mode authorizes every
+hold and never charges._
 
 30. As an **OS Accounts admin**, I want each metered call from Clovy to
     include an action slug that distinguishes dictation from note flows
@@ -187,7 +216,9 @@ upstream cost without an additional Clovy markup.
 - **Service prefix `clovy`.** All library crate names start with `clovy-`.
   Match the convention used by `accounts-*` (`os-accounts`) and
   `fellow-*` (`os-platform`).
-- **Follow `os-rust-backend` recipe** for everything not explicitly
+- **Follow the house backend recipe** (formerly vendored as the
+  `os-rust-backend` skill, removed with the organization skills) for
+  everything not explicitly
   overridden: edition 2024, pinned toolchain `1.95.0`, workspace deps,
   workspace lints (`-D warnings`, no `unwrap`/`expect`/`panic`/`dbg`,
   `unsafe_code = forbid`), `ApiResponse<T>` envelope on every endpoint,
@@ -197,22 +228,35 @@ upstream cost without an additional Clovy markup.
 ### Deep modules and their interfaces (no file paths)
 
 - **`Transcriber` (trait, `clovy-domain`)** — `transcribe(audio, model) ->
-  Result<Transcript, DomainError>`. Two impls in `clovy-providers`:
-  OpenAI and Venice. Interface unchanged across upstreams.
+  Result<Transcript, DomainError>`. One impl in `clovy-providers`: Groq
+  Whisper. Interface unchanged across upstreams. A request's `context` goes to
+  Whisper verbatim as its `prompt` (the **ASR hint**), never truncated or
+  rewritten server-side; a prompt Groq refuses (400/422) is reported as
+  `transcription_rejected`, without its body, the key or the audio. Groq
+  documents a 224-token prompt limit, so the desktop builds a bounded,
+  dictionary-only hint; other API consumers own their own bound.
 - **`Generator` (trait, `clovy-domain`)** — `generate(prompt_inputs, model)
-  -> Result<GeneratedNote, DomainError>`. One impl (Venice) for now.
-- **`Cleaner` (trait, `clovy-domain`)** — `cleanup(text, context, style,
-  model) -> Result<String, DomainError>`. One impl (Venice).
+  -> Result<GeneratedNote, DomainError>`. One impl (OpenRouter).
+- **`Cleaner` (trait, `clovy-domain`)** — `cleanup(kind, text, context,
+  style, model) -> Result<String, DomainError>`. One impl (OpenRouter). Two
+  kinds with their own instructions: dictation cleanup, and note-transcript
+  correction (`style = "note_transcript_cleanup"`), which receives the **full
+  correction context** (whole dictionary plus previous transcript), unlike the
+  bounded ASR hint.
 - **`OsAccountsClient` (trait, `clovy-domain`)** — `authorize(user, action,
   estimate, hold_ttl) -> Result<Authorization, _>` and `charge(token,
   credits, idempotency_key) -> Result<Receipt, _>`. One impl
   (`OsAccountsHttpClient` in `clovy-providers`) — HTTP, App API key
   bearer, envelope-aware, no retries beyond what the platform guarantees.
+  _Now: the only impl is `LocalDevOsAccountsClient`, which authorizes every
+  hold and never charges; `OsAccountsHttpClient` was removed._
 - **`TokenVerifier` (trait, `clovy-domain`)** — `verify(jwt) ->
   Result<UserId, AuthError>`. One impl (`JwksTokenVerifier` in
   `clovy-providers`) — caches JWKS in-process, refreshes on `kid` miss,
   ES256-only, strict `iss`/`aud`, `exp` with small leeway. Never trust
   the token's `alg` header; never fetch JWKS per request.
+  _Now: the only impl is `LocalDevTokenVerifier` (the local bearer token);
+  `JwksTokenVerifier` was removed._
 - **`PricingTable` (`clovy-services`)** — `price_credits(model_id, units)
   -> Result<Credits, NotPriced>`. Pure function over the config table.
   Single source of truth for credit cost. Loaded from `clovy-config`.
@@ -249,9 +293,28 @@ All routes prefixed with `/v1/`. All non-public responses wrapped in
 | `POST` | `/v1/transcribe` | `note_transcribe` | multipart audio + `{title, context?, model?}` | Server probes WAV duration → authorize → upstream → charge. |
 | `POST` | `/v1/generate` | `note_generate` | JSON `{title, transcript, manualNotes?, language?, existingGeneratedNote?, model?}` | Charge based on actual `prompt_tokens + completion_tokens` from upstream `usage`. |
 | `POST` | `/v1/dictate` | `dictate_transcribe` | multipart audio + `{model}` | Latency-sensitive; same shape as `/v1/transcribe` but separate action slug for OS Accounts analytics. |
-| `POST` | `/v1/dictate/cleanup` | `dictate_cleanup` | JSON `{text, dictionaryContext?, style, model}` | Mirrors today's `cleanup_dictation_text`. |
-| `GET` | `/v1/models?type=asr\|text` | *(unmetered)* | — | Union of OpenAI + Venice models filtered to those with a configured credit price. Settings UI's source of truth. |
-| `GET` | `/livez` | *(unmetered)* | — | Health for Railway. |
+| `POST` | `/v1/dictate/cleanup` | `dictate_cleanup` | JSON `{text, dictionaryContext?, style, model}` | Dictation cleanup; `style = "note_transcript_cleanup"` runs note-transcript correction over the full `dictionaryContext` instead. |
+| `GET` | `/v1/models?type=asr\|text\|image\|video` | *(unmetered)* | — | Configured Groq ASR and OpenRouter text rows; explicit image/video filters list priced fal generation endpoints with `serviceAvailable`. Omitting type keeps the original text/ASR list. No service credentials are exposed. |
+| `GET` | `/livez` | *(unmetered)* | — | Liveness probe. |
+
+**Provider keys.** A user's own key rides as `x-<provider>-api-key`
+(`x-groq-api-key`, `x-openrouter-api-key`, `x-fal-api-key`,
+`x-tavily-api-key`), and each route accepts only its own provider's header.
+Any other non-blank `x-<name>-api-key` is refused with
+`400 <name>_api_key_not_accepted` before funding or forwarding, so a key never
+pays for, or reaches, a provider it was not meant for.
+
+**Retired Venice key: a breaking header.** Released clients that stored a
+Venice key still send `x-venice-api-key`. It is refused
+(`venice_api_key_not_accepted`) rather than ignored, because ignoring it would
+silently move a user who chose their own key onto Clovy credits. Those
+installs fail every keyed route until they update. Request and response bodies,
+the historical client-contract fixtures and the error-code registry are
+unchanged, and retired model ids are still served by a fallback. This break is
+in tension with the v1 compatibility policy (ADR 0021): the cutover covers
+local development with the current client and the new credentials only. A
+publication and support decision for installs still holding a Venice key is
+required before any production deploy.
 
 ### Estimate strategy (server-side only)
 
@@ -268,7 +331,7 @@ All routes prefixed with `/v1/`. All non-public responses wrapped in
 
 ### Error mapping (envelope `error_code` → HTTP)
 
-Follow the standard `os-rust-backend` bands. Notable specifics:
+Follow the standard house error-code bands. Notable specifics:
 
 - OS Accounts `4301` (insufficient credits) → `402` with `error_code: 4301`.
 - JWKS verify failure / missing token → `401` with `error_code: 3001`.
@@ -298,11 +361,14 @@ Clients never compose the full key themselves.
 Clovy API (typed `AppConfig` in `clovy-config`, figment-merged from
 defaults + `config.toml` + env, no `std::env::var` calls outside):
 
-- `[server]` — `port` (Railway injects `PORT`), `request_timeout_secs`.
-- `[os_accounts]` — `api_url`, `app_api_key` (`osk_…`, env-only), `iss`,
-  `aud`, `jwks_refresh_secs`.
-- `[upstreams.openai]` — `api_key` (env-only), `base_url`.
-- `[upstreams.venice]` — `api_key` (env-only), `base_url`.
+- `[server]` — `host` (`127.0.0.1` by default), `port`, `request_timeout_secs`.
+- `[os_accounts]` — now only credit estimates and hold TTLs; the original
+  `api_url`, `app_api_key`, `iss`, `aud` and `jwks_refresh_secs` were removed
+  with OS Accounts verification and charging.
+- `[local_dev]` — the local bearer token and user id (local mode is the only
+  mode).
+- `[upstreams.groq]`, `[upstreams.openrouter]`, `[upstreams.fal]`,
+  `[upstreams.tavily]` — `api_key` (env-only, optional), `base_url`.
 - `[pricing]` — table keyed by `model_id`, each entry `{ unit: "seconds" |
   "tokens", credits_per_unit: u64 }`. Values pass through upstream cost
   without an additional Clovy markup. Loaded from
@@ -318,23 +384,13 @@ Clovy (Tauri client):
   `VENICE_API_BASE_URL`, `VENICE_DICTATION_CLEANUP_MODEL` — **removed**
   from `.env.example` and from `providers/mod.rs` accessors.
 
-### CI (per `os-rust-backend-ci`, monorepo-adapted)
+### CI
 
-Three workflows under `.github/workflows/`:
-
-- `clovy-api.yml` — PR + push to `main`, gated on `paths:
-  clovy-api/**`. fmt, clippy, tests, OpenAPI drift (if a doc is derived).
-  Never publishes.
-- `build-clovy-api.yml` — push to `main` touching `clovy-api/**`, or
-  manual dispatch. Builds and pushes `ghcr.io/open-software-network/clovy-api:<short-sha>`
-  + updates `:staging`. Stops at GHCR.
-- `promote-clovy-api.yml` — manual dispatch. Verifies an existing image,
-  re-tags `:<short-sha>` to `:production`. Never rebuilds.
-
-The two composite actions (`setup-rust`, `changed-paths`) from the skill
-get added under `.github/actions/`, with `setup-rust` pointed at
-`clovy-api/rust-toolchain.toml` and `changed-paths` configured for the
-`clovy-api/` subdirectory.
+One workflow under `.github/workflows/`: `clovy-api.yml` — PR + push to
+`main`, gated on `paths: clovy-api/**`; fmt, clippy and tests on GitHub-hosted
+runners. It never publishes. The original GHCR build and promotion workflows
+(`build-clovy-api.yml`, `promote-clovy-api.yml`) were removed by the
+`desvincular-repo-ci` change.
 
 ### Tauri-side refactor
 
@@ -358,15 +414,8 @@ get added under `.github/actions/`, with `setup-rust` pointed at
 
 ### Out-of-repo prerequisites
 
-These block all of the above:
-
-1. Register Clovy in the OS Accounts admin console for staging and
-   production. Yields `app_id`, App API key `osk_…`, OAuth client ID
-   `ocl_…` per env. Allowlist `http://127.0.0.1:8765/callback` (already
-   matches `os_accounts.rs`).
-2. Create Railway projects for Clovy API staging + production.
-3. Confirm GHCR `packages: write` on the GitHub Actions token for
-   `ghcr.io/open-software-network/clovy-api`.
+_Historical: OS Accounts registration, Railway projects and GHCR permissions
+were prerequisites of the hosted deployment that was removed._
 
 ## Testing Decisions
 
@@ -415,8 +464,7 @@ be added incrementally as bugs surface.
 - The `os-accounts` and `os-platform` (`fellow`) repos use the same
   test stack: `rstest` for parametrization, `wiremock` for HTTP mocks,
   `pretty_assertions` for diff output, integration tests in
-  `crates/<x>/tests/` per the `os-rust-backend` recipe (see
-  `testing.md` in that skill). Mirror that style.
+  `crates/<x>/tests/` per the house backend recipe. Mirror that style.
 
 ## Out of Scope
 
@@ -430,7 +478,7 @@ be added incrementally as bugs surface.
 - **Splitting `clovy-api/` into its own repo.** Monorepo is the decision
   for v1; can be hoisted out later if the repos want independent
   versioning.
-- **ADRs for the architectural deviations from the `os-rust-backend`
+- **ADRs for the architectural deviations from the house backend
   recipe** (no persistence crate, monorepo, baked URL defaults). User
   explicitly declined to write ADRs.
 - **Async-charge optimisation for dictation.** The latency cost of two
@@ -453,21 +501,19 @@ be added incrementally as bugs surface.
 - **Glossary alignment.** Throughout the implementation, prefer the
   vocabulary from `CONTEXT.md`: **Clovy** (the app), **Clovy API**
   (the backend), **OS Accounts** (the platform), **upstream provider**
-  (OpenAI / Venice), **dictation** vs **note transcription** vs **note
+  (Groq / OpenRouter / fal / Tavily), **dictation** vs **note transcription** vs **note
   generation** (never "transcribe" or "generate" alone), **credit
   price** (per upstream model). Avoid: "proxy" (overloaded with
   HTTP-CONNECT), "transcribe" without qualifier, "credits" referring to
   upstream cost.
 - **The seven-crate vs six-crate decision is a real deviation from house
-  style** (`os-rust-backend` mandates seven). It is intentional and
+  style** (the house recipe mandates seven). It is intentional and
   documented here; a maintainer who needs persistence later should add
   the missing crate at that time rather than wedging persistence into
   `clovy-services` or `clovy-providers`.
-- **Hosting target is Railway**, alongside OS Accounts but in a separate
-  Railway project for blast-radius isolation. Image is built and pushed
-  by `build-clovy-api.yml`; deployment (how Railway picks up the new
-  image) is out of scope of `os-rust-backend-ci` and owned by whoever
-  configures the Railway side.
+- **Hosting target was Railway**, later a TEE deployment; both were removed by
+  the `desvincular-repo-ci` change. Clovy API now runs locally next to the
+  desktop app.
 - **The Clovy binary will bake `CLOVY_API_URL` as a production
   default**, env-overridable for dev/staging. This is a small but real
   deviation from the current `os_accounts.rs` pattern (which requires
@@ -475,9 +521,6 @@ be added incrementally as bugs surface.
   made to `OS_ACCOUNTS_URL` / `OS_ACCOUNTS_API_URL` for the same reason
   — the moment Clovy is distributed to non-developers, env-only
   configuration breaks.
-- **`docs/os-accounts-backend.md` should be updated or removed** once
-  this work lands; it predates this PRD and sketches what is now being
-  built. Pointing it at `clovy-api/` and this PRD is enough.
 - **The `model_picker` / Settings UI does not need server changes
   beyond the new `/v1/models` endpoint.** The existing TypeScript shape
   in `AppSettings.tsx` already iterates a flat list of model DTOs.

@@ -1,8 +1,8 @@
-import type { VeniceModelDto } from "./tauri";
+import type { ProviderModelDto } from "./tauri";
 
 /** Matches catalog metadata as ordered tokens so punctuation and intervening
  * version terms do not make natural model queries fail. */
-export function modelMatchesQuery(model: VeniceModelDto, query: string) {
+export function modelMatchesQuery(model: ProviderModelDto, query: string) {
   const queryTokens = searchTokens(query);
   if (!queryTokens.length) return false;
 

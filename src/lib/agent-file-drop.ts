@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { discardStagedAgentAttachments, stageAgentAttachmentBytes } from "./tauri";
 
 export const MAX_AGENT_COMPOSER_ATTACHMENTS = 8;
@@ -6,11 +7,11 @@ export const MAX_AGENT_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 function readDroppedFileBytes(file: File): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Could not read the dropped file."));
-    reader.onabort = () => reject(new Error("Could not read the dropped file."));
+    reader.onerror = () => reject(reader.error ?? new Error(t("lib.errors.fileDropUnreadable")));
+    reader.onabort = () => reject(new Error(t("lib.errors.fileDropUnreadable")));
     reader.onload = () => {
       if (!(reader.result instanceof ArrayBuffer)) {
-        reject(new Error("Could not read the dropped file."));
+        reject(new Error(t("lib.errors.fileDropUnreadable")));
         return;
       }
       resolve(new Uint8Array(reader.result));
@@ -25,21 +26,21 @@ export async function stageDroppedAgentFiles(
   existingAttachmentCount: number,
 ): Promise<string[]> {
   if (!files.length) {
-    throw new Error("Drop files from Finder to attach them to Clovy.");
+    throw new Error(t("lib.errors.fileDropEmpty"));
   }
   if (existingAttachmentCount + files.length > MAX_AGENT_COMPOSER_ATTACHMENTS) {
-    throw new Error(`You can attach up to ${MAX_AGENT_COMPOSER_ATTACHMENTS} files at a time.`);
+    throw new Error(t("lib.errors.fileDropTooMany", { count: MAX_AGENT_COMPOSER_ATTACHMENTS }));
   }
 
   const stagedPaths: string[] = [];
   try {
     for (const file of files) {
       if (file.size > MAX_AGENT_ATTACHMENT_BYTES) {
-        throw new Error("Dropped files must be 50 MB or smaller.");
+        throw new Error(t("lib.errors.fileDropTooLarge"));
       }
       const bytes = await readDroppedFileBytes(file).catch(() => {
-        const name = file.name || "this item";
-        throw new Error(`Could not read "${name}". Folders can't be attached.`);
+        const name = file.name || t("lib.errors.fileDropThisItem");
+        throw new Error(t("lib.errors.fileDropFolder", { name }));
       });
       stagedPaths.push(await stageAgentAttachmentBytes(file.name, bytes));
     }

@@ -160,3 +160,98 @@ a still-focused composer re-arms after terminal outcomes. Toggle start versus
 stop decisions follow helper-confirmed listening state, so only actual starts
 can consume a registration. Direct delivery remains insertion-only and never
 auto-submits the composer.
+
+## Destination indicator addendum (2026-10-12)
+
+The macOS dictation HUD now presents the helper's current candidate while
+listening and the pinned app during processing, paste and any visible error
+for that take. This does not pin at start or transfer destination authority
+to the renderer: the exact `NSRunningApplication` is still pinned before
+recorder teardown. A closed pinned app keeps its displayed identity, but
+paste still fails to clipboard recovery instead of selecting a replacement.
+
+The additive `payload.target` contains `app`, `bundleIdentifier` and
+`processIdentifier`, or explicit `null` when unavailable. `listening_started`
+carries the initial candidate; take-correlated `focus_target` updates it only
+while capturing. `finalizing_transcript` publishes the stop-time pin, and
+`paste_target` carries the same identity. Metadata never commands activation.
+
+The HUD resolves icons through the existing local `activity_app_icon` command
+and its bundle-id cache. Bundle identity is sufficient for icon presentation;
+it never replaces the helper's exact process instance for paste. Missing
+metadata or icons use the central-icons window fallback, with the known name
+when available or an unidentified-destination description otherwise. Icon
+resolution cannot delay capture, cancel or paste. The indicator remains
+separate from the waveform/spinner and ignores late resolutions from older
+targets or takes. Older helpers and Windows retain the fallback path.
+
+## Bound agent dictation addendum (2026-11-01)
+
+The D3 management contract for `melhorias-agente-audio-automacao` adds a
+typed, explicitly requested dictation lifecycle for a bound Clovy chat turn.
+Its destination is the calling conversation's composer on the main window,
+fixed by the host before approval with take, composer-request, conversation,
+run and data-partition identities. Changing the visible conversation or data
+partition cannot redirect delivery. This extends the exact-request exception
+above to agent-owned takes on both desktop platforms; ordinary shortcut paste
+keeps its pinned native destination.
+
+Start and status reflect helper-confirmed state. Stop finalizes the same take,
+persists history in its bound partition and sends the result only to that
+composer. The main window must claim delivery through the native host, which
+revalidates the live run, take and destination, then acknowledge insertion.
+The draft store deduplicates by take/request and inserts without submission.
+No model-provided target app, helper command passthrough or wake action can
+retarget the take or start another conversation.
+
+Cancel discards the take before delivery is claimed and refuses late results.
+Once the main window has claimed insertion, cancellation reports
+`dictation_delivery_in_progress` instead of falsely promising a discard; the
+matching insertion completes its acknowledgement. Failure of this explicit
+composer route is reported with its correlation and delivery state, without
+an OS-paste fallback that could duplicate or misdirect the transcript.
+
+## macOS start-time destination addendum (2026-11-06)
+
+For macOS automatic dictation paste, this addendum supersedes the stop-time
+pin above. Real QA showed that another window can become frontmost while
+the shortcut is held: both the indicator and stop-time pin then followed it.
+Capturing at stop protects transcription latency but leaves the capture
+itself exposed to destination drift.
+
+The helper now captures the exact app when it accepts a take's start, where
+`startPending` becomes true and the take id is assigned, before microphone
+permission or recorder setup. With Accessibility it also captures the focused
+AX window and that app's focused field, accepting a field only from that
+app's PID and, when captured, that window. AX messages use at most 20 ms each
+within a shared 50 ms capture budget. Missing permission or unreadable AX
+metadata keeps the start-time app-only fallback; it never requests another
+permission. Native latency still requires measurement on the QA app.
+
+Field lookup is scoped to the captured app rather than the system-wide AX
+object. Setting a messaging timeout on the system-wide object changes the
+helper's global default and could affect the independent Control+V path.
+App-scoped lookup keeps the timeout local; PID and window checks still refuse
+an element that belongs to another destination.
+
+The take-owned destination is passed explicitly through the start reset.
+Live candidate changes remain available for the next take but cannot change
+this take's metadata, indicator or cleanup app. Stop does not pin again.
+Cancel, rejection, no-speech discard and delivery clear the destination.
+An asynchronous paste holds its own snapshot after the recorder state resets.
+
+Before automatic Command+V, the helper activates the captured app, raises
+the original window and makes it main, then tries to focus the original
+field. A captured window must be restored and read back as focused; failure
+or expiry leaves the text on the clipboard with `paste_target_unavailable`.
+Field focus is best effort as specified in the approved design: a field
+that rejects focus does not authorize another window, and its failure is
+recorded as `dictation_focus_restore`. The existing activation/poll/settle
+constants and 700 ms clipboard restoration remain; window work uses the
+same activation deadline rather than extending it.
+
+The final app/window/deadline check follows event construction and potentially
+blocking AX queries. Check and submission are still not atomic with the
+WindowServer and do not confirm consumption by a field. Control+V retains
+its independent current-focus Unicode path. Windows and bound composer
+delivery keep their existing contracts.

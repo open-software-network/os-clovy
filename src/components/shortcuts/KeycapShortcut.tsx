@@ -1,3 +1,4 @@
+import { useT } from "../../i18n";
 import { isWindowsPlatform } from "../../lib/platform";
 
 /**
@@ -31,6 +32,17 @@ const WINDOWS_KEY_GLYPHS: Record<string, { glyph: string; name: string }> = {
   shift: { glyph: "Shift", name: "Shift" },
 };
 
+/** Lone keys a Windows shortcut can be (labels as the helper writes them),
+ * named in the interface language. */
+const WINDOWS_LONE_KEY_NAMES = {
+  "right ctrl": "shell.shortcut.rightCtrl",
+  "right alt": "shell.shortcut.rightAlt",
+  "right shift": "shell.shortcut.rightShift",
+  "left ctrl": "shell.shortcut.leftCtrl",
+  "left alt": "shell.shortcut.leftAlt",
+  "left shift": "shell.shortcut.leftShift",
+} as const;
+
 export function KeycapShortcut({
   label,
   capturing = false,
@@ -40,18 +52,30 @@ export function KeycapShortcut({
   capturing?: boolean;
   platform?: "macos" | "windows" | "unsupported";
 }) {
+  const t = useT();
   if (capturing) {
-    return <span className="keycap-frame keycap-frame-capturing">Press shortcut...</span>;
+    return (
+      <span className="keycap-frame keycap-frame-capturing">
+        {t("shell.shortcut.pressShortcut")}
+      </span>
+    );
   }
   const windows = platform === "windows" || (platform === undefined && isWindowsPlatform());
   const keyGlyphs = windows ? WINDOWS_KEY_GLYPHS : MAC_KEY_GLYPHS;
   const keys = label.split("+").filter(Boolean);
   return (
-    <span className="keycap-frame" aria-label={`Shortcut ${label}`}>
+    <span className="keycap-frame" aria-label={t("shell.shortcut.ariaLabel", { label })}>
       {keys.map((key, idx) => {
-        const mapped = keyGlyphs[key.toLowerCase()];
+        const lone = windows
+          ? WINDOWS_LONE_KEY_NAMES[key.toLowerCase() as keyof typeof WINDOWS_LONE_KEY_NAMES]
+          : undefined;
+        const mapped = lone ? { glyph: t(lone), name: t(lone) } : keyGlyphs[key.toLowerCase()];
         return (
-          <kbd key={`${key}-${idx}`} className="keycap" title={mapped?.name}>
+          <kbd
+            key={`${key}-${idx}`}
+            className="keycap"
+            title={mapped?.name === "Function" ? t("shell.shortcut.keyFunction") : mapped?.name}
+          >
             {mapped ? mapped.glyph : key}
           </kbd>
         );

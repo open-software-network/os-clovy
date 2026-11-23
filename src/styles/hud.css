@@ -108,9 +108,39 @@ body {
   transition: opacity 100ms var(--ease-out);
 }
 
-.hud.is-morphing > * {
+.hud.is-morphing > :not(.hud-target) {
   opacity: 0;
   transition-duration: 60ms;
+}
+
+/* Destination stays independent of the waveform, spinner and morph fade. */
+.hud-target {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-hud);
+  padding-right: var(--sp-2);
+  margin-right: var(--sp-1);
+  border-right: var(--border-width) solid var(--hud-border);
+  color: var(--muted-foreground);
+}
+
+.hud-target img,
+.hud-target-fallback {
+  width: var(--sp-6);
+  height: var(--sp-6);
+  object-fit: contain;
+}
+
+.hud-target-fallback {
+  display: grid;
+  place-items: center;
+}
+
+.hud-target[hidden],
+.hud-target [hidden] {
+  display: none;
 }
 
 /* Audio visualisation -------------------------------------------------- */
@@ -221,9 +251,7 @@ body {
 
 /* Processing spinner ---------------------------------------------------- */
 
-/* After stop the pill collapses to just Clovy's dot mark ticking over while
- * dictation transcription runs; the box matches the compact HUD controls so
- * the collapsed pill is a tidy control-lg square. */
+/* After stop the dot mark runs beside the persistent destination icon. */
 .hud-spinner {
   display: none;
   place-items: center;
@@ -431,6 +459,60 @@ body {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hud-meeting-video {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.hud-meeting-video[hidden] {
+  display: none;
+}
+
+.hud-meeting-video-toggle {
+  width: var(--control-sm);
+  height: calc(var(--control-xs) * 0.65);
+  padding: var(--sp-px);
+  border-radius: var(--r-pill);
+  background: var(--muted-foreground);
+}
+
+.hud-meeting-video-toggle::before {
+  display: block;
+  content: "";
+  width: 50%;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--background);
+}
+
+.hud-meeting-video[aria-checked="true"] .hud-meeting-video-toggle {
+  background: var(--attention);
+}
+
+.hud-meeting-video[aria-checked="true"] .hud-meeting-video-toggle::before {
+  margin-left: 50%;
+}
+
+.hud-meeting-video:focus-visible {
+  outline: var(--focus-outline-width) solid var(--ring);
+  outline-offset: var(--sp-1);
+}
+
+.hud[data-state="meeting"][data-meeting-video="true"],
+.hud[data-state="exiting"][data-exit-state="meeting"][data-meeting-video="true"] {
+  height: auto;
+  padding-block: var(--sp-3);
 }
 
 /* Primary action: a clear lime Clovy action with an ink icon and label so it
@@ -673,9 +755,8 @@ body {
   padding: 4px var(--sp-2);
 }
 
-/* Processing: everything collapses down to the Clovy dot spinner. The pill
- * becomes a 32px square, centered where the wide pill's middle was (the
- * native resize is center-anchored). */
+/* Processing keeps the destination beside the Clovy dot spinner.
+ * Native resize remains center-anchored and measures both slots. */
 .hud[data-state="transcribing"],
 .hud[data-state="pasting"],
 .hud[data-state="exiting"][data-exit-state="transcribing"],

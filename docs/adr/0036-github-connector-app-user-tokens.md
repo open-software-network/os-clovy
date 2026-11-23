@@ -124,3 +124,11 @@ whether installation-token minting needs a TEE signer.
   per the truncation policy above.
 - A future away-mode or installation-token feature (e.g. acting in repos the
   user cannot) would reopen the private-key question and needs a new ADR.
+
+## Addendum 2026-10-18: GitHub CLI login as a second source
+
+[ADR-0066](0066-github-connector-can-ride-the-github-cli-login.md) adds
+"GitHub (via gh)" accounts whose token is read from the signed-in GitHub CLI
+on every call and never stored. Points 1, 2 and 6 above apply only to
+accounts connected through the GitHub App; the read/write markers (point 3)
+and approval-only writes (point 4) apply to both.

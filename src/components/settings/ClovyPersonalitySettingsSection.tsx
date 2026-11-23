@@ -9,6 +9,7 @@ import {
   type OnboardingMood,
 } from "../../lib/onboarding";
 import { clovyPersona, setClovyPersona } from "../../lib/tauri";
+import { t as translate, useT } from "../../i18n";
 import {
   OnboardingCharacter,
   ONBOARDING_MOOD_PRESENTATION,
@@ -20,6 +21,7 @@ type SavedSelection = {
 };
 
 export function ClovyPersonalitySettingsSection() {
+  const t = useT();
   const [area, setArea] = useState<OnboardingArea>("work");
   const [mood, setMood] = useState<OnboardingMood>("clearheaded");
   const [loaded, setLoaded] = useState(false);
@@ -57,7 +59,8 @@ export function ClovyPersonalitySettingsSection() {
         setLoaded(true);
       })
       .catch((cause) => {
-        if (!cancelled) setError(messageFromError(cause, "Unable to load Clovy's personality."));
+        if (!cancelled)
+          setError(messageFromError(cause, translate("settings.personality.loadError")));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -70,7 +73,7 @@ export function ClovyPersonalitySettingsSection() {
 
   function updateMood(nextMood: OnboardingMood) {
     setMood(nextMood);
-    setStatus("Saving...");
+    setStatus(t("common.saving"));
     setError(undefined);
     queuedSelection.current = { area, mood: nextMood };
     void flushQueuedSelection();
@@ -98,7 +101,7 @@ export function ClovyPersonalitySettingsSection() {
         if (mounted.current && queuedSelection.current === null) {
           setArea(persona.area);
           setMood(confirmedMood);
-          setStatus("Saved");
+          setStatus(translate("settings.personality.saved"));
         }
       } catch (cause) {
         if (mounted.current && queuedSelection.current === null) {
@@ -107,7 +110,7 @@ export function ClovyPersonalitySettingsSection() {
             setArea(persisted.area);
             setMood(persisted.mood);
           }
-          setError(messageFromError(cause, "Unable to save Clovy's personality."));
+          setError(messageFromError(cause, translate("settings.personality.saveError")));
           setStatus(undefined);
         }
       }
@@ -120,16 +123,14 @@ export function ClovyPersonalitySettingsSection() {
   return (
     <>
       <h2 id="agent-personality-heading" className="settings-group-heading">
-        Personality
+        {t("settings.personality.title")}
       </h2>
-      <p className="settings-group-description">
-        Choose the voice Clovy uses in Home and new agent sessions.
-      </p>
+      <p className="settings-group-description">{t("settings.personality.description")}</p>
       {loading ? (
         <div className="settings-card settings-personality-loading" aria-busy="true">
           <span className="settings-personality-skeleton settings-personality-skeleton-short" />
           <span className="settings-personality-skeleton" />
-          <span className="visually-hidden">Loading Clovy's personality</span>
+          <span className="visually-hidden">{t("settings.personality.loading")}</span>
         </div>
       ) : !loaded ? (
         <div className="settings-card settings-personality-load-error">
@@ -141,13 +142,13 @@ export function ClovyPersonalitySettingsSection() {
             className="primary-action"
             onClick={() => setLoadAttempt((attempt) => attempt + 1)}
           >
-            Try again
+            {t("common.tryAgain")}
           </button>
         </div>
       ) : (
         <div className="settings-card settings-personality-card">
           <fieldset className="settings-personality-grid">
-            <legend className="visually-hidden">Choose Clovy's personality</legend>
+            <legend className="visually-hidden">{t("settings.personality.legend")}</legend>
             {ONBOARDING_MOODS.map((optionMood) => {
               const selected = optionMood === mood;
               const presentation = ONBOARDING_MOOD_PRESENTATION[optionMood];
@@ -191,7 +192,7 @@ export function ClovyPersonalitySettingsSection() {
 
           <div className="settings-personality-actions">
             <div className="settings-personality-feedback">
-              <p>Applies to future Home replies and the next agent run.</p>
+              <p>{t("settings.personality.applies")}</p>
               {error ? (
                 <p className="settings-row-error" role="alert">
                   {error}
@@ -200,7 +201,7 @@ export function ClovyPersonalitySettingsSection() {
             </div>
             {status || saving ? (
               <p className="settings-personality-status" role="status" aria-live="polite">
-                {saving ? "Saving..." : status}
+                {saving ? t("common.saving") : status}
               </p>
             ) : null}
           </div>

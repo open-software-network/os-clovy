@@ -1,18 +1,26 @@
 import type { AgentSessionDto } from "./agent-runtime-contract";
+import type { SessionPartitionMap } from "./session-partition-filter";
 
 export const AGENT_NEW_SESSION_EVENT = "clovy:agent:new-session";
 export const AGENT_DELETE_SESSION_EVENT = "clovy:agent:delete-session";
 export const AGENT_SESSIONS_CHANGED_EVENT = "clovy:agent:sessions-changed";
+/** App → sidebar: startup or an accepted authoritative session snapshot. */
+export const AGENT_SESSIONS_HYDRATED_EVENT = "clovy:agent:sessions-hydrated";
 export const AGENT_NEW_SESSION_PENDING_KEY = "clovy:agent:new-session-pending";
 export const AGENT_SESSION_RENAMED_EVENT = "clovy:agent:session-renamed";
 export const AGENT_SESSION_STATUS_EVENT = "clovy:agent:session-status";
 export const AGENT_RUN_SETTLED_EVENT = "clovy:agent:run-settled";
 export const AGENT_OPEN_EVENT = "clovy:agent:open";
-// Dev-only: toggles the agent response gallery (window.__agentGallery) or its
-// error-focused variant (window.__agentErrors).
-export const AGENT_GALLERY_EVENT = "clovy:agent:gallery";
+let sessionSnapshotEpoch = 0;
 
-export type AgentGalleryDetail = { show: boolean; errors?: boolean };
+/** Native mutations supersede UI list reads already in flight. */
+export function invalidateAgentSessionSnapshots() {
+  sessionSnapshotEpoch += 1;
+}
+
+export function readAgentSessionSnapshotEpoch() {
+  return sessionSnapshotEpoch;
+}
 
 /** Stored session id (not the runtime session id). */
 export type AgentSessionRenamedDetail = {
@@ -44,6 +52,13 @@ export type AgentRunSettledDetail = {
   title: string;
   summary: string;
   activeCount: number;
+};
+
+export type AgentSessionsHydratedDetail = {
+  sessions: AgentSessionDto[];
+  partitions: SessionPartitionMap;
+  /** Replace metadata without changing selection, drafts or run status sets. */
+  replaceExisting?: boolean;
 };
 
 export type AgentSessionsChangedDetail = {

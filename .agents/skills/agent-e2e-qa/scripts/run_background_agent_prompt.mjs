@@ -402,28 +402,37 @@ function browserInitScript() {
       if (cmd === "provider_model_settings") {
         return {
           settings: {
-            transcriptionProvider: "venice",
-            transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
-            generationModel: "zai-org-glm-5-2",
+            transcriptionProvider: "groq",
+            transcriptionModel: "whisper-large-v3-turbo",
+            generationModel: "z-ai/glm-5.2",
           },
         };
       }
-      if (cmd === "list_venice_models") {
+      if (cmd === "list_provider_models") {
+        const mode = args?.request?.mode || "generation";
+        const modelType = { generation: "text", transcription: "asr", image: "image", video: "video" }[mode];
+        // This browser harness simulates a configured service. Never return
+        // text rows for media now that the production command fetches them.
+        const ids = {
+          generation: ["z-ai/glm-5.2"],
+          transcription: ["whisper-large-v3-turbo"],
+          image: ["fal-ai/flux/dev", "fal-ai/flux/schnell", "fal-ai/qwen-image"],
+          video: ["fal-ai/wan/v2.2-a14b/text-to-video", "alibaba/wan-3.0/text-to-video"],
+        }[mode] || [];
         return {
-          mode: args?.request?.mode || "generation",
-          modelType: "text",
-          selectedModel: "zai-org-glm-5-2",
-          models: [
-            {
-              provider: "venice",
-              id: "zai-org-glm-5-2",
-              name: "GLM 5.2",
-              modelType: "text",
-              privacy: "private",
-              traits: [],
-              capabilities: [],
-            },
-          ],
+          mode,
+          modelType,
+          selectedModel: ids[0] || "",
+          models: ids.map((id) => ({
+            provider: mode === "generation" ? "openrouter" : mode === "transcription" ? "groq" : "fal",
+            id,
+            name: id === "z-ai/glm-5.2" ? "GLM 5.2" : id,
+            modelType,
+            serviceAvailable: true,
+            privacy: null,
+            traits: [],
+            capabilities: [],
+          })),
         };
       }
       if (cmd === "hermes_bridge_status" || cmd === "start_hermes_bridge") {

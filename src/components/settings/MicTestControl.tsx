@@ -1,11 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { type TFunction, useT } from "../../i18n";
 
 export type MicTestState = "idle" | "recording" | "ready" | "error";
 
 type MicTestControlProps = {
   state: MicTestState;
   level: number;
-  elapsedMs: number;
+  /** When the recording started; the elapsed clock ticks here, not in its parent. */
+  startedAt?: number;
   sampleSrc?: string;
   error?: string;
   playing: boolean;
@@ -16,10 +18,34 @@ type MicTestControlProps = {
   onPlayingChange: (playing: boolean) => void;
 };
 
+/** The recording clock, re-rendered on its own 10 times a second. */
+function MicTestTime({
+  startedAt,
+  durationSeconds,
+}: {
+  startedAt?: number;
+  durationSeconds: number;
+}) {
+  const [elapsedMs, setElapsedMs] = useState(0);
+  useEffect(() => {
+    setElapsedMs(0);
+    if (!startedAt) return;
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - startedAt);
+    }, 100);
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+  return (
+    <span className="settings-mic-test-time">
+      {formatMicTestTime(elapsedMs, durationSeconds)} / {formatMicTestDuration(durationSeconds)}
+    </span>
+  );
+}
+
 export function MicTestControl({
   state,
   level,
-  elapsedMs,
+  startedAt,
   sampleSrc,
   error,
   playing,
@@ -29,11 +55,12 @@ export function MicTestControl({
   onPlaybackError,
   onPlayingChange,
 }: MicTestControlProps) {
+  const t = useT();
   return (
     <div className="settings-row settings-row-mic-test">
       <div className="settings-row-info">
-        <h3 className="settings-row-title">Mic test</h3>
-        <p className="settings-row-description">{micTestDescription(state)}</p>
+        <h3 className="settings-row-title">{t("settings.micTest.title")}</h3>
+        <p className="settings-row-description">{micTestDescription(state, t)}</p>
         {error ? <p className="settings-row-error">{error}</p> : null}
       </div>
       <div className="settings-row-control settings-mic-test-control">
@@ -43,7 +70,7 @@ export function MicTestControl({
               <div
                 className="settings-mic-test-meter-fill"
                 role="progressbar"
-                aria-label="Microphone test level"
+                aria-label={t("settings.micTest.levelAria")}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={Math.round(level * 100)}
@@ -52,10 +79,7 @@ export function MicTestControl({
                 }}
               />
             </div>
-            <span className="settings-mic-test-time">
-              {formatMicTestTime(elapsedMs, durationSeconds)} /{" "}
-              {formatMicTestDuration(durationSeconds)}
-            </span>
+            <MicTestTime startedAt={startedAt} durationSeconds={durationSeconds} />
           </>
         ) : null}
         {sampleSrc && state === "ready" ? (
@@ -74,12 +98,12 @@ export function MicTestControl({
             disabled={playing}
             onClick={onStartOver}
           >
-            Start over
+            {t("settings.micTest.startOver")}
           </button>
         ) : null}
         {state !== "recording" && state !== "ready" ? (
           <button type="button" className="btn btn-secondary" onClick={onStart}>
-            Start test
+            {t("settings.micTest.start")}
           </button>
         ) : null}
       </div>
@@ -87,14 +111,14 @@ export function MicTestControl({
   );
 }
 
-function micTestDescription(state: MicTestState) {
+function micTestDescription(state: MicTestState, t: TFunction) {
   if (state === "recording") {
-    return "Recording 5-second sample.";
+    return t("settings.micTest.recording");
   }
   if (state === "ready") {
-    return "Sample ready. Check volume.";
+    return t("settings.micTest.ready");
   }
-  return "Check your microphone.";
+  return t("settings.micTest.idle");
 }
 
 function formatMicTestTime(milliseconds: number, durationSeconds: number) {
@@ -119,6 +143,7 @@ function MicTestPlayer({
   onPlaybackError: () => void;
   onPlayingChange: (playing: boolean) => void;
 }) {
+  const t = useT();
   const audioRef = useRef<HTMLAudioElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(durationSeconds);
@@ -177,17 +202,17 @@ function MicTestPlayer({
           max={Math.max(duration, durationSeconds)}
           step={0.1}
           value={Math.min(currentTime, duration)}
-          aria-label="Microphone test playback progress"
+          aria-label={t("settings.micTest.playbackAria")}
           onChange={(event) => seek(event.currentTarget.value)}
         />
       ) : (
         <button
           type="button"
           className="btn btn-secondary"
-          aria-label="Play microphone test sample"
+          aria-label={t("settings.micTest.playAria")}
           onClick={() => void playSample()}
         >
-          Play sample
+          {t("settings.micTest.play")}
         </button>
       )}
     </>

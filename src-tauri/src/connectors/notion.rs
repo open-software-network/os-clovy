@@ -6,7 +6,7 @@
 //! selected-resource scoping is not verified in this preview. See ADR 0033.
 
 use crate::{
-    connectors::{policy::JUNE_NOTION_ACTIONS_SERVER, ConnectorAccountStatus, ConnectorProvider},
+    connectors::{ConnectorAccountStatus, ConnectorProvider},
     domain::types::AppError,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -139,13 +139,14 @@ fn http_client() -> Result<&'static reqwest::Client, AppError> {
             // ambient process proxy variables that could redirect credentials.
             // This means proxy-required networks are intentionally unsupported
             // until Clovy has an explicit trusted-proxy connector setting.
-            reqwest::Client::builder()
-                .no_proxy()
+            crate::http_client::base_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Some(Duration::from_secs(30)))
-                .user_agent("clovy/0.1 notion-hosted-mcp-preview")
+                .user_agent(concat!(
+                    "clovy/",
+                    env!("CARGO_PKG_VERSION"),
+                    " notion-hosted-mcp-preview"
+                ))
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -223,12 +224,6 @@ pub struct NotionMcpTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotionMcpToolList {
-    pub tools: Vec<NotionMcpTool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,7 +518,7 @@ pub async fn connect(
         &resource.resource,
     );
 
-    crate::os_accounts::open_in_browser(&auth_url)?;
+    crate::system_browser::open_in_browser(&auth_url)?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     if let Ok(mut slot) = flow.cancel.lock() {
@@ -619,7 +614,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             "Clovy could not verify which Notion tools are available for this workspace. Please try again.",
         )
     };
-    let result = result.as_object().ok_or_else(&malformed)?;
+    let result = result.as_object().ok_or_else(malformed)?;
     match result.get("isError") {
         None | Some(serde_json::Value::Bool(false)) => {}
         _ => return Err(malformed()),
@@ -627,7 +622,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
     let content = result
         .get("content")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(&malformed)?;
+        .ok_or_else(malformed)?;
     let mut access_map = None;
     for block in content {
         let Some(text) = block
@@ -652,7 +647,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             return Err(malformed());
         }
     }
-    let access_map = access_map.ok_or_else(&malformed)?;
+    let access_map = access_map.ok_or_else(malformed)?;
     let mut unavailable = false;
     for (_, access_key) in NOTION_REQUIRED_TOOLS {
         let status = access_map
@@ -660,7 +655,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             .and_then(serde_json::Value::as_object)
             .and_then(|entry| entry.get("status"))
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(&malformed)?;
+            .ok_or_else(malformed)?;
         match status {
             "available" | "limited_free_trial" => {}
             "upgrade_required" | "not_enabled" => unavailable = true,
@@ -693,32 +688,6 @@ pub async fn list_tools(app: &AppHandle) -> Result<NotionToolInventory, AppError
     })
 }
 
-pub async fn mcp_tool_list(app: &AppHandle) -> Result<NotionMcpToolList, AppError> {
-    filtered_mcp_tool_list(app, tool_allowed_for_agent).await
-}
-
-pub async fn mcp_action_tool_list(app: &AppHandle) -> Result<NotionMcpToolList, AppError> {
-    let mut list = filtered_mcp_tool_list(app, action_tool_allowed_for_agent).await?;
-    for tool in &mut list.tools {
-        apply_action_tool_contract(tool);
-    }
-    Ok(list)
-}
-
-async fn filtered_mcp_tool_list(
-    app: &AppHandle,
-    allowed: fn(&str) -> Option<&'static str>,
-) -> Result<NotionMcpToolList, AppError> {
-    let tools = run_with_fresh_client(app, |client| async move {
-        client.initialize().await?;
-        client.hosted_tools_list().await
-    })
-    .await?;
-    Ok(NotionMcpToolList {
-        tools: filter_allowed_tools(tools, allowed),
-    })
-}
-
 pub async fn call_hosted_tool(
     app: &AppHandle,
     request: NotionHostedToolCallRequest,
@@ -731,52 +700,6 @@ pub async fn call_hosted_tool(
     };
     preflight_read_tool_arguments(tool_name, &request.arguments)?;
     call_hosted_tool_unchecked(app, tool_name, request.arguments).await
-}
-
-pub async fn call_hosted_action_tool(
-    app: &AppHandle,
-    request: NotionHostedToolCallRequest,
-) -> Result<NotionHostedToolCallResult, AppError> {
-    let Some(tool_name) = action_tool_allowed_for_agent(&request.tool_name) else {
-        return Err(AppError::new(
-            "notion_tool_not_allowed",
-            "That Notion hosted MCP action is not enabled in Clovy yet.",
-        ));
-    };
-    preflight_action_arguments(tool_name, &request.arguments)?;
-    let expected_revision = capture_connected_revision(app).await?;
-    let summary = summarize_action(tool_name, &request.arguments);
-    let args_preview = preview_action(tool_name, &request.arguments);
-    let approval = crate::connectors::approvals::ActionRequest {
-        grant_token: None,
-        account_id: notion_account_email(),
-        server: JUNE_NOTION_ACTIONS_SERVER,
-        tool: tool_name,
-        summary,
-        args_preview,
-    };
-    if let crate::connectors::approvals::ActionDecision::Deny(reason) =
-        crate::connectors::approvals::gate_action(app, approval).await
-    {
-        return Err(AppError::new("connector_action_denied", reason));
-    }
-    let timeout = action_request_timeout(request.deadline_unix_ms)?;
-    tokio::time::timeout(
-        timeout,
-        call_hosted_action_for_revision(
-            app,
-            expected_revision,
-            tool_name,
-            request.arguments,
-        ),
-    )
-    .await
-    .map_err(|_| {
-        AppError::new(
-            "notion_mcp_action_timeout",
-            "Notion did not finish the approved action before Clovy's safety timeout. Check Notion before retrying.",
-        )
-    })?
 }
 
 /// Executes a Notion action after the caller has already completed a trusted
@@ -868,6 +791,73 @@ pub async fn capture_execution_revision(
     Ok(connection_revision())
 }
 
+/// Immutable action prepared before a CLI approval. Its arguments and the
+/// connection epoch stay in the host; model input never supplies a receipt.
+pub(crate) struct BrokerAction {
+    tool: String,
+    arguments: serde_json::Value,
+    revision: u64,
+}
+impl BrokerAction {
+    pub(crate) fn prepare(tool: &str, arguments: &serde_json::Value) -> Result<Self, AppError> {
+        let Some((tool, true)) = runtime_name_to_provider(tool) else {
+            return Err(AppError::new(
+                "notion_tool_not_allowed",
+                "This Notion action is not enabled.",
+            ));
+        };
+        preflight_action_arguments(tool, arguments)?;
+        Ok(Self {
+            tool: tool.into(),
+            arguments: arguments.clone(),
+            revision: connection_revision(),
+        })
+    }
+    pub(crate) fn presentation(&self) -> (String, String, Option<String>) {
+        let (title, description, _, preview) =
+            action_approval_presentation(&self.tool, &self.arguments);
+        (title, description, Some(preview))
+    }
+    /// Claims the exact broker item once. This replaces the legacy SDK's
+    /// run/call digest for CLI actions; the legacy entry points stay intact.
+    pub(crate) async fn claim(
+        &self,
+        pool: &sqlx_sqlite::SqlitePool,
+        turn: &crate::mcp_server::turns::TurnBinding,
+        approval_id: &str,
+    ) -> Result<(), AppError> {
+        ensure_connection_revision(self.revision)?;
+        let changed = sqlx::query::query("UPDATE agent_items SET payload_json = json_set(payload_json, '$.executionState', 'consumed') WHERE session_id = ? AND run_id = ? AND kind = 'interruption' AND json_extract(payload_json, '$.id') = ? AND json_extract(payload_json, '$.engine') = 'cli' AND json_extract(payload_json, '$.kind') = 'approval' AND json_extract(payload_json, '$.toolName') = ? AND json_extract(payload_json, '$.status') = 'resolved' AND json_extract(payload_json, '$.approved') = 1 AND COALESCE(json_extract(payload_json, '$.executionState'), 'unconsumed') = 'unconsumed'")
+            .bind(&turn.session_id).bind(&turn.run_id).bind(approval_id).bind(&self.tool).execute(pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(AppError::new(
+                "notion_action_binding_missing",
+                "This Notion approval is unavailable or already consumed.",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) async fn execute(
+        self,
+        app: &AppHandle,
+        pool: &sqlx_sqlite::SqlitePool,
+        turn: &crate::mcp_server::turns::TurnBinding,
+        approval_id: &str,
+    ) -> Result<NotionHostedToolCallResult, AppError> {
+        self.claim(pool, turn, approval_id).await?;
+        call_hosted_action_tool_approved(
+            app,
+            NotionHostedToolCallRequest {
+                tool_name: self.tool,
+                arguments: self.arguments,
+                deadline_unix_ms: None,
+            },
+            self.revision,
+        )
+        .await
+    }
+}
+
 fn action_binding_digest(
     tool_name: &str,
     arguments: &serde_json::Value,
@@ -910,13 +900,6 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
         }
         _ => value.clone(),
     }
-}
-
-pub(crate) async fn capture_connected_revision(app: &AppHandle) -> Result<u64, AppError> {
-    load_connected_with_fresh_token(app).await?;
-    let _guard = credential_lifecycle_lock().lock().await;
-    load_connected().await?;
-    Ok(connection_revision())
 }
 
 async fn call_hosted_action_for_revision(
@@ -2294,7 +2277,7 @@ fn validate_update_page_change(
         value
             .as_str()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(&invalid)
+            .ok_or_else(invalid)
     });
     let command = command.transpose()?;
     let new_str = object.get("new_str");
@@ -2836,11 +2819,6 @@ fn now_unix() -> i64 {
 mod store {
     use super::*;
 
-    const KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy.notion-hosted-mcp";
-    const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.clovy-dev.notion-hosted-mcp";
-    const LEGACY_KEYCHAIN_SERVICE: &str = "co.opensoftware.june.notion-hosted-mcp";
-    const LEGACY_DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.notion-hosted-mcp";
-
     pub async fn store(tokens: &StoredNotionConnection) -> Result<(), AppError> {
         let json = serde_json::to_string(tokens)
             .map_err(|e| AppError::new("notion_token_serialize_failed", e.to_string()))?;
@@ -2857,14 +2835,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn store_platform(json: String) -> Result<(), AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         tokio::task::spawn_blocking(move || {
-            crate::credential_compat::set_password(
-                service,
-                legacy_service,
-                NOTION_ACCOUNT_ID,
-                &json,
-            )
+            crate::credentials::set_password(&service, NOTION_ACCOUNT_ID, &json)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_write_failed", e.to_string()))?
@@ -2881,9 +2854,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn load_platform() -> Result<Option<StoredNotionConnection>, AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         let raw = tokio::task::spawn_blocking(move || {
-            crate::credential_compat::get_password(service, legacy_service, NOTION_ACCOUNT_ID)
+            crate::credentials::get_password(&service, NOTION_ACCOUNT_ID)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_read_failed", e.to_string()))?
@@ -2908,9 +2881,9 @@ mod store {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     async fn delete_platform() -> Result<(), AppError> {
-        let (service, legacy_service) = keychain_services();
+        let service = keychain_service();
         tokio::task::spawn_blocking(move || {
-            crate::credential_compat::delete_password(service, legacy_service, NOTION_ACCOUNT_ID)
+            crate::credentials::delete_password(&service, NOTION_ACCOUNT_ID)
         })
         .await
         .map_err(|e| AppError::new("notion_keychain_delete_failed", e.to_string()))?
@@ -2923,12 +2896,8 @@ mod store {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn keychain_services() -> (&'static str, &'static str) {
-        if cfg!(debug_assertions) {
-            (DEV_KEYCHAIN_SERVICE, LEGACY_DEV_KEYCHAIN_SERVICE)
-        } else {
-            (KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE)
-        }
+    fn keychain_service() -> String {
+        crate::app_identity::credential_service("notion-hosted-mcp")
     }
 }
 
@@ -2943,6 +2912,55 @@ pub fn notion_account_email() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bypass_receipt_cannot_be_claimed_after_connection_revision_changes() {
+        use crate::approval_broker::{
+            testing::TestBroker, ApprovalKind, ApprovalRequest, ApprovalTurn,
+        };
+        use crate::llm::cli::CliKind;
+        use sqlx::row::Row;
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        sqlx::query::query("UPDATE agent_runs SET run_config_json = json_set(run_config_json, '$.approvalMode', 'bypass') WHERE id = ?")
+            .bind(&binding.run_id).execute(broker.pool()).await.unwrap();
+        let args = serde_json::json!({"page_id":"fixture", "command":"update_properties", "properties":{"title":"Fixture"}});
+        let mut action = BrokerAction::prepare("notion-update-page", &args).unwrap();
+        broker
+            .broker()
+            .request(
+                &ApprovalTurn::from(&binding),
+                ApprovalRequest {
+                    tool: "notion-update-page".into(),
+                    call_id: Some(uuid::Uuid::new_v4().to_string()),
+                    kind: ApprovalKind::Approval {
+                        title: "Update".into(),
+                        description: "Update".into(),
+                        arguments: args,
+                        preview: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let row = sqlx::query::query("SELECT json_extract(payload_json, '$.id') AS receipt FROM agent_items WHERE run_id = ? AND kind = 'interruption'")
+            .bind(&binding.run_id).fetch_one(broker.pool()).await.unwrap();
+        let receipt: String = row.get("receipt");
+        // Simulate a previously captured epoch without changing the global
+        // connection state shared with other tests.
+        action.revision = connection_revision().wrapping_add(1);
+        assert_eq!(
+            action
+                .claim(broker.pool(), &binding, &receipt)
+                .await
+                .unwrap_err()
+                .code,
+            "notion_connection_changed"
+        );
+        let row = sqlx::query::query("SELECT json_extract(payload_json, '$.executionState') AS state FROM agent_items WHERE run_id = ? AND kind = 'interruption'")
+            .bind(&binding.run_id).fetch_one(broker.pool()).await.unwrap();
+        assert_eq!(row.get::<Option<String>, _>("state"), None);
+    }
 
     #[test]
     fn auth_url_carries_hosted_mcp_oauth_params() {

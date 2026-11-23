@@ -1,4 +1,3 @@
-import "./lib/storage-compat-bootstrap";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,12 +21,15 @@ import { MEETING_END_STATE_EVENT } from "./lib/events";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { subscribeBrand } from "./lib/brand";
 import { createHudLifecycle } from "./lib/hud-lifecycle";
+import { subscribeInterfaceLocale, subscribeInterfaceLocaleAcrossWindows, t } from "./i18n";
 import "./styles/meeting-hud.css";
 
 const lifecycle = createHudLifecycle();
 
 // Recolor this HUD window to the selected accent and keep it live-synced.
 lifecycle.trackUnlisten(subscribeBrand());
+// Follow the interface language chosen in the main window (sets <html lang>).
+lifecycle.addCleanup(subscribeInterfaceLocaleAcrossWindows());
 
 const HAS_TAURI_BRIDGE = "__TAURI_INTERNALS__" in window;
 
@@ -46,6 +48,35 @@ const bars = Array.from(document.querySelectorAll<HTMLElement>(".mhud-bar"));
 const meetingEndKeep = document.querySelector<HTMLButtonElement>("#mhud-end-keep");
 const meetingEndStop = document.querySelector<HTMLButtonElement>("#mhud-end-stop");
 const meetingEndSeconds = document.querySelector<HTMLElement>("#mhud-end-seconds");
+const meetingEndTitle = document.querySelector<HTMLElement>(".mhud-end-title");
+
+// Replace a control's own text while keeping its child elements (the Stop
+// button carries the countdown seconds span next to its label).
+function setOwnText(element: HTMLElement | null, text: string) {
+  if (!element) return;
+  const node = Array.from(element.childNodes).find(
+    (child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim(),
+  );
+  if (node) node.textContent = text;
+  else element.prepend(document.createTextNode(text));
+}
+
+function pillAriaLabel() {
+  if (pill?.dataset.mode === "meeting-end") return t("hud.meetingEnd.title");
+  return pill?.dataset.state === "paused"
+    ? t("hud.recording.paused")
+    : t("hud.recording.recording");
+}
+
+// The static page chrome from meeting-hud.html, in the current language.
+function applyStaticLabels() {
+  document.title = t("hud.recording.windowTitle");
+  pill?.setAttribute("aria-label", pillAriaLabel());
+  if (meetingEndTitle) meetingEndTitle.textContent = t("hud.meetingEnd.title");
+  setOwnText(meetingEndStop, t("hud.meetingEnd.stop"));
+  meetingEndStop?.setAttribute("aria-label", t("hud.meetingEnd.stopLabel"));
+  setOwnText(meetingEndKeep, t("hud.meetingEnd.keep"));
+}
 
 /** Must track MEETING_END_COUNTDOWN_MS in meeting_detection.rs — the status
  * event only carries the deadline, not the countdown's full length. */
@@ -83,7 +114,7 @@ function applyStatus(status: RecordingStatusDto | RecordingTelemetryDto) {
     pill.dataset.state = paused ? "paused" : "recording";
     pill.setAttribute(
       "aria-label",
-      paused ? "Paused. Click to open Clovy" : "Recording. Click to open Clovy",
+      paused ? t("hud.recording.paused") : t("hud.recording.recording"),
     );
   }
 
@@ -103,7 +134,9 @@ function updateMeetingEndDrain() {
     String(Math.min(1, remainingMs / MEETING_END_COUNTDOWN_MS)),
   );
   if (meetingEndSeconds) {
-    meetingEndSeconds.textContent = `${Math.ceil(remainingMs / 1_000)}s`;
+    meetingEndSeconds.textContent = t("hud.meetingEnd.seconds", {
+      seconds: Math.ceil(remainingMs / 1_000),
+    });
   }
 }
 
@@ -122,12 +155,12 @@ function applyMeetingEndStatus(status: MeetingEndStatus | null) {
       pill.dataset.mode = "meeting-end";
       pill.removeAttribute("role");
       pill.removeAttribute("tabindex");
-      pill.setAttribute("aria-label", "Meeting ended");
+      pill.setAttribute("aria-label", t("hud.meetingEnd.title"));
     } else {
       delete pill.dataset.mode;
       pill.setAttribute("role", "button");
       pill.setAttribute("tabindex", "0");
-      pill.setAttribute("aria-label", "Recording. Click to open Clovy");
+      pill.setAttribute("aria-label", t("hud.recording.recording"));
     }
     // Let the snapped state paint before the transition comes back (same
     // two-frame dance as applyZone).
@@ -347,6 +380,15 @@ if (import.meta.env.DEV) {
     { signal: lifecycle.signal },
   );
 }
+
+applyStaticLabels();
+// Re-label the visible state when the language changes.
+lifecycle.addCleanup(
+  subscribeInterfaceLocale(() => {
+    applyStaticLabels();
+    updateMeetingEndDrain();
+  }),
+);
 
 resetBars();
 startBarLoop();

@@ -1,5 +1,13 @@
 # PRD: Canva plugin
 
+> **Historical server proposal (2026-10-28).** The hosted connector broker
+> described below is superseded by
+> [ADR-0073](../adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
+> The server has been removed; this proposal is not authorization to add a
+> replacement service or implement the old server path. No replacement design
+> is introduced by this retirement notice.
+
+
 - **Mode:** CEO
 - **Overall rank:** 20 of 20
 - **Score:** 56/100

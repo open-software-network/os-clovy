@@ -1,15 +1,15 @@
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
-import { IconLightBulbSimple } from "central-icons/IconLightBulbSimple";
-import { useId, useState } from "react";
+import { useState } from "react";
+import { type TFunction, useT } from "../../../i18n";
 import type { AgentApprovalChoice, AgentChatPart } from "../../../lib/agent-chat-runtime";
-import { explainAgentApproval, type PendingBrowserApproval } from "../../../lib/tauri";
-import { Spinner } from "../../ui/Spinner";
+import { useBrowserAccess } from "../../../lib/browser-access";
 import {
   ApproveSplitButton,
   CollapsibleActionCard,
   ResolvedActionRow,
 } from "./ActionCardPrimitives";
+import { RuntimeLogo } from "../../brand/RuntimeLogo";
 
 export function ClarifyPart({
   onClarify,
@@ -20,16 +20,36 @@ export function ClarifyPart({
   part: Extract<AgentChatPart, { type: "clarify" }>;
   submitting?: string;
 }) {
+  const t = useT();
   const [typing, setTyping] = useState(part.choices.length === 0);
   const [draft, setDraft] = useState("");
   const disabled = part.status !== "pending" || submitting !== undefined;
+
+  // A CLI question that nobody answered (timeout, or the run stopped) never
+  // reached the agent: it says so instead of "Skipped".
+  if (part.status === "expired" || part.status === "cancelled") {
+    const expired = part.status === "expired";
+    return (
+      <ResolvedActionRow
+        denied
+        label={expired ? t("chat.clarify.expired") : t("chat.clarify.cancelled")}
+        detail={part.question}
+      >
+        <p>{part.question}</p>
+        <p>{expired ? t("chat.clarify.expiredBody") : t("chat.clarify.cancelledBody")}</p>
+      </ResolvedActionRow>
+    );
+  }
 
   // Resolved clarify collapses to a quiet receipt row: "Answered" (or "Skipped")
   // plus the question, expandable to the full question and answer.
   if (part.status !== "pending") {
     const answered = Boolean(part.answer?.trim());
     return (
-      <ResolvedActionRow label={answered ? "Answered" : "Skipped"} detail={part.question}>
+      <ResolvedActionRow
+        label={answered ? t("chat.clarify.answered") : t("chat.clarify.skipped")}
+        detail={part.question}
+      >
         <p>{part.question}</p>
         {answered ? <p className="agent-clarify-answer">{part.answer}</p> : null}
       </ResolvedActionRow>
@@ -40,7 +60,7 @@ export function ClarifyPart({
     <article className="agent-clarify-card" data-status={part.status}>
       <div>
         <div className="agent-tool-title">
-          <span>Clarify</span>
+          <span>{t("chat.clarify.title")}</span>
         </div>
         <p className="agent-clarify-question">{part.question}</p>
         {part.status === "pending" ? (
@@ -64,7 +84,7 @@ export function ClarifyPart({
                   onClick={() => setTyping(true)}
                 >
                   <span>+</span>
-                  Other
+                  {t("chat.clarify.other")}
                 </button>
               </div>
             ) : null}
@@ -82,7 +102,7 @@ export function ClarifyPart({
                   value={draft}
                   disabled={disabled}
                   rows={3}
-                  placeholder="Type your answer"
+                  placeholder={t("chat.clarify.placeholder")}
                   onChange={(event) => setDraft(event.currentTarget.value)}
                 />
                 <div>
@@ -96,7 +116,7 @@ export function ClarifyPart({
                         setTyping(false);
                       }}
                     >
-                      Back
+                      {t("common.back")}
                     </button>
                   ) : null}
                   <button
@@ -105,14 +125,14 @@ export function ClarifyPart({
                     disabled={disabled}
                     onClick={() => onClarify(part, "")}
                   >
-                    Skip
+                    {t("common.skip")}
                   </button>
                   <button
                     type="submit"
                     className="btn btn-secondary"
                     disabled={disabled || !draft.trim()}
                   >
-                    {submitting !== undefined ? "Sending" : "Send"}
+                    {submitting !== undefined ? t("chat.clarify.sending") : t("chat.clarify.send")}
                   </button>
                 </div>
               </form>
@@ -149,25 +169,22 @@ export function AgentCliAccessCard({
   dismissed: controlledDismissed,
   onDismiss,
 }: { cliAccess?: AgentCliAccessCardProps } & DismissibleAccessCardProps) {
+  const t = useT();
   const [locallyDismissed, setLocallyDismissed] = useState(false);
   const dismissed = controlledDismissed ?? locallyDismissed;
   const enabled = cliAccess?.enabled === true;
   const resolved = enabled || dismissed;
   const busy = Boolean(cliAccess?.submitting);
 
-  const description = (
-    <p>
-      Clovy wants write access to the state folders of your coding CLIs (Claude Code, Codex, Gemini,
-      opencode) so they stay logged in and can save their work in sandboxed sessions. Those folders
-      configure software that also runs outside Clovy's sandbox. Enabling turns on "Agent CLI
-      access" in Settings and restarts the sandboxed runtime.
-    </p>
-  );
+  const description = <p>{t("chat.cliAccess.description")}</p>;
 
   // Resolved collapses to a quiet receipt row, expandable to the description.
   if (resolved) {
     return (
-      <ResolvedActionRow denied={!enabled} label={enabled ? "Agent CLI access enabled" : "Not now"}>
+      <ResolvedActionRow
+        denied={!enabled}
+        label={enabled ? t("chat.cliAccess.enabled") : t("chat.access.notNow")}
+      >
         {description}
       </ResolvedActionRow>
     );
@@ -177,7 +194,12 @@ export function AgentCliAccessCard({
     <article className="agent-approval-card" data-status="pending">
       <div>
         <div className="agent-tool-title">
-          <span>Agent CLI access requested</span>
+          <span>{t("chat.cliAccess.requested")}</span>
+          <span className="agent-cli-access-marks" aria-hidden>
+            <RuntimeLogo id="claude" size={14} />
+            <RuntimeLogo id="codex" size={14} />
+            <RuntimeLogo id="gemini" name="Gemini" size={14} />
+          </span>
         </div>
         {description}
         <div className="agent-approval-actions">
@@ -187,7 +209,7 @@ export function AgentCliAccessCard({
             disabled={busy || !cliAccess || cliAccess.enabled === undefined}
             onClick={() => cliAccess?.onEnable()}
           >
-            {busy ? "Enabling…" : "Enable Agent CLI access"}
+            {busy ? t("chat.access.enabling") : t("chat.cliAccess.enable")}
           </button>
           <button
             type="button"
@@ -198,7 +220,7 @@ export function AgentCliAccessCard({
               onDismiss?.();
             }}
           >
-            Not now
+            {t("chat.access.notNow")}
           </button>
         </div>
       </div>
@@ -207,63 +229,12 @@ export function AgentCliAccessCard({
 }
 
 export type AgentBrowserAccessCardProps = {
+  error?: string;
   /** undefined while the stored grant is still loading. */
   enabled?: boolean;
   submitting: boolean;
   onEnable: () => void;
 };
-
-export function BrowserApprovalCard({
-  approval,
-  submitting,
-  onRespond,
-}: {
-  approval: PendingBrowserApproval;
-  submitting: boolean;
-  onRespond: (approve: boolean, allowSite: boolean) => void;
-}) {
-  const action = approval.action.charAt(0).toUpperCase() + approval.action.slice(1);
-  return (
-    <article className="agent-approval-card" data-status="pending">
-      <div className="agent-tool-title">
-        <span>Browser approval required</span>
-      </div>
-      <p>
-        Site: {approval.site}
-        {"\n"}
-        Action: {action}
-        {"\n"}
-        Element: {approval.elementLabel}
-      </p>
-      <div className="agent-approval-actions">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={submitting}
-          onClick={() => onRespond(true, false)}
-        >
-          Approve
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          disabled={submitting}
-          onClick={() => onRespond(true, true)}
-        >
-          Approve all on this site for this task
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost agent-approval-deny"
-          disabled={submitting}
-          onClick={() => onRespond(false, false)}
-        >
-          Decline
-        </button>
-      </div>
-    </article>
-  );
-}
 
 /** Clovy asked to enable Browser use via the literal token its soul teaches
  * ([REQUEST:BROWSER_ACCESS]). The agent can never flip the setting itself —
@@ -277,25 +248,35 @@ export function AgentBrowserAccessCard({
   dismissed: controlledDismissed,
   onDismiss,
 }: { browserAccess?: AgentBrowserAccessCardProps } & DismissibleAccessCardProps) {
+  const t = useT();
+  const storedAccess = useBrowserAccess(browserAccess === undefined);
+  const access = browserAccess ?? {
+    enabled: storedAccess.enabled,
+    submitting: storedAccess.submitting,
+    onEnable: () => void storedAccess.setGrant(true),
+  };
   const [locallyDismissed, setLocallyDismissed] = useState(false);
   const dismissed = controlledDismissed ?? locallyDismissed;
-  const enabled = browserAccess?.enabled === true;
+  const enabled = access.enabled === true;
   const resolved = enabled || dismissed;
-  const busy = Boolean(browserAccess?.submitting);
+  const busy = Boolean(access.submitting);
 
   const description = (
-    <p>
-      Clovy wants to drive your browser to finish this task, in tabs it opens and tabs you
-      explicitly share. Page content from those tabs (visible text and screenshots) leaves this
-      device and is sent to your configured AI model for inference. Enabling turns on "Browser use"
-      in Settings and restarts the agent runtime.
-    </p>
+    <>
+      <p>{t("chat.browserAccess.description")}</p>
+      {browserAccess?.error || storedAccess.error ? (
+        <p role="alert">{browserAccess?.error || storedAccess.error}</p>
+      ) : null}
+    </>
   );
 
   // Resolved collapses to a quiet receipt row, expandable to the description.
   if (resolved) {
     return (
-      <ResolvedActionRow denied={!enabled} label={enabled ? "Browser use enabled" : "Not now"}>
+      <ResolvedActionRow
+        denied={!enabled}
+        label={enabled ? t("chat.browserAccess.enabled") : t("chat.access.notNow")}
+      >
         {description}
       </ResolvedActionRow>
     );
@@ -305,17 +286,17 @@ export function AgentBrowserAccessCard({
     <article className="agent-approval-card" data-status="pending">
       <div>
         <div className="agent-tool-title">
-          <span>Browser use requested</span>
+          <span>{t("chat.browserAccess.requested")}</span>
         </div>
         {description}
         <div className="agent-approval-actions">
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={busy || !browserAccess || browserAccess.enabled === undefined}
-            onClick={() => browserAccess?.onEnable()}
+            disabled={busy || access.enabled === undefined}
+            onClick={() => access.onEnable()}
           >
-            {busy ? "Enabling…" : "Enable Browser use"}
+            {busy ? t("chat.access.enabling") : t("chat.browserAccess.enable")}
           </button>
           <button
             type="button"
@@ -326,7 +307,7 @@ export function AgentBrowserAccessCard({
               onDismiss?.();
             }}
           >
-            Not now
+            {t("chat.access.notNow")}
           </button>
         </div>
       </div>
@@ -346,6 +327,9 @@ export function ApprovalPart({
   part: Extract<AgentChatPart, { type: "approval" }>;
   submitting?: AgentApprovalChoice;
 }) {
+  const t = useT();
+  // Asked by a CLI turn through the approval broker: one approval per call.
+  const cli = part.engine === "cli";
   const disabled = Boolean(submitting) || part.status !== "pending";
   const activeChoice = part.choice ?? submitting;
   // A card that has actually resolved collapses to a receipt row. A submission
@@ -353,50 +337,37 @@ export function ApprovalPart({
   // in-progress line ("Approving once") stays visible until it resolves.
   const resolved = part.status !== "pending";
   const showResult = resolved || activeChoice !== undefined;
-  // The whole card is compact by default; expanding reveals the full body.
-  const [expanded, setExpanded] = useState(false);
-  const [explainOpen, setExplainOpen] = useState(false);
-  // "Explain first" asks the generation model what this specific request
-  // would do — the request stays parked, nothing is approved by asking.
-  // The answer is cached for the card's lifetime; an error retries on the
-  // next open and falls back to static copy meanwhile.
-  const [explanation, setExplanation] = useState<string>();
-  const [explainState, setExplainState] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const explanationId = useId();
-
-  function toggleExplain() {
-    const nextOpen = !explainOpen;
-    setExplainOpen(nextOpen);
-    // Opening the explanation auto-expands the card so the panel has room.
-    if (nextOpen) setExpanded(true);
-    if (!nextOpen || explainState === "loading" || explainState === "ready") {
-      return;
-    }
-    setExplainState("loading");
-    explainAgentApproval({
-      description: part.description,
-      command: part.command || undefined,
-    })
-      .then((response) => {
-        setExplanation(response.explanation);
-        setExplainState("ready");
-      })
-      .catch(() => {
-        setExplainState("error");
-      });
-  }
-
   // Resolved collapses to a quiet receipt row: the outcome label plus the
   // command (or description) truncated to one line, expandable to the full
   // description and command — no action buttons.
   if (resolved) {
+    const commandDetail = part.command ? (
+      <span className="agent-resolved-mono">{part.command}</span>
+    ) : (
+      part.description
+    );
+    if (part.status === "cancelled" || (cli && part.status === "expired")) {
+      const cancelled = part.status === "cancelled";
+      return (
+        <ResolvedActionRow
+          denied
+          label={cancelled ? t("chat.approval.cancelled") : t("chat.approval.expired")}
+          detail={commandDetail}
+        >
+          <p>{cancelled ? t("chat.approval.cancelledBody") : t("chat.approval.timedOutBody")}</p>
+          {part.command ? <pre>{part.command}</pre> : null}
+        </ResolvedActionRow>
+      );
+    }
     if (part.status === "expired") {
       const outcomeUnconfirmed = part.retiredReason === "unconfirmed";
       return (
         <ResolvedActionRow
           denied={!outcomeUnconfirmed}
           unknown={outcomeUnconfirmed}
-          label={outcomeUnconfirmed ? "Approval outcome unknown" : "Approval expired"}
+          label={
+            outcomeUnconfirmed ? t("chat.approval.outcomeUnknown") : t("chat.approval.expired")
+          }
           detail={
             part.command ? (
               <span className="agent-resolved-mono">{part.command}</span>
@@ -406,13 +377,9 @@ export function ApprovalPart({
           }
         >
           {outcomeUnconfirmed ? (
-            <p>
-              The connection closed before Clovy could confirm the response. This approval is no
-              longer actionable, but it may have already been applied. Check the agent activity
-              before retrying.
-            </p>
+            <p>{t("chat.approval.unconfirmedBody")}</p>
           ) : (
-            <p>This approval is no longer pending. Clovy did not approve anything.</p>
+            <p>{t("chat.approval.expiredBody")}</p>
           )}
           {part.command ? <pre>{part.command}</pre> : null}
         </ResolvedActionRow>
@@ -421,7 +388,7 @@ export function ApprovalPart({
     return (
       <ResolvedActionRow
         denied={activeChoice === "deny"}
-        label={approvalChoiceLabel(activeChoice)}
+        label={approvalChoiceLabel(t, activeChoice)}
         detail={
           part.command ? (
             <span className="agent-resolved-mono">{part.command}</span>
@@ -441,16 +408,16 @@ export function ApprovalPart({
     // in the card until the request actually resolves.
     <p className="agent-approval-result" data-choice={activeChoice}>
       {activeChoice === "deny" ? <IconCrossMedium size={14} /> : <IconCheckmark2Small size={14} />}
-      {approvalChoiceLabel(activeChoice, submitting !== undefined)}
+      {approvalChoiceLabel(t, activeChoice, submitting !== undefined)}
     </p>
   ) : (
     // Compact footer: a split "Approve" (approves once, caret opens the scope
-    // menu) and a quiet "Deny" anchor the row; "Explain first" demotes to a
-    // plain text-level button pushed to the right edge.
+    // menu) and a quiet "Deny" anchor the row.
     <div className="agent-approval-actions">
       <ApproveSplitButton
         disabled={disabled}
-        allowPermanent={part.allowPermanent}
+        allowPermanent={part.allowPermanent && !cli}
+        scopeMenu={!cli}
         onChoice={(choice) => onApproval(part, choice)}
       />
       <button
@@ -459,77 +426,34 @@ export function ApprovalPart({
         disabled={disabled}
         onClick={() => onApproval(part, "deny")}
       >
-        Deny
-      </button>
-      <button
-        type="button"
-        className="btn btn-ghost agent-approval-explain"
-        aria-expanded={explainOpen}
-        // Only advertise the panel while it's actually in the DOM (the body
-        // renders only when the card is expanded and the explanation is open).
-        aria-controls={explainOpen ? explanationId : undefined}
-        disabled={disabled}
-        onClick={toggleExplain}
-      >
-        <IconLightBulbSimple size={14} aria-hidden />
-        {explainOpen ? "Hide explanation" : "Explain first"}
+        {t("chat.approval.deny")}
       </button>
     </div>
   );
 
   return (
     <CollapsibleActionCard
-      title="Approval required"
+      title={t("chat.approval.required")}
       description={part.description}
       command={part.command ? <pre>{part.command}</pre> : null}
-      // The command is always shown; the only expandable body is the optional
-      // explanation, which its own "Explain first" button toggles.
+      // The command is always shown and there is no supplementary body.
       hasDetails={false}
-      expanded={expanded}
-      onToggleExpanded={() => {
-        const next = !expanded;
-        setExpanded(next);
-        if (!next) setExplainOpen(false);
-      }}
+      expanded={false}
+      onToggleExpanded={() => {}}
       footer={footer}
     >
-      {explainOpen ? (
-        <div className="agent-approval-explanation" id={explanationId}>
-          {explainState === "loading" ? (
-            <p className="agent-approval-explanation-loading" role="status" aria-live="polite">
-              <Spinner aria-hidden />
-              <span>Working out what this request does…</span>
-            </p>
-          ) : explainState === "ready" && explanation ? (
-            explanation
-              .split(/\n{2,}/)
-              .map((paragraph) => paragraph.trim())
-              .filter(Boolean)
-              .map((paragraph, index) => <p key={index}>{paragraph}</p>)
-          ) : (
-            // Generation unavailable (offline, signed out): keep the
-            // static framing rather than an empty panel.
-            <p>
-              Clovy is paused because this request needs your explicit permission before it can
-              continue.
-            </p>
-          )}
-          <p>
-            Approve once allows only this request.{" "}
-            {part.allowPermanent ? "Always allows matching requests in future sessions. " : null}
-            Deny blocks the request.
-          </p>
-        </div>
-      ) : null}
+      {null}
     </CollapsibleActionCard>
   );
 }
 
-function approvalChoiceLabel(choice?: AgentApprovalChoice, pending = false) {
-  if (choice === "once") return pending ? "Approving once" : "Approved once";
+function approvalChoiceLabel(t: TFunction, choice?: AgentApprovalChoice, pending = false) {
+  if (choice === "once")
+    return pending ? t("chat.approval.approvingOnce") : t("chat.approval.approvedOnce");
   if (choice === "session")
-    return pending ? "Approving for this session" : "Approved for this session";
-  if (choice === "always") return pending ? "Approving permanently" : "Always approved";
-  if (choice === "deny") return pending ? "Denying" : "Denied";
-  return "Resolved";
+    return pending ? t("chat.approval.approvingSession") : t("chat.approval.approvedSession");
+  if (choice === "always")
+    return pending ? t("chat.approval.approvingAlways") : t("chat.approval.approvedAlways");
+  if (choice === "deny") return pending ? t("chat.approval.denying") : t("chat.approval.denied");
+  return t("chat.approval.resolved");
 }

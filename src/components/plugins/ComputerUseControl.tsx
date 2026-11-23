@@ -1,10 +1,10 @@
 import { IconCircleCheck } from "central-icons/IconCircleCheck";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
-import { IconLock } from "central-icons/IconLock";
 import { IconStop } from "central-icons/IconStop";
 import { IconTelevision } from "central-icons/IconTelevision";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { t as translate, useT, useTRich } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import {
   COMPUTER_USE_STATUS_CHANGED_EVENT,
@@ -20,27 +20,25 @@ import { InlineNotice } from "../ui/InlineNotice";
 import { HoverTip } from "../ui/HoverTip";
 import { Switch } from "../ui/Switch";
 
-type ComputerUseControlProps = {
-  onOpenModels: () => void;
-  onOpenBilling: () => void;
-};
-
 function statusLabel(status?: ComputerUseStatusDto) {
-  if (!status) return "Checking";
-  if (!status.platformSupported) return "Unavailable";
-  if (status.state === "rollout_disabled") return "Temporarily unavailable";
-  if (!status.planEligible) return "Pro plan required";
-  if (!status.driverAvailable) return "Driver unavailable";
-  if (!status.grantEnabled) return "Off";
-  if (status.ready) return "Ready";
-  if (!status.accessibility || !status.screenRecording) return "Needs macOS access";
-  if (!status.modelSupportsVision) return "Needs a vision model";
-  return "Unavailable";
+  if (!status) return translate("settingsPanels.computerUse.status.checking");
+  if (!status.platformSupported) return translate("settingsPanels.computerUse.status.unavailable");
+  if (!status.driverAvailable)
+    return translate("settingsPanels.computerUse.status.driverUnavailable");
+  if (!status.grantEnabled) return translate("settingsPanels.computerUse.status.off");
+  if (status.ready) return translate("settingsPanels.computerUse.status.ready");
+  if (status.platform === "windows")
+    return translate("settingsPanels.computerUse.status.needsInteractiveDesktop");
+  if (!status.accessibility || !status.screenRecording)
+    return translate("settingsPanels.computerUse.status.needsMacosAccess");
+  return translate("settingsPanels.computerUse.status.unavailable");
 }
 
 function requirementState(ready: boolean, enabled: boolean) {
-  if (!enabled) return "Required when enabled";
-  return ready ? "Allowed" : "Not allowed";
+  if (!enabled) return translate("settingsPanels.computerUse.requiredWhenEnabled");
+  return ready
+    ? translate("settingsPanels.computerUse.allowed")
+    : translate("settingsPanels.computerUse.notAllowed");
 }
 
 type MacOSPermission = "accessibility" | "screenRecording";
@@ -80,16 +78,14 @@ function requestComputerUsePermission(permission: MacOSPermission) {
   return request;
 }
 
-function permissionLabel(permission: MacOSPermission) {
-  return permission === "accessibility" ? "Accessibility" : "Screen recording";
-}
-
 /**
  * Canonical front for the single native Computer use grant. Keeping management
  * in the Plugins provider list avoids a second preference surface and never implies that macOS
  * TCC access was granted by Clovy's switch.
  */
-export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseControlProps) {
+export function ComputerUseControl() {
+  const t = useT();
+  const tRich = useTRich();
   const [status, setStatus] = useState<ComputerUseStatusDto>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
@@ -169,11 +165,7 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
       try {
         const next = await setComputerUseGrant(enabled);
         publish(next);
-        setMessage(
-          enabled
-            ? undefined
-            : "Computer use is off. Active work and pending actions were stopped.",
-        );
+        setMessage(enabled ? undefined : t("settingsPanels.computerUse.offMessage"));
       } catch (error) {
         setMessage(messageFromError(error));
         await refresh();
@@ -181,7 +173,7 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
         setBusy(false);
       }
     },
-    [publish, refresh],
+    [publish, refresh, t],
   );
 
   const stop = useCallback(async () => {
@@ -189,14 +181,14 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
     setMessage(undefined);
     try {
       await computerUseStop();
-      setMessage("Computer use stopped. The grant stays on for your next attended task.");
+      setMessage(t("settingsPanels.computerUse.stoppedMessage"));
       await refresh();
     } catch (error) {
       setMessage(messageFromError(error));
     } finally {
       setBusy(false);
     }
-  }, [refresh]);
+  }, [refresh, t]);
 
   const openPermissionSettings = useCallback(
     async (pane: "accessibility" | "screenRecording") => {
@@ -215,13 +207,14 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
 
   const enabled = status?.grantEnabled === true;
   const supported = status?.platformSupported !== false;
-  const planEligible = status?.planEligible !== false;
+  const windows = status?.platform === "windows";
   const driverReady = status?.driverAvailable !== false;
-  const rolloutDisabled = status?.state === "rollout_disabled";
-  const statusErrorShownInline =
-    rolloutDisabled || (supported && planEligible && !driverReady && status !== undefined);
+  const statusErrorShownInline = supported && !driverReady && status !== undefined;
   const permissionsMissing =
-    enabled && status !== undefined && (!status.accessibility || !status.screenRecording);
+    !windows &&
+    enabled &&
+    status !== undefined &&
+    (!status.accessibility || !status.screenRecording);
   const nextPermission: MacOSPermission = status?.accessibility
     ? "screenRecording"
     : "accessibility";
@@ -268,42 +261,25 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
       </span>
       <div className="connector-main">
         <span className="computer-use-title-line">
-          <span className="connector-name">Computer use</span>
-          <HoverTip
-            tip={
-              <>
-                macOS will ask for Accessibility so Clovy can inspect and operate the target app,
-                and Screen Recording so Clovy can understand what is visible. Clovy sends only
-                captures needed for the current task to your selected model. Captures are never
-                analytics.
-              </>
-            }
-            width={360}
-          >
+          <span className="connector-name">{t("settingsPanels.computerUse.name")}</span>
+          <HoverTip tip={t("settingsPanels.computerUse.privacyTip")} width={360}>
             <button
               type="button"
               className="settings-row-info-affordance"
-              aria-label="Computer use privacy and permissions"
+              aria-label={t("settingsPanels.computerUse.privacyAria")}
             >
               <IconCircleInfo size={13} ariaHidden />
             </button>
           </HoverTip>
         </span>
-        <p className="connector-subtitle">
-          Operate supported Mac apps during attended tasks. Every action waits for your approval.
-        </p>
+        <p className="connector-subtitle">{t("settingsPanels.computerUse.subtitle")}</p>
       </div>
       <div className="connector-actions">
         <span className="computer-use-state-label">{statusLabel(status)}</span>
         <Switch
           checked={enabled}
-          disabled={
-            busy ||
-            !supported ||
-            status === undefined ||
-            (!enabled && (!planEligible || !driverReady || rolloutDisabled))
-          }
-          aria-label="Enable Computer use"
+          disabled={busy || !supported || status === undefined || (!enabled && !driverReady)}
+          aria-label={t("settingsPanels.computerUse.enableAria")}
           onCheckedChange={(next) => void toggleGrant(next)}
         />
       </div>
@@ -313,47 +289,32 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
           <InlineNotice
             tone="info"
             icon={<IconExclamationCircle size={16} />}
-            body="Computer use is available on macOS only. Windows support is not part of this release."
+            body={t("settingsPanels.computerUse.supportedPlatforms")}
           />
         ) : null}
 
-        {supported && status && !planEligible && !rolloutDisabled ? (
-          <InlineNotice
-            tone="info"
-            icon={<IconLock size={16} />}
-            eyebrow="Pro feature"
-            body="Computer use requires an active Pro or Max plan. Permission education and revocation remain available without a plan."
-            actions={
-              <button type="button" className="btn btn-ghost" onClick={onOpenBilling}>
-                View plans
-              </button>
-            }
-          />
-        ) : null}
-
-        {supported && status && rolloutDisabled ? (
-          <InlineNotice
-            tone="info"
-            icon={<IconExclamationCircle size={16} />}
-            eyebrow="Temporarily unavailable"
-            body={status.error || "Computer use is paused for this Clovy or macOS version."}
-          />
-        ) : null}
-
-        {supported && planEligible && !driverReady && !rolloutDisabled && status ? (
+        {supported && !driverReady && status ? (
           <InlineNotice
             tone="destructive"
             icon={<IconExclamationCircle size={16} />}
-            eyebrow="Bundled driver unavailable"
-            body={
-              status.error ||
-              "This build does not contain the pinned Computer use driver. Reinstall or update Clovy."
-            }
+            eyebrow={t("settingsPanels.computerUse.driverUnavailableTitle")}
+            body={status.error || t("settingsPanels.computerUse.driverUnavailableBody")}
           />
         ) : null}
 
         {enabled ? (
           <div className="computer-use-setup">
+            <p className="computer-use-message">{t("settingsPanels.computerUse.inputMode")}</p>
+            {windows ? (
+              <InlineNotice
+                tone="info"
+                body={
+                  status?.ready
+                    ? t("settingsPanels.computerUse.windowsReady")
+                    : status?.error || t("settingsPanels.computerUse.windowsRequirements")
+                }
+              />
+            ) : null}
             {permissionsMissing ? (
               <section
                 className="computer-use-permission-assistant"
@@ -361,18 +322,28 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
               >
                 <div className="computer-use-permission-assistant-header">
                   <div className="computer-use-permission-assistant-copy">
-                    <span className="computer-use-permission-step">Step {permissionStep} of 2</span>
-                    <h4 id="add-clovy-macos">Allow {permissionLabel(nextPermission)}</h4>
+                    <span className="computer-use-permission-step">
+                      {t("settingsPanels.computerUse.step", {
+                        step: String(permissionStep),
+                        total: "2",
+                      })}
+                    </span>
+                    <h4 id="add-clovy-macos">
+                      {nextPermission === "accessibility"
+                        ? t("settingsPanels.computerUse.allowAccessibility")
+                        : t("settingsPanels.computerUse.allowScreenRecording")}
+                    </h4>
                     {nextPermission === "accessibility" ? (
                       <p>
-                        Open System Settings, find <strong>Clovy Computer Use Driver</strong>, and
-                        turn it on. Then return to Clovy. This page updates automatically.
+                        {tRich("settingsPanels.computerUse.accessibilityHelp", {
+                          strong: (chunks) => <strong>{chunks}</strong>,
+                        })}
                       </p>
                     ) : (
                       <p>
-                        Open System Settings, find <strong>Clovy</strong>, and turn it on. macOS
-                        assigns Screen recording to Clovy itself. Then return here. This page
-                        updates automatically.
+                        {tRich("settingsPanels.computerUse.screenRecordingHelp", {
+                          strong: (chunks) => <strong>{chunks}</strong>,
+                        })}
                       </p>
                     )}
                   </div>
@@ -381,27 +352,33 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
                     className="btn btn-primary computer-use-permission-primary-action"
                     onClick={() => void openPermissionSettings(nextPermission)}
                   >
-                    Open {permissionLabel(nextPermission)} settings
+                    {nextPermission === "accessibility"
+                      ? t("settingsPanels.computerUse.openAccessibilitySettings")
+                      : t("settingsPanels.computerUse.openScreenRecordingSettings")}
                   </button>
                 </div>
 
                 <div className="computer-use-permission-helper">
                   <div className="computer-use-permission-helper-copy">
                     <strong>
-                      {nextPermission === "accessibility" ? "Driver" : "Clovy"} is not in the list?
+                      {nextPermission === "accessibility"
+                        ? t("settingsPanels.computerUse.driverNotListed")
+                        : t("settingsPanels.computerUse.clovyNotListed")}
                     </strong>
                     <p>
-                      Drag {nextPermission === "accessibility" ? "the helper" : "Clovy"} below into
-                      the open System Settings list, then turn it on.
+                      {nextPermission === "accessibility"
+                        ? t("settingsPanels.computerUse.dragHelperBelow")
+                        : t("settingsPanels.computerUse.dragClovyBelow")}
                     </p>
                   </div>
                   <button
                     ref={permissionDragRef}
                     type="button"
                     className="computer-use-permission-drag-card"
-                    aria-label={`Drag ${
-                      nextPermission === "accessibility" ? "Clovy Computer Use Driver" : "Clovy"
-                    } to the open System Settings list`}
+                    aria-label={t("settingsPanels.computerUse.dragAria", {
+                      name:
+                        nextPermission === "accessibility" ? "Clovy Computer Use Driver" : "Clovy",
+                    })}
                     onClick={() => void openPermissionSettings(nextPermission)}
                   >
                     <span className="computer-use-permission-drag-icon" aria-hidden>
@@ -411,75 +388,55 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
                       <strong>
                         {nextPermission === "accessibility" ? "Clovy Computer Use Driver" : "Clovy"}
                       </strong>
-                      <span>Drag into System Settings</span>
+                      <span>{t("settingsPanels.computerUse.dragInto")}</span>
                     </span>
                   </button>
                 </div>
               </section>
             ) : null}
 
-            <section
-              className="computer-use-requirements"
-              aria-labelledby="computer-use-requirements"
-            >
-              <h4 id="computer-use-requirements" className="computer-use-requirements-heading">
-                Setup progress
-              </h4>
-              <div className="computer-use-requirement">
-                <span className="computer-use-requirement-icon" data-ready={status?.accessibility}>
-                  {status?.accessibility ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>Accessibility</strong>
-                  <span>{requirementState(status?.accessibility === true, enabled)}</span>
-                </span>
-              </div>
-              <div className="computer-use-requirement">
-                <span
-                  className="computer-use-requirement-icon"
-                  data-ready={status?.screenRecording}
-                >
-                  {status?.screenRecording ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>Screen recording</strong>
-                  <span>{requirementState(status?.screenRecording === true, enabled)}</span>
-                </span>
-              </div>
-              <div className="computer-use-requirement">
-                <span
-                  className="computer-use-requirement-icon"
-                  data-ready={status?.modelSupportsVision}
-                >
-                  {status?.modelSupportsVision ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>Vision-capable model</strong>
-                  <span>{status?.generationModel || "No model selected"}</span>
-                </span>
-                {!status?.modelSupportsVision ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost computer-use-inline-action"
-                    onClick={onOpenModels}
+            {!windows ? (
+              <section
+                className="computer-use-requirements"
+                aria-labelledby="computer-use-requirements"
+              >
+                <h4 id="computer-use-requirements" className="computer-use-requirements-heading">
+                  {t("settingsPanels.computerUse.setupProgress")}
+                </h4>
+                <div className="computer-use-requirement">
+                  <span
+                    className="computer-use-requirement-icon"
+                    data-ready={status?.accessibility}
                   >
-                    Choose model
-                  </button>
-                ) : null}
-              </div>
-            </section>
+                    {status?.accessibility ? (
+                      <IconCircleCheck size={15} aria-hidden />
+                    ) : (
+                      <IconExclamationCircle size={15} aria-hidden />
+                    )}
+                  </span>
+                  <span className="computer-use-requirement-copy">
+                    <strong>{t("settingsPanels.computerUse.accessibility")}</strong>
+                    <span>{requirementState(status?.accessibility === true, enabled)}</span>
+                  </span>
+                </div>
+                <div className="computer-use-requirement">
+                  <span
+                    className="computer-use-requirement-icon"
+                    data-ready={status?.screenRecording}
+                  >
+                    {status?.screenRecording ? (
+                      <IconCircleCheck size={15} aria-hidden />
+                    ) : (
+                      <IconExclamationCircle size={15} aria-hidden />
+                    )}
+                  </span>
+                  <span className="computer-use-requirement-copy">
+                    <strong>{t("settingsPanels.computerUse.screenRecording")}</strong>
+                    <span>{requirementState(status?.screenRecording === true, enabled)}</span>
+                  </span>
+                </div>
+              </section>
+            ) : null}
 
             <div className="computer-use-actions">
               <button
@@ -489,7 +446,7 @@ export function ComputerUseControl({ onOpenModels, onOpenBilling }: ComputerUseC
                 onClick={() => void stop()}
               >
                 <IconStop size={14} aria-hidden />
-                Stop current task
+                {t("settingsPanels.computerUse.stopTask")}
               </button>
             </div>
           </div>

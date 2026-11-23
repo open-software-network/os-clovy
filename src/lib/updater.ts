@@ -1,8 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-/** The two release streams. Wire form matches the Rust `ReleaseChannel`. */
-export type ReleaseChannel = "stable" | "rc";
-
 /**
  * Download progress streamed from the `install_update` command, shaped to match
  * the Rust `DownloadEvent` enum (`{ event, data }`). Defined here, at the IPC
@@ -11,9 +8,13 @@ export type ReleaseChannel = "stable" | "rc";
 export type DownloadEvent =
   | { event: "Started"; data: { contentLength?: number } }
   | { event: "Progress"; data: { chunkLength: number } }
-  | { event: "Finished" };
+  | { event: "Finished" }
+  // Downloaded; the install waits for a recording or dictation to end.
+  | { event: "WaitingForCapture" }
+  // The install took its slot: it can no longer be postponed.
+  | { event: "Installing" };
 
-/** What `fetch_update` reports: enough to prompt, not the live update handle. */
+/** What `fetch_update` reports: enough to offer, not the live update handle. */
 type UpdateMeta = {
   version: string;
   body?: string;
@@ -21,10 +22,9 @@ type UpdateMeta = {
 
 /**
  * A frontend-facing update. The real `Update` stays in Rust (it can't be
- * serialized across IPC and only Rust can drive a channel-specific endpoint),
- * so `downloadAndInstall` is a thin bridge to the `install_update` command —
- * shaped to satisfy update-decision.ts's `UpdaterUpdate` so the surrounding
- * prompt/throttle/relaunch flow is unchanged.
+ * serialized across IPC), so `downloadAndInstall` is a thin bridge to the
+ * `install_update` command, shaped to satisfy update-decision.ts's
+ * `UpdaterUpdate`.
  */
 export type ClovyUpdate = {
   version: string;
@@ -32,43 +32,23 @@ export type ClovyUpdate = {
   downloadAndInstall: (onEvent?: (event: DownloadEvent) => void) => Promise<void>;
 };
 
-export function getReleaseChannel(): Promise<ReleaseChannel> {
-  return invoke<ReleaseChannel>("get_release_channel");
+/** Only a release build checks; a development build never does. */
+export function updatesEnabled(): Promise<boolean> {
+  return invoke<boolean>("updates_enabled");
 }
 
-export function setReleaseChannel(channel: ReleaseChannel): Promise<void> {
-  return invoke("set_release_channel", { channel });
-}
-
-async function fetchClovyUpdate(reconcile: boolean): Promise<ClovyUpdate | null> {
-  const meta = await invoke<UpdateMeta | null>("fetch_update", { reconcile });
+/**
+ * Checks the one stable manifest configured in `tauri.conf.json`. The endpoint
+ * and the public key never travel through the frontend.
+ */
+export async function checkClovyUpdate(): Promise<ClovyUpdate | null> {
+  const meta = await invoke<UpdateMeta | null>("fetch_update");
   if (!meta) return null;
   return {
     version: meta.version,
     body: meta.body,
     downloadAndInstall: (onEvent) => installStagedUpdate(onEvent),
   };
-}
-
-/**
- * Checks for an update on the user's selected channel. The channel itself is
- * resolved Rust-side (from persisted state), so no channel argument is needed
- * and the check can never disagree with the saved setting. `reconcile` is false:
- * every routine check (launch/periodic/manual) is forward-only.
- */
-export function checkClovyUpdate(): Promise<ClovyUpdate | null> {
-  return fetchClovyUpdate(false);
-}
-
-/**
- * The one-time escape from a prerelease build back onto stable, run only when the
- * user switches the channel to stable. Passing `reconcile=true` lets Rust offer an
- * *older* stable so leaving the rc channel drops you back onto the stable line
- * instead of stranding you on the rc build (Q4-Q6). Only meaningful on the stable
- * channel; Rust ignores it on rc so rc iteration ordering is never disturbed.
- */
-export function reconcileToStable(): Promise<ClovyUpdate | null> {
-  return fetchClovyUpdate(true);
 }
 
 function installStagedUpdate(onEvent?: (event: DownloadEvent) => void): Promise<void> {
@@ -78,12 +58,21 @@ function installStagedUpdate(onEvent?: (event: DownloadEvent) => void): Promise<
 }
 
 /**
- * Relaunches Clovy to finish a staged update. Routes through the Rust
- * `relaunch_for_update` command instead of the plugin `relaunch()` so Clovy's
+ * Stops an install that waits for a capture to end. The pending
+ * `install_update` call then rejects with `update_install_postponed`. Rejects
+ * with `update_install_started` once the install has begun.
+ */
+export function postponeUpdateInstall() {
+  return invoke("postpone_update_install");
+}
+
+/**
+ * Relaunches Clovy to finish an installed update. Routes through the Rust
+ * `relaunch_for_update` command instead of a plain process relaunch so Clovy's
  * child processes (the dictation helper and agent harness) are torn down
- * before the process restarts. A bare relaunch can skip that teardown and orphan
- * the helper, which then blocks the new instance from reading permissions
- * (JUN-338).
+ * before the process restarts. A bare relaunch can skip that teardown and
+ * orphan the helper, which then blocks the new instance from reading
+ * permissions.
  */
 export function relaunchClovy() {
   return invoke("relaunch_for_update");

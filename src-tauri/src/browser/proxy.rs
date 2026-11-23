@@ -1,6 +1,6 @@
-//! Pinning forward proxy for the managed browser (JUN-289).
+//! Pinning forward proxy for Clovy's private browser.
 //!
-//! The managed transport launches the detected browser with
+//! The private transport launches its pinned Chrome with
 //! `--proxy-server=http://127.0.0.1:<port>` pointed here, so every browser
 //! connection - first navigation, every redirect hop, every subresource, and
 //! the CONNECT for https/wss - flows through this proxy. For each connection
@@ -67,8 +67,15 @@ impl PinningProxy {
 
         let accept_blocks = blocks.clone();
         let accept_task = tokio::spawn(async move {
+            // Own every CONNECT tunnel as well as the listener. Revocation
+            // must also close an already established connection.
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let stream = match listener.accept().await {
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
+                let stream = match accepted {
                     Ok((stream, _peer)) => stream,
                     // A broken loopback listener will not recover; stop cleanly.
                     Err(_) => break,
@@ -76,7 +83,7 @@ impl PinningProxy {
                 let resolver = resolver.clone();
                 let config = config.clone();
                 let blocks = accept_blocks.clone();
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     // Errors are per-connection and carry no reportable content;
                     // the socket simply closes.
                     let _ = handle_connection(stream, resolver, config, blocks).await;
@@ -116,6 +123,50 @@ impl PinningProxy {
 impl Drop for PinningProxy {
     fn drop(&mut self) {
         self.accept_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    struct FixtureResolver(SocketAddr);
+    impl Resolver for FixtureResolver {
+        fn resolve<'a>(
+            &'a self,
+            _host: &'a str,
+            _port: u16,
+        ) -> crate::browser::BoxFuture<'a, std::io::Result<Vec<SocketAddr>>> {
+            Box::pin(async move { Ok(vec![self.0]) })
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_closes_an_already_established_connect_tunnel() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = PinningProxy::start(
+            Arc::new(FixtureResolver(upstream.local_addr().unwrap())),
+            PolicyConfig {
+                allow_loopback: true,
+            },
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+            .await
+            .unwrap();
+        client
+            .write_all(b"CONNECT fixture.invalid:443 HTTP/1.1\r\nHost: fixture.invalid:443\r\n\r\n")
+            .await
+            .unwrap();
+        let (_peer, _) = upstream.accept().await.unwrap();
+        let mut response = [0; 256];
+        let count = client.read(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response[..count]).contains("200"));
+        proxy.shutdown();
+        let count = timeout(Duration::from_secs(1), client.read(&mut response))
+            .await
+            .expect("an established tunnel survived revocation")
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
 

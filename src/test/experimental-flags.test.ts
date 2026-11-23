@@ -6,7 +6,6 @@ import {
   initializeExperimentalFlags,
   registerExperimentalUnlockClick,
   setExperimentalFlags,
-  useExperimentalFlags,
 } from "../lib/experimental-flags";
 import { BROWSER_ACCESS_REQUEST_TOKEN, hasBrowserAccessRequest } from "../lib/browser-access";
 
@@ -36,8 +35,6 @@ describe("experimental flags", () => {
             request: {
               unlocked: boolean;
               browser_use: boolean;
-              companion_pairing: boolean;
-              companion_computer_use_approvals: boolean;
             };
           }
         ).request;
@@ -45,16 +42,12 @@ describe("experimental flags", () => {
       return {
         unlocked: false,
         browser_use: false,
-        companion_pairing: false,
-        companion_computer_use_approvals: false,
       };
     });
     mocks.listen.mockResolvedValue(() => {});
     await setExperimentalFlags({
       unlocked: false,
       browser_use: false,
-      companion_pairing: false,
-      companion_computer_use_approvals: false,
     });
   });
 
@@ -91,29 +84,9 @@ describe("experimental flags", () => {
     await setExperimentalFlags({
       unlocked: true,
       browser_use: true,
-      companion_pairing: false,
-      companion_computer_use_approvals: false,
     });
 
     expect(hasBrowserAccessRequest(BROWSER_ACCESS_REQUEST_TOKEN)).toBe(true);
-  });
-
-  it("preserves the linked Computer use approval opt-in in full settings writes", async () => {
-    await setExperimentalFlags({
-      unlocked: true,
-      browser_use: true,
-      companion_pairing: true,
-      companion_computer_use_approvals: true,
-    });
-
-    expect(mocks.invoke).toHaveBeenLastCalledWith("experimental_flags_set", {
-      request: {
-        unlocked: true,
-        browser_use: true,
-        companion_pairing: true,
-        companion_computer_use_approvals: true,
-      },
-    });
   });
 
   it("disposes the previous event listener when flags are reinitialized", async () => {
@@ -133,8 +106,6 @@ describe("experimental flags", () => {
     mocks.invoke.mockRejectedValueOnce(new Error("bridge unavailable")).mockResolvedValueOnce({
       unlocked: true,
       browser_use: true,
-      companion_pairing: true,
-      companion_computer_use_approvals: false,
     });
     mocks.listen.mockResolvedValue(() => {});
     const flags = await import("../lib/experimental-flags");
@@ -143,8 +114,6 @@ describe("experimental flags", () => {
     expect(flags.getCachedExperimentalFlags()).toEqual({
       unlocked: false,
       browser_use: false,
-      companion_pairing: false,
-      companion_computer_use_approvals: false,
     });
 
     const { result, unmount } = renderHook(() => flags.useExperimentalFlags());
@@ -152,51 +121,6 @@ describe("experimental flags", () => {
 
     expect(mocks.invoke).toHaveBeenCalledTimes(2);
     expect(result.current.unlocked).toBe(true);
-    expect(result.current.companionPairingEnabled).toBe(true);
-    unmount();
-  });
-
-  it("keeps Companion pairing effective until restart after it is stored off", async () => {
-    mocks.invoke.mockResolvedValueOnce({
-      unlocked: true,
-      browser_use: false,
-      companion_pairing: false,
-      companion_computer_use_approvals: false,
-      companion_pairing_effective: true,
-    });
-
-    await setExperimentalFlags({
-      unlocked: true,
-      browser_use: false,
-      companion_pairing: false,
-      companion_computer_use_approvals: false,
-    });
-    const { result, unmount } = renderHook(() => useExperimentalFlags());
-
-    expect(result.current.companion_pairing).toBe(false);
-    expect(result.current.companionPairingEnabled).toBe(true);
-    unmount();
-  });
-
-  it("keeps Companion pairing ineffective until restart after it is stored on", async () => {
-    mocks.invoke.mockResolvedValueOnce({
-      unlocked: true,
-      browser_use: false,
-      companion_pairing: true,
-      companion_computer_use_approvals: false,
-      companion_pairing_effective: false,
-    });
-
-    await setExperimentalFlags({
-      unlocked: true,
-      browser_use: false,
-      companion_pairing: true,
-      companion_computer_use_approvals: false,
-    });
-    const { result, unmount } = renderHook(() => useExperimentalFlags());
-
-    expect(result.current.companion_pairing).toBe(true);
-    expect(result.current.companionPairingEnabled).toBe(false);
     unmount();
   });
 });

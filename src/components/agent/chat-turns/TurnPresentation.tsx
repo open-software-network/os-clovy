@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { useT } from "../../../i18n";
 import type { AgentChatPart, AgentChatTurn } from "../../../lib/agent-chat-runtime";
 
 export const TURN_ACTION_TIP_DELAY_MS = 450;
@@ -15,9 +16,10 @@ export function SudoPart({
   part: Extract<AgentChatPart, { type: "sudo" }>;
   [key: string]: unknown;
 }) {
+  const t = useT();
   return (
     <div className="agent-system-notice" data-status={part.status}>
-      {part.reason || "Approval required"}
+      {part.reason || t("chat.approval.required")}
     </div>
   );
 }
@@ -31,6 +33,7 @@ export function SecretPart({
   onSecret: (part: Extract<AgentChatPart, { type: "secret" }>, value: string) => void;
   submitting?: true;
 }) {
+  const t = useT();
   const [value, setValue] = useState("");
   const inputId = useId();
   const disabled = part.status !== "pending" || submitting;
@@ -43,7 +46,7 @@ export function SecretPart({
   );
 
   if (part.status === "resolved") {
-    return <div className="agent-system-notice">Secret request resolved</div>;
+    return <div className="agent-system-notice">{t("chat.secret.resolved")}</div>;
   }
 
   return (
@@ -58,8 +61,8 @@ export function SecretPart({
       }}
     >
       <div className="agent-action-card-body">
-        <label htmlFor={inputId}>Secret required</label>
-        <p>{part.reason || "Clovy needs a secret before it can continue."}</p>
+        <label htmlFor={inputId}>{t("chat.secret.required")}</label>
+        <p>{part.reason || t("chat.secret.fallbackReason")}</p>
         <input
           id={inputId}
           className="dialog-input"
@@ -73,7 +76,7 @@ export function SecretPart({
       </div>
       <div className="agent-approval-actions">
         <button type="submit" className="btn btn-secondary" disabled={!value || disabled}>
-          {submitting ? "Submitting" : "Submit securely"}
+          {submitting ? t("chat.secret.submitting") : t("chat.secret.submit")}
         </button>
         <button
           type="button"
@@ -84,7 +87,7 @@ export function SecretPart({
             onSecret(part, "");
           }}
         >
-          Cancel
+          {t("common.cancel")}
         </button>
       </div>
     </form>

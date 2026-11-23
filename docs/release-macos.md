@@ -1,221 +1,156 @@
-# Releasing Clovy for macOS
+# Building Clovy for macOS
 
-Clovy ships signed, notarized macOS builds with in-app auto-updates through
-`tauri-plugin-updater`. The source repo stays private; update artifacts,
-signatures, the DMG, and `latest.json` are published to the public
-`open-software-network/os-june-releases` repo.
+Releases come from `.github/workflows/release.yml`
+([ADR-0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md)):
+by default, a tag `vX.Y.Z` (or a manual run naming it) builds the universal Mac
+app and the Windows installer, signs the updater packages with the owner's key and publishes
+a GitHub release on `guilhermexp/os-clovy` with `Clovy_universal.dmg`,
+`Clovy.app.tar.gz`, its `.sig`, the Windows `*-setup.exe`, its `.sig` and
+`latest.json`. A manual run defaults to `dry_run=true`: it builds and keeps the
+files as run artifacts and publishes nothing.
 
-`Clovy_*` names are canonical release artifacts. The existing release
-repository, June-named artifact aliases, and installed `June.app` path remain
-compatibility identities under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
-The bundle keeps `CFBundleDisplayName=June` in its base `Info.plist` so macOS
-recognizes that the physical `June.app` path has not been renamed, then maps the
-localized display name to Clovy through `en.lproj/InfoPlist.strings`. Finder and
-newly pinned Dock items therefore present Clovy while updater and permission
-continuity stay attached to `June.app`. A Dock item pinned before the rebrand
-may retain its own cached `June` label after an in-place update. macOS exposes
-no supported application API for rewriting that per-user Dock state; remove the
-old item and choose **Keep in Dock** again once to refresh it to Clovy.
+The build is `Clovy.app` (bundle identifier `dev.guilhermexp.clovy`,
+executable `clovy`), per
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md).
+`node scripts/verify-macos-app-name.mjs <path-to-Clovy.app>` checks the bundle
+name, identifier, executable and the name Finder shows. A release starts with
+an empty profile: only a development build migrates the June-era dev profile.
+
+## Publishing a release
+
+1. On `main`: `pnpm version:bump X.Y.Z`, commit `release: vX.Y.Z`.
+2. Push the tag `vX.Y.Z`. The `version` job fails before any build when the tag
+   differs from the four version files or a release for it already exists.
+3. When all selected builds pass, `publish` creates the release. A failed or
+   cancelled required job publishes nothing; fix it before retrying.
+
+The non-secret repository variable `CLOVY_RELEASE_PLATFORMS` selects `all`
+(the default when unset) or `macos`. The `version` job captures and validates it
+once. Windows job selection, publication eligibility and manifest generation
+all use that validated output, even if the variable changes during the run.
+Unknown values stop the workflow before building. In `all`, both platform jobs
+must succeed. In `macos`, macOS must succeed and Windows must be skipped;
+Windows certificate preparation does not run. Manual `dry_run=true` still
+builds and keeps artifacts without publishing.
+
+Version 0.1.6 is temporarily selected for macOS only while Windows awaits a
+valid signing certificate. Before triggering that publication, the owner records
+the previous value (or absence) of `CLOVY_RELEASE_PLATFORMS`, selects `macos`,
+and restores the recorded state after the run. This is a CI selection, with no
+change to signing requirements. The release contains `Clovy_universal.dmg`,
+`Clovy.app.tar.gz`, its `.sig` and `latest.json` with exactly `darwin-aarch64`
+and `darwin-x86_64`. It contains no new Windows installer or Windows manifest
+entry, and never relabels a previous Windows package as 0.1.6.
+
+For local metadata generation, `scripts/release-manifest.mjs --platforms macos`
+requires all three Mac artifacts. Omitting the option uses `all` and still
+requires the Windows installer and its signature; missing artifacts never
+silently reduce the selected platforms. Updater signing remains required in CI.
+
+The macOS job installs both Apple target standard libraries for stable and for
+the desktop engine's pinned Rust 1.89.0 (`agent-desktop` source commit
+`9eb9b296`). Its own `rust-toolchain.toml` selects that version: installing
+the universal targets only on stable does not supply them to the engine.
+The subsequent stable setup remains the default for the Clovy host.
+
+The MCP relay's architecture check passes the binary path before
+`-verify_arch` and its architecture list. Xcode 16's `lipo` treats a trailing
+path as another architecture, even though newer Xcode versions accept it.
+Keep that check enabled: both real slices must validate before combining
+and signing the universal relay.
+
+To roll back, delete the bad release (`gh release delete vX.Y.Z`): `latest`
+falls back to the previous one. Installs that already updated reinstall the
+previous `.dmg` by hand.
+
+## Updater key
+
+The updater packages are signed with the owner's minisign key. The private key
+and its password are the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, with a local copy in
+`~/.config/clovy/updater.key` and `~/.config/clovy/updater.key.password`
+(mode 0600). Keep a backup of both files outside this machine: an install only
+accepts packages signed by the key whose public half is in
+`plugins.updater.pubkey`, so losing it means reinstalling Clovy by hand
+everywhere. The public key also sits in `~/.config/clovy/updater.key.pub`.
+
+## Apple signing is optional
+
+`scripts/build-macos-release.sh` (`pnpm tauri:build:release-mac`) decides from
+the variables present, read from the environment (CI) or `.env.signing`
+(local). `scripts/build-macos-release.sh --check` prints the plan without
+building:
+
+| Variables | Result |
+|---|---|
+| none | ad hoc signature, no notarization |
+| `APPLE_SIGNING_IDENTITY` | app, helpers and DMG signed with that identity |
+| identity plus `APPLE_API_ISSUER`, `APPLE_API_KEY` and one of `APPLE_API_KEY_PATH`, `APPLE_API_KEY_P8`, `APPLE_API_KEY_P8_BASE64` | signed, then the DMG is notarized and stapled |
+| `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) | adds `src-tauri/tauri.release.conf.json`: `Clovy.app.tar.gz` and its `.sig` |
+
+In CI, `APPLE_CERTIFICATE` (base64 `.p12`) and `APPLE_CERTIFICATE_PASSWORD`
+import the identity into a throwaway keychain; locally the identity is read
+from the login keychain as it is. Notarization settings without an identity, or
+an incomplete set, fail before the build. Adding the Apple secrets to the
+repository is the only change needed to ship signed and notarized builds.
+
+The script exports `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` (the Xcode
+27 proc-macro workaround) and leaves the files in
+`src-tauri/target/release-artifacts/macos/` (or `CLOVY_RELEASE_OUT_DIR`).
+
+## Installing an ad hoc build
+
+Until the Apple secrets exist, the release is signed ad hoc and not notarized:
+
+- **First download.** A `.dmg` downloaded in a browser is quarantined, and
+  macOS refuses to open the app. Open it once, then go to System Settings >
+  Privacy & Security and choose "Open Anyway" for Clovy. Updates installed by
+  the app itself are not downloaded through a browser.
+- **Permissions after every update.** An ad hoc signature changes with every
+  build, so macOS treats each update as a new app: it asks again for
+  Microphone, Screen Recording (system audio), Accessibility and the other
+  grants. Grant them again after updating. This goes away once releases are
+  signed with an Apple identity.
+- **No Computer use.** The Computer use driver only accepts a host signed by
+  an Apple team (`computer_use_driver.rs`), so an ad hoc release cannot start
+  it; the release self-test checks only the bundled helper in that case.
 
 ## macOS support
 
 Clovy supports macOS 14.0 and later on Apple Silicon and Intel Macs, including
-macOS 15. Production and staging builds ship as universal macOS apps. System
+macOS 15. Release builds are universal macOS apps. System
 audio capture uses Core Audio process taps and is available only on macOS 14.2
 and later. On macOS 14.0 or 14.1, recording falls back to microphone-only mode.
-The signed Node 24 agent sidecar carries separate `arm64` and `x86_64`
-executables that are combined into one universal binary. Release builds verify
-both architectures, the sidecar checksum, and startup from a path with spaces
-before the universal app is assembled.
+Chat uses the user's installed CLI. The app bundles the `clovy-mcp` relay and
+native helpers, without a separate model-and-tool loop executable.
 
-The first updater-capable build must be installed manually once — earlier builds
-ship without the updater, so they can't pull it in — and every release after that
-updates in place. Choose the release version per semver when you run the release
-workflow; don't hard-code a specific number in this runbook.
+## Build
 
-## One-time prerequisites
-
-Create or confirm these before cutting the first updater release:
-
-- Public GitHub repo: `open-software-network/os-june-releases`.
-- Release GitHub App (org-owned) installed on the public releases repo with
-  `contents:write`, exposed as `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`.
-  The workflow mints a short-lived, repo-scoped token from it at run time
-  (replaces the old `RELEASES_REPO_TOKEN` PAT). The same App can later be added
-  as a ruleset bypass actor when `main` is protected.
-- Apple signing secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
-  `APPLE_SIGNING_IDENTITY`.
-- Apple notarization API secrets: `APPLE_API_ISSUER`, `APPLE_API_KEY`,
-  `APPLE_API_KEY_P8`.
-- Updater signing secrets: `TAURI_SIGNING_PRIVATE_KEY` and, when the key is
-  password-protected, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-- Production runtime secrets: `PRODUCTION_OS_ACCOUNTS_URL`,
-  `PRODUCTION_OS_ACCOUNTS_API_URL`, `PRODUCTION_OS_ACCOUNTS_CLIENT_ID`, and
-  `PRODUCTION_CLOVY_API_URL`.
-- Slack incoming-webhook secret: `SLACK_WEBHOOK_URL`, configured for the release
-  announcements channel. An absent or failing webhook warns but does not fail an
-  otherwise successful RC build.
-- Optional fast release runner: a dedicated self-hosted Mac Studio runner with
-  the `desktop-release` label. See
-  [desktop-release-runner.md](desktop-release-runner.md).
-
-The updater keypair is separate from the Apple Developer ID certificate. The
-public key is embedded in `src-tauri/tauri.conf.json`; the private key must live
-only in CI secrets and the team password manager. Losing the private key
-permanently breaks auto-update for all builds signed with its public key.
-
-Generate a keypair with:
+The local release recipe (frontend tooling and the Xcode strip workaround) is
+in `AGENTS.md` under **Build**; it produces an
+unsigned-updater build for local use. For the release files, with the updater
+key and an ad hoc signature unless Apple variables are set:
 
 ```sh
-pnpm tauri signer generate --write-keys keys/os-june-updater.key
+PATH="$HOME/.local/share/node-official/node24/bin:$PATH" pnpm tauri:build:release-mac
 ```
 
-Do not commit `keys/`. Copy the private key contents into
-`TAURI_SIGNING_PRIVATE_KEY`, copy the password into
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if one was used, back both up, and embed
-the `.pub` contents as the updater `pubkey`.
+Release builds are universal, so the `rustc` first on `PATH` must have the
+`x86_64-apple-darwin` standard library. Homebrew's `rustc` does not; put the
+rustup toolchain first (`PATH="$(dirname "$(rustup which rustc)"):$PATH"`) after
+`rustup target add x86_64-apple-darwin`.
 
-## Cutting a production release
+With Finder's "Show all filename extensions" on, macOS displays every app as
+`<name>.app`; `verify-macos-app-name.mjs` then expects `Clovy.app`.
 
-Releases go through the release-candidate channel: build an RC, test it via the
-in-app updater, then promote it to stable. There is no direct stable-build path.
+## Validating a built app
 
-### 1. Build a release candidate
-
-```text
-GitHub Actions -> rc-desktop-release -> Run workflow
-  base-version = X.Y.Z   (the version you are heading toward)
-  rc-number    = 1        (2, 3, ... for later candidates)
-  macos-runner = mac-studio
-```
-
-`rc-desktop-release` builds a signed + notarized `universal-apple-darwin` app at
-version `X.Y.Z-rc.N` (bundling both agent sidecar architectures), and publishes it to a fixed
-`rc` prerelease in `open-software-network/os-june-releases` with `latest-rc.json`.
-The fixed `Clovy_universal.dmg` asset follows the current RC, while
-`June_universal.dmg` remains an updater compatibility alias and
-an immutable versioned DMG remains available for each Slack announcement. The
-versioned asset is uploaded without replacement before the fixed RC release
-channel aliases; reuse a higher RC number if that append-only upload already
-exists. The workflow records the source commit in `rc-build.json` (so promote can
-rebuild the same tree) and does NOT touch `main`. It also fails closed if it
-cannot read the current RC metadata, preserving the RC release channel's
-forward-only ordering.
-After the desktop asset publishes, the extension release job compares its build
-inputs with the latest stable extension. Changed inputs are packaged, attached
-to the same fixed `rc` release, and submitted to Chrome for deferred publication;
-unchanged inputs make no store write. See
-[release-extension.md](release-extension.md).
-
-### 2. Test the candidate
-
-In the app: Settings -> About -> Release channel -> Release candidate, then check
-for updates. The app follows `latest-rc.json` and installs the RC. Iterate with a
-higher `rc-number` until it is good.
-
-### 3. Promote to stable
-
-```text
-GitHub Actions -> promote-desktop-release -> Run workflow
-  rc-version = X.Y.Z-rc.N   (required; must match the current rc release exactly)
-  macos-runner = mac-studio
-```
-
-`rc-version` is required and must equal the version the `rc` release currently
-holds; a mismatch (or a blank field) fails the run, so you can never promote a
-different candidate than you intend.
-
-Before the macOS stable build starts, promotion also freezes and verifies the RC
-extension metadata. If the extension changed, Chrome must have approved that
-exact package into `STAGED`; pending review or any version/hash mismatch blocks
-the whole stable release. After the desktop release succeeds, the same reviewed
-extension package is published to stable. Allow for Chrome review time when
-planning a release.
-
-`promote-desktop-release` checks out the exact commit the RC was built from,
-stamps the clean `X.Y.Z`, and reruns the full sign + notarize path, so stable
-ships the same source you tested with a clean version string. It then:
-
-- publishes the `vX.Y.Z` stable release (marked latest) with the DMG, updater
-  archive + signature, a regenerated `latest.json`, and a `stable-build.json`
-  recording the source commit and asset SHA-256 values (so the Windows build
-  reuses the same tree); the release stays draft until every asset verifies and
-  those hashes are frozen in an immutable pre-publication workflow artifact;
-- publishes the exact staged extension (or rechecks unchanged store state)
-  immediately after the desktop release boundary;
-- generates the changelog (first-parent commits since the previous `release: v...`)
-  and embeds it in both the GitHub release notes and `latest.json`;
-- updates the Homebrew tap and commits `release: vX.Y.Z` directly to `main`
-  only after the extension step succeeds (the release bot is on the
-  branch-protection bypass list), advancing the version files so the next RC's
-  gate and the next changelog can anchor on it. The tap DMG must match immutable
-  signing-job provenance. No PR to merge.
-
-If publication succeeds but its job loses the response, rerun the failed
-`publish-desktop` job in that same workflow run. It reuses the pre-publication
-artifact and fails if any public release byte changed. Starting a new promotion
-against an already-public version is deliberately rejected.
-
-### 4. Cut the Windows release
-
-The version bump lands on `main` automatically, so there is nothing to merge.
-The Windows release rebuilds from the commit recorded in `stable-build.json`, so
-it does not depend on the bump and can run as soon as promote finishes (see
-`release-windows.md`).
-
-## Release notifications
-
-Stable releases are announced in Slack by the org's GitHub Slack app. Subscribe
-the release announcements channel once with:
-
-```text
-/github subscribe open-software-network/os-june-releases releases
-```
-
-It posts when a `vX.Y.Z` stable release is published. RC builds reuse the fixed
-`rc` release tag and are edited in place rather than re-published, so the
-`rc-desktop-release` workflow posts each successful candidate through
-`SLACK_WEBHOOK_URL` after its release assets are available. The webhook message
-links the source commit, that candidate's immutable versioned macOS DMG, and the
-fixed `rc` release page. Delivery uses one bounded attempt and reports its result
-in the Actions summary. It remains best effort and never turns a successfully
-published candidate into a failed release run. If delivery is unconfirmed, check
-Slack before posting manually; automatically retrying an incoming webhook could
-duplicate an announcement when Slack accepted the request but its response was
-lost.
-
-The app polls:
-
-```text
-https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json
-```
-
-That endpoint is baked into shipped builds. Keep it alive until every install
-that points at it has aged out or updated.
-
-## Local fallback build
-
-`scripts/build-signed-dmg.sh` remains as a fallback until a CI-built,
-updater-delivered build passes Gatekeeper assessment and relaunches cleanly.
-Use it only if the `tauri-action` path is blocked:
+Run these against the built app (an ad hoc build fails the `spctl` and
+`stapler` lines by design; they apply to a notarized build):
 
 ```sh
-pnpm tauri:build:signed-dmg
-```
-
-Do not delete the fallback script until the first production updater release has
-been installed over a previous updater-capable build and relaunched successfully.
-
-## First updater release validation
-
-After the workflow publishes a release, download the DMG from
-`open-software-network/os-june-releases`, install the app into
-`/Applications`, and run:
-
-```sh
-APP="/Applications/June.app"
-DMG="$HOME/Downloads/Clovy_universal.dmg"
+APP="<path to the built Clovy.app>"
+DMG="<path to the built Clovy_universal.dmg>"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 spctl --assess --type execute --verbose "$APP"
@@ -223,21 +158,15 @@ spctl --assess --type install --verbose "$DMG"
 xcrun stapler validate "$APP"
 xcrun stapler validate "$DMG"
 plutil -extract CFBundleURLTypes xml1 -o - "$APP/Contents/Info.plist"
-lipo -archs "$APP/Contents/MacOS/os-june"
-lipo -archs "$APP/Contents/Resources/native/bin/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
-lipo -archs "$APP/Contents/Resources/native/bin/June.app/Contents/MacOS/june-system-audio-recorder"
-RUNTIME="$APP/Contents/Resources/native/bin/clovy-agent-runtime"
-test "$(shasum -a 256 "$RUNTIME" | awk '{print $1}')" = "$(cat "$RUNTIME.sha256")"
-codesign --verify --strict --verbose=2 "$RUNTIME"
-/usr/bin/arch -arm64 "$RUNTIME"
-/usr/bin/arch -x86_64 "$RUNTIME"
+lipo -archs "$APP/Contents/MacOS/clovy"
+lipo -archs "$APP/Contents/Resources/native/bin/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
+lipo -archs "$APP/Contents/Resources/native/bin/Clovy Audio Capture.app/Contents/MacOS/clovy-system-audio-recorder"
 ```
 
-Confirm `osjune` appears in `CFBundleURLSchemes` and each `lipo` command
-prints both `x86_64` and `arm64`. The runtime checksum and signature must pass,
-and both architecture commands must execute successfully. On an
-Apple Silicon validation host, the x86_64 command is a real Rosetta execution,
-not an architecture inferred from file metadata.
+Confirm `clovy` appears in `CFBundleURLSchemes` and each `lipo` command
+prints both `x86_64` and `arm64`. Validate CLI chat independently with an
+installed, signed-in CLI and the isolated debug-app proof described in
+`AGENTS.md`; a bundle architecture check does not prove a model turn.
 
 Also confirm the compatibility path resolves to the Clovy presentation name:
 
@@ -249,35 +178,44 @@ Do not replace this with a raw `CFBundleDisplayName` assertion. Finder requires
 the base display name to match the physical bundle name before it applies the
 localized Clovy value.
 
-The Node sidecar is a separate hardened executable and must retain both
-`com.apple.security.cs.allow-jit` and
-`com.apple.security.cs.allow-unsigned-executable-memory` after the outer app is
-signed. These are the narrow V8 executable-memory exceptions. Do not replace
-them with `disable-executable-page-protection` or disable library validation.
-The release workflow reads the packaged sidecar entitlements and runs both
-architecture slices before notarization.
+The desktop no longer needs V8 executable-memory entitlements for an agent
+process. Preserve the entitlements required by the remaining native helpers.
 
-For the first updater-to-updater validation, install an older updater-capable
-build and pin its June item in the Dock before updating. Run **Clovy -> Check
-for updates…**, confirm the prompt shows the new version and release notes,
-install, and verify the app relaunches without Gatekeeper warnings. Run
-`verify-macos-app-name.mjs` against `/Applications/June.app`, confirm Finder
-shows Clovy, and hover the already-pinned Dock item. Capture the Dock result as
-release evidence. If macOS retained its cached June label, remove the item,
-choose **Keep in Dock** again, and confirm the refreshed item says Clovy.
+## Private browser resources
 
-Also confirm microphone and Accessibility permissions are still granted after
-relaunch. On a clean validation account, capture the microphone and Screen
-Recording permission prompts plus the Privacy & Security and Login Items rows;
-each user-facing name must say Clovy even though the base plist name remains the
-`June.app` compatibility key. During the relaunch, confirm the app remains
-responsive after the command is accepted: the main event loop must return in
-under one second while bounded child cleanup continues off-thread. For the
-forced-child check, stop the tracked `clovy-agent-runtime` process with
-`kill -STOP <pid>` before accepting the update and confirm Clovy still
-relaunches after kill escalation or the five-second aggregate deadline instead
-of showing a permanent beachball.
+The build wrapper prepares both pinned browser artifacts before the desktop
+crate or native helpers are built. `pnpm browser:prepare -- --release` compiles
+the audited agent-browser source commit with the upstream lockfile and Clovy's
+private host patches; it downloads Chrome only from the fixed, digest-checked
+Chrome for Testing URL in `scripts/agent-browser/manifest.json`.
+For a universal bundle, pass `--target universal-apple-darwin` to prepare both
+native platform subtrees. Each architecture keeps its matching Chrome tree and
+engine executable under `native/agent-browser/<platform>/`.
 
-If any signing, notarization, updater signature, Gatekeeper, or relaunch check
-fails, do not promote the release. Keep the fallback build path until the CI
-path is proven with a real updater-delivered relaunch.
+The macOS overlay removes the inherited browser entry from `bundle.resources`
+with a JSON merge patch `null` and copies `../resources/agent-browser` through
+`bundle.macOS.files` to `Resources/native/agent-browser`. Tauri CLI 2.11.3
+preserves file and directory symlinks on this copy path, including the versioned
+Chrome framework links; the generic resources copier does not. Other native
+helpers keep their existing resource entries. Runtime paths stay the same.
+Tauri copies these files before signing the enclosing app, then uses that same
+final app for the DMG and updater tar archive (which does not follow symlinks).
+Do not repair or re-sign just one packaged artifact after bundling.
+
+Preparation signs Mach-O files, nested frameworks and apps from the inside out
+with `APPLE_SIGNING_IDENTITY`, or ad hoc when absent, preserving Chrome's
+entitlements. The engine is signed with the same build identity. The staged
+provenance hashes cover the signed output, including symlinks and permissions.
+The dependency SBOM and license notices ship beside the executable. Release
+Cargo builds reject missing or modified resources; plain debug Cargo directory
+creation cannot make a release browser-ready. Validate the prepared resources
+with `pnpm browser:prepare -- --release --check` (and the matching `--target`
+for a universal release). macOS signature/notarization and live persistent-login
+acceptance must be performed on a Mac; Linux preparation does not prove them.
+
+Signing does not change Chromium's native Safe Storage namespace. The current
+pinned source/packaging does not establish the required `-dev` Keychain service
+for persistent development/proof runs. Keep those runs blocked before launch
+until a supported namespace integration is reviewed and qualified; changing
+only the bundle id/profile path or using persistent mock/basic crypto does not
+meet that boundary. See the development runbook's pinned-browser section.

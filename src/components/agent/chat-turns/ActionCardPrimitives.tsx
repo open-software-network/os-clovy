@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useT } from "../../../i18n";
 import type { AgentApprovalChoice } from "../../../lib/agent-chat-runtime";
 
 export function ResolvedActionRow({
@@ -100,6 +101,7 @@ export function CollapsibleActionCard({
   /** Supplementary body revealed on expand (never the command). */
   children: ReactNode;
 }) {
+  const t = useT();
   return (
     <article
       className="agent-approval-card agent-action-card"
@@ -127,7 +129,7 @@ export function CollapsibleActionCard({
           aria-expanded={expanded}
           onClick={onToggleExpanded}
         >
-          Details
+          {t("chat.approval.details")}
           <IconChevronDownSmall size={14} className="agent-disclosure-chevron" aria-hidden />
         </button>
       ) : null}
@@ -145,12 +147,17 @@ export function CollapsibleActionCard({
 export function ApproveSplitButton({
   disabled,
   allowPermanent,
+  scopeMenu = true,
   onChoice,
 }: {
   disabled: boolean;
   allowPermanent?: boolean;
+  /** `false` drops the scope caret: the request can only be approved once
+   * (approvals asked by a CLI turn grant nothing beyond the call). */
+  scopeMenu?: boolean;
   onChoice: (choice: AgentApprovalChoice) => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -187,9 +194,9 @@ export function ApproveSplitButton({
   }, [open]);
 
   const items: { choice: AgentApprovalChoice; label: string }[] = [
-    { choice: "once", label: "Approve once" },
+    { choice: "once", label: t("chat.approval.approveOnce") },
     ...(allowPermanent
-      ? [{ choice: "always" as AgentApprovalChoice, label: "Always approve" }]
+      ? [{ choice: "always" as AgentApprovalChoice, label: t("chat.approval.alwaysApprove") }]
       : []),
   ];
 
@@ -230,26 +237,28 @@ export function ApproveSplitButton({
         disabled={disabled}
         onClick={() => onChoice("once")}
       >
-        Approve
+        {t("chat.approval.approve")}
       </button>
-      <button
-        ref={scopeRef}
-        type="button"
-        className="agent-approval-scope"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="Approve options"
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <IconChevronDownSmall size={14} aria-hidden />
-      </button>
-      {open ? (
+      {scopeMenu ? (
+        <button
+          ref={scopeRef}
+          type="button"
+          className="agent-approval-scope"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={t("chat.approval.approveOptions")}
+          disabled={disabled}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <IconChevronDownSmall size={14} aria-hidden />
+        </button>
+      ) : null}
+      {scopeMenu && open ? (
         <div
           ref={menuRef}
           className="agent-approval-scope-menu"
           role="menu"
-          aria-label="Approve scope"
+          aria-label={t("chat.approval.approveScope")}
           onKeyDown={onMenuKeyDown}
         >
           {items.map((item) => (

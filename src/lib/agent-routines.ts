@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { invoke } from "@tauri-apps/api/core";
 import { memorySettings } from "./tauri";
 
@@ -92,10 +93,7 @@ function fromDto(dto: AgentRoutineDto): RoutineJob {
     enabled: dto.enabled,
     state: dto.state === "needs_review" ? "paused" : dto.state,
     paused_reason:
-      dto.pausedReason ??
-      (dto.state === "needs_review"
-        ? "This imported routine uses legacy execution settings. Review and recreate it before running."
-        : null),
+      dto.pausedReason ?? (dto.state === "needs_review" ? t("lib.routines.legacyPaused") : null),
     enabled_toolsets: toolsets ?? (unrestricted ? UNRESTRICTED_ROUTINE_TOOLSETS : undefined),
     script: dto.metadata?.legacyScriptPresent ? "legacy-script-disabled" : null,
     no_agent: dto.metadata?.legacyNoAgent ?? false,

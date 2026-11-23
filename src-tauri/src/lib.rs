@@ -1,33 +1,57 @@
 #![recursion_limit = "256"]
 
+pub mod activity;
 pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
-pub mod agent_runtime;
+pub mod agent_sessions;
+pub mod app_identity;
 pub mod app_paths;
+pub mod app_preferences;
+pub mod approval_broker;
 pub mod audio;
+mod background_image;
 pub mod browser;
 mod browser_broker;
+pub mod chat_engine;
 pub mod claude_projects;
-pub mod clovy_api;
+pub mod coding_agents;
 pub mod commands;
-pub mod companion;
 pub mod computer_use;
+#[allow(dead_code)] // Shared by the native helper and desktop ownership paths.
+mod computer_use_cancel;
 mod computer_use_cursor;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Permission entry points are used by the helper binary.
+mod computer_use_macos;
+mod computer_use_owned_runtime;
 mod computer_use_permission_drag;
+mod computer_use_policy;
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Native server and client share the same audited module.
+mod computer_use_windows;
 pub mod connectors;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-mod credential_compat;
+mod credentials;
+pub mod day_intelligence;
 pub mod db;
 pub mod dictation;
 pub mod domain;
-mod env_compat;
 pub mod experimental_settings;
-pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
+pub(crate) mod hide_console;
+mod http_client;
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub mod identity_migration;
 pub mod image_safety;
+pub mod interface_locale;
+pub mod llm;
+mod local_env;
 pub mod macos_menu_icons;
+pub mod main_window;
+pub mod mcp_server;
+mod meeting_assist;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
 pub mod meeting_hud;
@@ -36,12 +60,15 @@ mod note_audio_export;
 mod note_save_flush;
 pub mod notifications;
 pub mod obsidian;
-pub mod os_accounts;
-pub mod p3a;
+mod process_group;
 pub mod providers;
 pub mod routines;
 mod shutdown;
+mod system_browser;
 pub mod theme_icon;
+#[cfg(target_os = "macos")]
+pub mod transcription_model;
+pub mod update_gate;
 pub mod updates;
 pub mod video_download_url;
 
@@ -49,10 +76,8 @@ use serde::Deserialize;
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 
-const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
-const CHECK_FOR_UPDATES_EVENT: &str = "clovy://check-for-updates";
 const CLOSE_TAB_MENU_ID: &str = "close_tab";
 const CLOSE_TAB_EVENT: &str = "clovy://close-tab";
 const CLOSE_WINDOW_MENU_ID: &str = "close_window_main";
@@ -109,6 +134,12 @@ type MainWindowSendEventImp = unsafe extern "C-unwind" fn(
 
 pub fn run() {
     providers::load_local_env();
+    // Before Tauri creates a window (and its WebView store) or opens a
+    // database: the first launch copies the June-era identity (ADR-0068).
+    // Only the macOS development build has a June-era profile to copy; a
+    // release and Windows start clean.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    identity_migration::run_at_startup();
     let context = tauri::generate_context!();
     let mut builder = tauri::Builder::default();
 
@@ -123,12 +154,7 @@ pub fn run() {
     {
         if should_register_single_instance_plugin() {
             builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
+                main_window::show(app);
             }));
         }
     }
@@ -136,31 +162,25 @@ pub fn run() {
     builder
         // deep-link registers immediately after single-instance to keep the
         // single-instance -> deep-link handoff (documented above) adjacent and
-        // obvious; process/updater are order-independent so they follow.
+        // obvious; the updater is order-independent so it follows.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init())
+        // Endpoint and public key come from `plugins.updater` in
+        // tauri.conf.json; only a release build checks (see `updates`).
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. LaunchAgent (not AppleScript) so the entry
         // survives macOS upgrades and shows up under System Settings ->
         // General -> Login Items. Enabling/disabling stays a user action in
         // Settings and onboarding; registering the plugin alone changes
         // nothing.
-        // Keep the June-era autostart entry name stable across the Clovy
-        // presentation rename. Changing this name would strand existing login
-        // items and make an enabled preference appear disabled after update.
         .plugin(
             tauri_plugin_autostart::Builder::new()
-                .app_name("June")
+                .app_name("Clovy")
                 .build(),
         )
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == CHECK_FOR_UPDATES_MENU_ID {
-                let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
-                return;
-            }
             if event.id().as_ref() == CLOSE_TAB_MENU_ID {
                 emit_close_tab_if_main_window_focused(app);
                 return;
@@ -170,53 +190,64 @@ pub fn run() {
                 return;
             }
             if event.id().as_ref() == OPEN_SETTINGS_MENU_ID {
-                #[cfg(target_os = "macos")]
-                show_main_window(app);
+                main_window::show(app);
                 let _ = app.emit(OPEN_SETTINGS_EVENT, ());
             }
         })
         .invoke_handler(tauri::generate_handler![
+            background_image::choose_background_image,
+            background_image::read_background_image,
+            background_image::remove_background_image,
             theme_icon::set_dock_icon,
             print_current_webview,
             commands::bootstrap_app,
-            agent_runtime::api::list_agent_sessions,
-            agent_runtime::api::get_agent_session,
-            agent_runtime::api::get_latest_agent_run,
-            agent_runtime::api::compact_agent_session,
-            agent_runtime::api::create_agent_session,
-            agent_runtime::api::rename_agent_session,
-            agent_runtime::api::branch_agent_session,
-            agent_runtime::api::delete_agent_session,
-            agent_runtime::api::list_agent_items,
-            agent_runtime::api::stage_agent_attachment_bytes,
-            agent_runtime::api::discard_staged_agent_attachments,
-            agent_runtime::api::prune_staged_agent_attachments,
-            agent_runtime::api::start_agent_run,
-            agent_runtime::api::steer_agent_run,
-            agent_runtime::api::cancel_agent_run,
-            agent_runtime::api::retry_agent_run,
-            agent_runtime::api::resolve_agent_interruption,
-            agent_runtime::api::list_agent_artifacts,
-            agent_runtime::api::read_agent_artifact_preview,
-            agent_runtime::api::read_agent_artifact_text,
-            agent_runtime::api::download_agent_artifact,
-            agent_runtime::api::list_agent_skills,
-            agent_runtime::api::read_agent_skill,
-            agent_runtime::api::update_agent_skill,
-            agent_runtime::api::set_agent_skill_enabled,
-            agent_runtime::persona::clovy_persona,
-            agent_runtime::persona::set_clovy_persona,
-            agent_runtime::persona::june_persona,
-            agent_runtime::persona::set_june_persona,
+            meeting_assist::list_recording_marks,
+            meeting_assist::add_recording_mark,
+            meeting_assist::suggest_recording_question,
+            meeting_assist::get_recording_assistance_status,
+            agent_sessions::api::list_agent_sessions,
+            agent_sessions::api::get_agent_session,
+            agent_sessions::api::get_latest_agent_run,
+            agent_sessions::api::create_agent_session,
+            agent_sessions::api::rename_agent_session,
+            agent_sessions::api::branch_agent_session,
+            agent_sessions::api::delete_agent_session,
+            agent_sessions::api::list_agent_items,
+            agent_sessions::api::import_legacy_home_turns,
+            agent_sessions::api::stage_agent_attachment_bytes,
+            agent_sessions::api::discard_staged_agent_attachments,
+            agent_sessions::api::prune_staged_agent_attachments,
+            agent_sessions::api::start_agent_run,
+            agent_sessions::api::cancel_agent_run,
+            agent_sessions::api::retry_agent_run,
+            agent_sessions::api::resolve_agent_interruption,
+            agent_sessions::api::list_agent_artifacts,
+            agent_sessions::api::read_agent_artifact_preview,
+            agent_sessions::api::read_agent_artifact_text,
+            agent_sessions::api::download_agent_artifact,
+            agent_sessions::api::list_agent_skills,
+            agent_sessions::api::read_agent_skill,
+            agent_sessions::api::update_agent_skill,
+            agent_sessions::api::set_agent_skill_enabled,
+            agent_sessions::persona::clovy_persona,
+            agent_sessions::persona::set_clovy_persona,
             agent_recorder::resolve_agent_recorder_request,
-            browser_broker::browser_approvals_pending,
-            browser_broker::browser_approval_respond,
+            agent_recorder::validate_agent_recorder_request,
+            dictation::claim_agent_dictation_delivery,
+            browser_broker::browser_access_get,
+            browser_broker::browser_access_set,
+            browser_broker::browser_sessions,
+            browser_broker::browser_human_takeover,
+            browser_broker::browser_resume_control,
+            browser_broker::browser_stop_session,
             agent_mcp::list_agent_mcp_servers,
             agent_mcp::create_agent_mcp_server,
             agent_mcp::update_agent_mcp_server,
             agent_mcp::delete_agent_mcp_server,
             agent_mcp::test_agent_mcp_server,
             agent_mcp::connect_agent_mcp_oauth,
+            agent_mcp::cancel_agent_mcp_oauth,
+            agent_mcp::disconnect_agent_mcp_oauth,
             routines::list_agent_routines,
             routines::create_agent_routine,
             routines::update_agent_routine,
@@ -227,27 +258,10 @@ pub fn run() {
             routines::list_agent_routine_runs,
             routines::routine_browser_access_get,
             routines::routine_browser_access_set,
-            clovy_api::clovy_home_chat,
-            clovy_api::june_home_chat,
+            commands::app_preferences_get,
+            commands::app_preferences_set,
             commands::experimental_flags_get,
             commands::experimental_flags_set,
-            companion::companion_begin_pairing,
-            companion::companion_pairing_status,
-            companion::companion_approve_pairing,
-            companion::companion_list_devices,
-            companion::companion_list_browse_roots,
-            companion::companion_grant_browse_root,
-            companion::companion_revoke_browse_root,
-            companion::companion_consume_attachments,
-            companion::companion_computer_use_approval_settings,
-            companion::companion_set_computer_use_approval_enabled,
-            companion::companion_rename_device,
-            companion::companion_revoke_device,
-            companion::companion_complete_frontend_request,
-            companion::companion_cancel_frontend_request,
-            companion::companion_publish_agent_event,
-            companion::companion_list_agent_media,
-            companion::companion_read_agent_media_chunk,
             commands::create_note,
             commands::list_notes,
             commands::get_note,
@@ -287,30 +301,14 @@ pub fn run() {
             commands::set_folder_memory_disabled,
             commands::memory_settings,
             commands::set_memory_enabled,
-            commands::submit_issue_report,
-            commands::share_create,
-            commands::share_list,
-            commands::share_get,
-            commands::share_add_invites,
-            commands::share_revoke_invite,
-            commands::share_delete,
-            commands::share_key_save,
-            commands::share_key_get,
-            commands::share_invite_key_save,
-            commands::share_invite_keys_get,
-            commands::get_share_base_url,
             commands::get_microphone_permission_state,
             commands::check_recording_source_readiness,
             commands::open_privacy_settings,
             commands::reveal_path,
-            commands::unpack_bundled_extension,
-            commands::clovy_open_verify_page,
-            commands::clovy_open_community_page,
             commands::clovy_open_external_url,
-            commands::june_open_verify_page,
-            commands::june_open_community_page,
             commands::june_open_external_url,
             commands::start_meeting_recording,
+            commands::detect_meeting_window,
             commands::start_recording,
             commands::pause_recording,
             commands::resume_recording,
@@ -327,6 +325,9 @@ pub fn run() {
             dictation::set_dictation_microphone,
             dictation::set_dictation_style,
             dictation::set_dictation_language,
+            dictation::set_dictation_cleanup,
+            dictation::set_dictation_hud_placement,
+            dictation::dictation_hud_start_drag,
             dictation::dictation_helper_command,
             dictation::dictation_hud_set_stop_bounds,
             dictation::dictation_hud_set_cancel_bounds,
@@ -349,6 +350,8 @@ pub fn run() {
             agent_hud::agent_hud_main_focused,
             notifications::send_app_notification,
             notifications::agent_open_ready,
+            notifications::routine_open_ready,
+            notifications::today_open_ready,
             meeting_detection::queue_meeting_start_request,
             meeting_detection::pending_meeting_start_request,
             meeting_detection::acknowledge_meeting_start_request,
@@ -365,11 +368,14 @@ pub fn run() {
             providers::profile_model_overrides,
             providers::set_profile_model_overrides,
             providers::delete_profile_model_overrides,
-            providers::list_venice_models,
-            providers::set_venice_model,
-            providers::set_cost_quality,
-            providers::set_venice_api_key,
-            providers::clear_venice_api_key,
+            providers::list_provider_models,
+            providers::set_provider_model,
+            commands::local_transcription_model_state,
+            commands::install_local_transcription_model,
+            commands::cancel_local_transcription_model_install,
+            commands::remove_local_transcription_model,
+            providers::set_provider_api_key,
+            providers::clear_provider_api_key,
             providers::set_image_safe_mode,
             providers::set_live_transcription,
             providers::set_image_safe_mode_prompt_dismissed,
@@ -379,30 +385,20 @@ pub fn run() {
             providers::video_generate,
             providers::video_status,
             providers::generated_video_dir,
-            providers::save_local_generation_settings,
-            providers::set_local_generation_enabled,
             providers::probe_local_generation_endpoint,
-            p3a::p3a_settings,
-            p3a::p3a_question_catalog,
-            p3a::set_p3a_enabled,
-            p3a::p3a_record,
-            os_accounts::os_accounts_status,
-            os_accounts::os_accounts_status_local,
-            os_accounts::os_accounts_login,
-            os_accounts::os_accounts_cancel_login,
-            os_accounts::os_accounts_logout,
-            os_accounts::os_accounts_set_avatar_seed,
-            os_accounts::os_accounts_upgrade,
-            os_accounts::os_accounts_upgrade_session,
-            os_accounts::os_accounts_change_plan,
-            os_accounts::os_accounts_open_portal,
-            os_accounts::os_accounts_referral_summary,
-            extension_host::extension_pairing_status,
-            extension_host::register_browser_extension_host,
+            llm::commands::llm_providers,
+            llm::commands::llm_detect_clis,
+            llm::commands::llm_open_agy_login,
+            llm::commands::llm_save_endpoint,
+            llm::commands::llm_delete_endpoint,
+            llm::commands::llm_set_usage,
+            llm::commands::llm_test_provider,
             connectors::commands::connectors_policy,
             connectors::commands::connectors_list,
             connectors::commands::connectors_connect,
             connectors::commands::connectors_cancel_connect,
+            connectors::commands::connectors_github_cli_detect,
+            connectors::commands::connectors_github_cli_connect,
             connectors::commands::connectors_disconnect,
             connectors::commands::connectors_linear_teams,
             connectors::commands::connectors_selected_teams_set,
@@ -432,57 +428,88 @@ pub fn run() {
             computer_use::computer_use_end_run,
             computer_use::computer_use_approvals_pending,
             computer_use::computer_use_approval_respond,
-            updates::get_release_channel,
-            updates::set_release_channel,
+            updates::updates_enabled,
             updates::fetch_update,
             updates::install_update,
+            updates::postpone_update_install,
             updates::relaunch_for_update,
+            activity::activity_status,
+            activity::activity_save_settings,
+            activity::activity_set_paused,
+            activity::activity_request_permission,
+            activity::activity_recreate_database,
+            activity::activity_debug_export,
+            coding_agents::coding_agents_status,
+            coding_agents::coding_agents_blocks,
+            activity::timeline::activity_timeline,
+            activity::timeline::activity_timeline_session,
+            activity::timeline::activity_timeline_search,
+            activity::app_icon::activity_app_icon,
+            day_intelligence::day_intelligence_day,
+            day_intelligence::day_intelligence_generate,
+            mcp_server::mcp_server_status,
+            mcp_server::mcp_server_set_enabled,
+            approval_broker::external::mcp_external_approvals,
+            approval_broker::external::mcp_external_approval_decide,
+            chat_engine::chat_engine_catalog,
+            chat_engine::chat_default_engine,
         ])
         .manage(RecordingPresenceBoundsState::default())
         .manage(note_save_flush::NoteSaveFlushState::default())
-        .manage(agent_runtime::AgentRuntimeHost::default())
+        .manage(chat_engine::ChatEngineHost::default())
         .manage(agent_recorder::AgentRecorderBroker::default())
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
         .manage(computer_use::ComputerUseState::default())
         .manage(shutdown::ShutdownCoordinator::default())
-        .manage(companion::CompanionRuntime::default())
-        .manage(os_accounts::LoginFlow::default())
-        .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
-            browser::setup_on_app_start();
-            agent_runtime::tools::seed_bundled_skills(app.handle());
+            agent_sessions::skills::seed_bundled_skills(app.handle());
+            // Before any CLI turn can ask: cancels requests a previous
+            // process left pending.
+            approval_broker::setup(app);
+            // Before the menus and the activity loops: both read it.
+            restore_interface_locale(app);
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
+            // After the tray exists: the capture thread publishes its state
+            // to the menu bar from its first tick.
+            activity::setup(app);
+            // Reads the switch from the activity settings registered above.
+            mcp_server::setup(app);
+            // Shares the activity database and settings.
+            coding_agents::setup(app);
+            day_intelligence::setup(app);
+            setup_interface_locale_listener(app);
             experimental_settings::setup(app)?;
+            app_preferences::setup(app)?;
             providers::setup(app);
+            #[cfg(target_os = "macos")]
+            transcription_model::setup(app)?;
+            providers::local_transcriber::setup(app);
             setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
-            p3a::setup(app);
             updates::setup(app);
             dictation::setup(app);
-            agent_hud::setup(app);
             notifications::setup(app);
             meeting_detection::setup(app);
-            extension_host::setup(app);
-            // Companion pairing is restart-required: setup latches the
-            // persisted experiment for every native and frontend boundary.
-            companion::setup(app.handle());
+            browser::setup(app.handle()).map_err(|error| std::io::Error::other(error.message))?;
             routines::start_scheduler(app.handle());
             // Poll Google for the events routines subscribe to (email arrivals
             // and upcoming meetings) and wake the matching durable routine.
             connectors::triggers::start(app.handle());
+            // Connect GitHub through a signed-in GitHub CLI when there is no
+            // GitHub account yet (ADR-0066); off the startup path.
+            connectors::start_github_cli_detection(app.handle());
             meeting_hud::setup(app);
-            os_accounts::setup_deep_link(app);
-            #[cfg(target_os = "macos")]
-            setup_main_window_lifecycle(app);
+            main_window::setup(app);
             Ok(())
         })
         .build(context)
         .expect("failed to build Clovy")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {
+                approval_broker::close(app);
                 shutdown::handle_exit_requested(app, code, &api);
             }
             // Tao emits only Exit for macOS logout/application termination.
@@ -490,7 +517,9 @@ pub fn run() {
             // had a chance to latch the coordinator.
             tauri::RunEvent::Exit => shutdown::handle_exit(app),
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::Reopen { .. } => {
+                main_window::show(app);
+            }
             _ => {}
         });
 }
@@ -540,11 +569,7 @@ fn setup_computer_use_asset_scope(app: &mut tauri::App) {
 fn should_register_single_instance_plugin() -> bool {
     single_instance_enabled_for_build(
         cfg!(debug_assertions),
-        crate::env_compat::var_os(
-            "OS_CLOVY_ENABLE_DEV_SINGLE_INSTANCE",
-            "OS_JUNE_ENABLE_DEV_SINGLE_INSTANCE",
-        )
-        .is_some(),
+        std::env::var_os("OS_CLOVY_ENABLE_DEV_SINGLE_INSTANCE").is_some(),
     )
 }
 
@@ -581,12 +606,64 @@ mod tests {
 }
 
 fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    install_app_menu(app.handle())
+}
+
+/// Mirrors the webview's interface language into the native menus. The
+/// frontend emits the tag on startup and whenever the user changes it; menus
+/// are rebuilt on the main thread only when the language actually changed.
+/// The language saved by the last run, before the background loops that
+/// write activity text start.
+fn restore_interface_locale(app: &tauri::App) {
+    if let Ok(dir) = app_paths::app_config_dir(app.handle()) {
+        interface_locale::restore(&dir);
+    }
+}
+
+fn setup_interface_locale_listener(app: &tauri::App) {
+    let handle = app.handle().clone();
+    app.listen_any(interface_locale::INTERFACE_LOCALE_EVENT, move |event| {
+        let locale = interface_locale::UiLocale::from_payload(event.payload());
+        let unsaved = app_paths::app_config_dir(&handle)
+            .ok()
+            .filter(|dir| interface_locale::read_saved(dir) != Some(locale));
+        if let Some(dir) = unsaved {
+            if let Err(error) = interface_locale::write_saved(&dir, locale) {
+                tracing::warn!(%error, "could not save the interface language");
+            }
+        }
+        if !interface_locale::set_current(locale) {
+            return;
+        }
+        let main_thread_handle = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let _ = install_app_menu(&main_thread_handle);
+            menu_bar::relocalize(&main_thread_handle);
+        });
+    });
+    // The main window may have broadcast before this listener existed, and a
+    // single request can be lost the same way: ask until the language is
+    // known (at once when the saved file already said it).
+    let asker = app.handle().clone();
+    std::thread::spawn(move || {
+        interface_locale::ask_until_known(
+            || {
+                let _ = asker.emit(interface_locale::INTERFACE_LOCALE_REQUEST_EVENT, ());
+            },
+            || interface_locale::known().is_some(),
+            std::thread::sleep,
+        );
+    });
+}
+
+fn install_app_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
+    use interface_locale::PredefinedLabel as Label;
     use tauri::menu::{
         AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
         WINDOW_SUBMENU_ID,
     };
 
-    let handle = app.handle();
+    let text = interface_locale::strings(interface_locale::current());
     let pkg_info = handle.package_info();
     let config = handle.config();
     let about_metadata = AboutMetadata {
@@ -606,49 +683,42 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
         pkg_info.name.clone(),
         true,
         &[
-            &PredefinedMenuItem::about(handle, None, Some(about_metadata))?,
-            &MenuItem::with_id(
-                handle,
-                CHECK_FOR_UPDATES_MENU_ID,
-                "Check for Updates",
-                true,
-                None::<&str>,
-            )?,
+            &PredefinedMenuItem::about(handle, text.predefined_about(), Some(about_metadata))?,
             &PredefinedMenuItem::separator(handle)?,
             &MenuItem::with_id(
                 handle,
                 OPEN_SETTINGS_MENU_ID,
-                "Settings...",
+                text.settings(),
                 true,
                 Some("CmdOrCtrl+,"),
             )?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::services(handle, text.predefined(Label::Services))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::hide(handle, None)?,
-            &PredefinedMenuItem::hide_others(handle, None)?,
-            &PredefinedMenuItem::show_all(handle, None)?,
+            &PredefinedMenuItem::hide(handle, text.predefined(Label::Hide))?,
+            &PredefinedMenuItem::hide_others(handle, text.predefined(Label::HideOthers))?,
+            &PredefinedMenuItem::show_all(handle, text.predefined(Label::ShowAll))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::quit(handle, None)?,
+            &PredefinedMenuItem::quit(handle, text.predefined(Label::Quit))?,
         ],
     )?;
 
     let file_menu = Submenu::with_items(
         handle,
-        "File",
+        text.file(),
         true,
         &[
             &MenuItem::with_id(
                 handle,
                 CLOSE_TAB_MENU_ID,
-                "Close tab",
+                text.close_tab(),
                 true,
                 Some("CmdOrCtrl+W"),
             )?,
             &MenuItem::with_id(
                 handle,
                 CLOSE_WINDOW_MENU_ID,
-                "Close window",
+                text.close_window(),
                 true,
                 Some("CmdOrCtrl+Shift+W"),
             )?,
@@ -656,35 +726,38 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let edit_menu = Submenu::with_items(
         handle,
-        "Edit",
+        text.edit(),
         true,
         &[
-            &PredefinedMenuItem::undo(handle, None)?,
-            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::undo(handle, text.predefined(Label::Undo))?,
+            &PredefinedMenuItem::redo(handle, text.predefined(Label::Redo))?,
             &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::cut(handle, None)?,
-            &PredefinedMenuItem::copy(handle, None)?,
-            &PredefinedMenuItem::paste(handle, None)?,
-            &PredefinedMenuItem::select_all(handle, None)?,
+            &PredefinedMenuItem::cut(handle, text.predefined(Label::Cut))?,
+            &PredefinedMenuItem::copy(handle, text.predefined(Label::Copy))?,
+            &PredefinedMenuItem::paste(handle, text.predefined(Label::Paste))?,
+            &PredefinedMenuItem::select_all(handle, text.predefined(Label::SelectAll))?,
         ],
     )?;
     let view_menu = Submenu::with_items(
         handle,
-        "View",
+        text.view(),
         true,
-        &[&PredefinedMenuItem::fullscreen(handle, None)?],
+        &[&PredefinedMenuItem::fullscreen(
+            handle,
+            text.predefined(Label::Fullscreen),
+        )?],
     )?;
     let window_menu = Submenu::with_id_and_items(
         handle,
         WINDOW_SUBMENU_ID,
-        "Window",
+        text.window(),
         true,
         &[
-            &PredefinedMenuItem::minimize(handle, None)?,
-            &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::minimize(handle, text.predefined(Label::Minimize))?,
+            &PredefinedMenuItem::maximize(handle, text.predefined(Label::Maximize))?,
         ],
     )?;
-    let help_menu = Submenu::with_id_and_items(handle, HELP_SUBMENU_ID, "Help", true, &[])?;
+    let help_menu = Submenu::with_id_and_items(handle, HELP_SUBMENU_ID, text.help(), true, &[])?;
 
     let menu = Menu::with_items(
         handle,
@@ -697,18 +770,13 @@ fn setup_app_menu(app: &tauri::App) -> tauri::Result<()> {
             &help_menu,
         ],
     )?;
-    app.set_menu(menu)?;
-    macos_menu_icons::install_settings_symbol_on_app_menu();
+    handle.set_menu(menu)?;
+    macos_menu_icons::install_settings_symbol_on_app_menu(text.settings());
     Ok(())
 }
 
 fn close_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        #[cfg(target_os = "macos")]
-        let _ = window.hide();
-        #[cfg(not(target_os = "macos"))]
-        let _ = window.close();
-    }
+    main_window::hide(app);
 }
 
 fn emit_close_tab_if_main_window_focused(app: &tauri::AppHandle) {
@@ -752,31 +820,10 @@ fn set_recording_presence_bounds(
 }
 
 #[cfg(target_os = "macos")]
-fn setup_main_window_lifecycle(app: &mut tauri::App) {
-    if let Some(main_window) = app.get_webview_window("main") {
-        register_main_window_lifecycle(app.handle(), &main_window);
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn register_main_window_lifecycle(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    install_main_window_first_mouse_bridge(app, window);
-    let close_window = window.clone();
-    let lifecycle_app = app.clone();
-    window.on_window_event(move |event| match event {
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            let _ = close_window.hide();
-        }
-        tauri::WindowEvent::Focused(true) => {
-            computer_use::schedule_driver_prewarm(&lifecycle_app);
-        }
-        _ => {}
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn install_main_window_first_mouse_bridge(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+pub(crate) fn install_main_window_first_mouse_bridge(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+) {
     use objc2::runtime::AnyObject;
     use objc2::sel;
 
@@ -913,32 +960,4 @@ fn emit_recording_presence_reopen() {
         "meeting-hud-action",
         serde_json::json!({ "action": "reopen", "noteId": note_id }),
     );
-}
-
-#[cfg(target_os = "macos")]
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return;
-    }
-
-    let Some(config) = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|window| window.label == "main")
-    else {
-        return;
-    };
-
-    if let Ok(window) =
-        tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build())
-    {
-        register_main_window_lifecycle(app, &window);
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
 }

@@ -43,3 +43,5 @@ because its source commit or image digest changed.
   attested boundary.
 - ADR-0023 is superseded. Its cross-product startup proof, exact digest pin,
   and coordinated release requirements are not implemented.
+
+Superada pela change desvincular-repo-ci.

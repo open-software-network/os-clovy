@@ -7,24 +7,28 @@ import {
   grantableConnectorActionTools,
 } from "../../lib/connectors";
 import { Checkbox } from "../ui/Checkbox";
+import { useT } from "../../i18n";
 import { SegmentedControl } from "../ui/SegmentedControl";
 
 const TRUST_MODES: readonly RoutineTrustMode[] = ["read_only", "approval", "autonomous"];
 
-const MODE_OPTIONS = TRUST_MODES.map((mode) => {
-  const meta = TRUST_MODE_META[mode];
-  const Icon = meta.icon;
-  return {
-    value: mode,
-    label: (
-      <>
-        <Icon size={14} aria-hidden />
-        {meta.label}
-      </>
-    ),
-    ariaLabel: meta.label,
-  };
-});
+// Built per render: the labels follow the interface language.
+function modeOptions() {
+  return TRUST_MODES.map((mode) => {
+    const meta = TRUST_MODE_META[mode];
+    const Icon = meta.icon;
+    return {
+      value: mode,
+      label: (
+        <>
+          <Icon size={14} aria-hidden />
+          {meta.label}
+        </>
+      ),
+      ariaLabel: meta.label,
+    };
+  });
+}
 
 /**
  * The per-routine trust choice for connector actions (read only, approval,
@@ -54,6 +58,7 @@ export function TrustModePicker({
   onChange: (mode: RoutineTrustMode) => void;
   onAutonomousToolsChange: (tools: string[]) => void;
 }) {
+  const t = useT();
   const grantableTools = policy ? grantableConnectorActionTools(policy) : [];
   const autonomousUnlocked = policy ? canSelectAutonomous(policy, runCount) : false;
 
@@ -74,8 +79,8 @@ export function TrustModePicker({
       <SegmentedControl
         value={value}
         onValueChange={pick}
-        options={MODE_OPTIONS}
-        aria-label="What can this routine do with your Google account?"
+        options={modeOptions()}
+        aria-label={t("routines.trust.question")}
       />
       <p className="routines-mode-hint">{TRUST_MODE_META[value].description}</p>
       {policy && !autonomousUnlocked ? (
@@ -85,7 +90,7 @@ export function TrustModePicker({
       ) : null}
       {value === "autonomous" ? (
         <fieldset className="trust-mode-grants">
-          <legend className="trust-mode-grants-legend">Tools this routine may run unasked</legend>
+          <legend className="trust-mode-grants-legend">{t("routines.trust.grantsLegend")}</legend>
           {/* Grantable tools only: Linear's write tools are approval-only in v1
               and must never appear as autonomy checkboxes. */}
           {grantableTools.map((tool) => (

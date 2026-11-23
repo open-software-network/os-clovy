@@ -1,13 +1,10 @@
 # pnpm settings (pnpm 11 no longer reads the "pnpm" field in package.json).
 
-# Workspace packages: the app root plus the browser extension (JUN-287).
+# Workspace package: the desktop app.
 packages:
   - '.'
-  - 'agent-runtime'
-  - 'extension'
 
-# `@openai/agents` currently reaches fast-uri through MCP's schema validator.
-# Keep the patched parser pinned until that transitive chain updates itself.
+# Keep the patched schema parser pinned for any remaining consumers.
 overrides:
   fast-uri: 3.1.4
 

@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconFontStyle } from "central-icons/IconFontStyle";
@@ -17,6 +18,9 @@ import {
   useRef,
   useState,
 } from "react";
+import { clockTimeOptions, formatDate, t as translate, useLocale, useT } from "../../i18n";
+import { isSameLocalDay } from "../../lib/date-format";
+import { AppIcon } from "../activity-timeline/AppIcon";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Dialog } from "../ui/Dialog";
@@ -74,6 +78,8 @@ function readHintDismissed() {
 }
 
 export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryViewProps = {}) {
+  const t = useT();
+  const locale = useLocale();
   const [allItems, setItems] = useState<DictationHistoryItemDto[]>([]);
   const [retentionDays, setRetentionDays] = useState(7);
   const [query, setQuery] = useState("");
@@ -92,6 +98,17 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
   const [pendingDelete, setPendingDelete] = useState<DictationHistoryItemDto | null>(null);
   const capabilities = useDictationCapabilities();
   const dictationAvailable = capabilities.available;
+  useClovyDataChanged("dictations", async (_change, isCurrent) => {
+    try {
+      const response = await listDictationHistory();
+      if (!isCurrent()) return;
+      setItems(response.items);
+      setRetentionDays(response.retentionDays);
+      setError(null);
+    } catch (caught) {
+      if (isCurrent()) setError(messageFromError(caught));
+    }
+  });
 
   const loadHistory = useCallback(async () => {
     try {
@@ -159,7 +176,9 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
     );
   }, [items, query]);
 
-  const groups = useMemo(() => groupHistoryItems(filtered), [filtered]);
+  // Group labels ("Today", weekday dates) follow the interface language.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: locale re-derives the labels
+  const groups = useMemo(() => groupHistoryItems(filtered), [filtered, locale]);
 
   const defaultPushToTalk = capabilities.platform === "macos" ? "Ctrl+Opt+D" : "Ctrl+Alt+D";
   const defaultToggle = capabilities.platform === "macos" ? "Ctrl+Opt+T" : "Ctrl+Alt+T";
@@ -210,14 +229,16 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
   }
 
   return (
-    <section className="dictation-history-workspace" aria-label="Dictation">
+    <section className="dictation-history-workspace" aria-label={t("recorder.dictation.title")}>
       <header className="folders-header">
         <div className="folders-heading">
           <h1>
-            Dictation
+            {t("recorder.dictation.title")}
             {items.length > 0 ? <span className="folders-count">{items.length}</span> : null}
           </h1>
-          <p className="folders-subtitle">AI transcriptions from the last {retentionDays} days.</p>
+          <p className="folders-subtitle">
+            {t("recorder.dictation.subtitle", { count: retentionDays })}
+          </p>
         </div>
         {/* Shortcuts live in the header whenever there's history; newcomers
             get them in the empty state instead. */}
@@ -242,7 +263,7 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
             <IconMagnifyingGlass size={14} />
             <input
               type="search"
-              placeholder="Search"
+              placeholder={t("common.search")}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
@@ -254,19 +275,25 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
 
       {loading ? (
         <div className="folders-empty">
-          <p>Loading dictations…</p>
+          <p>{t("recorder.dictation.loading")}</p>
         </div>
       ) : items.length === 0 ? (
         <EmptyState
-          label={dictationAvailable ? "Start dictating" : "Dictation unavailable"}
+          label={
+            dictationAvailable
+              ? t("recorder.dictation.empty.label")
+              : t("recorder.dictation.unavailable.label")
+          }
           icon={<IconMicrophoneSparkleFilled size={28} />}
           title={
-            dictationAvailable ? "Start dictating anywhere" : "Dictation is not available here"
+            dictationAvailable
+              ? t("recorder.dictation.empty.title")
+              : t("recorder.dictation.unavailable.title")
           }
           description={
             dictationAvailable
-              ? "Place your cursor in any app, hold the shortcut, and speak. Your words are transcribed and pasted right where you're typing."
-              : "Meeting notes still work with microphone recording on this device."
+              ? t("recorder.dictation.empty.description")
+              : t("recorder.dictation.unavailable.description")
           }
           footer={
             dictationAvailable ? (
@@ -280,7 +307,7 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
         />
       ) : groups.length === 0 ? (
         <div className="folders-empty">
-          <p>No dictations match “{query.trim()}”.</p>
+          <p>{t("recorder.dictation.noMatches", { query: query.trim() })}</p>
         </div>
       ) : (
         <div className="dictation-history-groups">
@@ -307,9 +334,9 @@ export function DictationHistoryView({ onNavigateToSettings }: DictationHistoryV
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
-        title="Delete this transcription?"
-        description="It will be removed from your dictation history. This can’t be undone."
-        confirmLabel="Delete"
+        title={t("recorder.dictation.delete.title")}
+        description={t("recorder.dictation.delete.description")}
+        confirmLabel={t("common.delete")}
         destructive
       />
     </section>
@@ -330,6 +357,7 @@ function DictationHistoryRow({
   onCopy: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   const textRef = useRef<HTMLParagraphElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [truncated, setTruncated] = useState(false);
@@ -375,13 +403,17 @@ function DictationHistoryRow({
   return (
     <li className="dictation-history-item" data-truncated={truncated || undefined}>
       <span className="dictation-history-icon" aria-hidden>
-        <IconMicrophoneSparkle size={14} />
+        <AppIcon
+          bundleId={item.appBundleId ?? null}
+          size={20}
+          fallback={<IconMicrophoneSparkle size={14} />}
+        />
       </span>
       <div className="dictation-history-body">
         <p
           ref={textRef}
           className="dictation-history-text"
-          aria-label={truncated ? "Show full transcript" : undefined}
+          aria-label={truncated ? t("recorder.dictation.showFullTranscript") : undefined}
           {...expandProps}
         >
           {item.text}
@@ -396,12 +428,17 @@ function DictationHistoryRow({
         {formatTime(item.createdAt)}
       </time>
       <span className="dictation-history-actions">
-        <HoverTip compact width={104} tip={copied ? "Copied" : "Copy"} forceOpen={copied && !open}>
+        <HoverTip
+          compact
+          width={104}
+          tip={copied ? t("common.copied") : t("common.copy")}
+          forceOpen={copied && !open}
+        >
           <button
             type="button"
             className="dictation-row-act"
             data-copied={copied}
-            aria-label={copied ? "Copied" : "Copy"}
+            aria-label={copied ? t("common.copied") : t("common.copy")}
             onClick={onCopy}
           >
             <CopyStateIcon copied={copied} />
@@ -410,7 +447,7 @@ function DictationHistoryRow({
         <button
           type="button"
           className="dictation-row-act dictation-row-act-danger"
-          aria-label="Delete"
+          aria-label={t("common.delete")}
           onClick={onDelete}
         >
           <IconTrashCanSimple size={14} />
@@ -420,20 +457,31 @@ function DictationHistoryRow({
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
-        leading={<IconMicrophoneSparkle size={15} />}
+        leading={
+          <AppIcon
+            bundleId={item.appBundleId ?? null}
+            size={20}
+            fallback={<IconMicrophoneSparkle size={15} />}
+          />
+        }
         title={formatTranscriptTimestamp(item.createdAt)}
         width={540}
         className="transcript-dialog"
         footer={
-          <HoverTip compact width={104} tip={copied ? "Copied" : "Copy"} forceOpen={copied && open}>
+          <HoverTip
+            compact
+            width={104}
+            tip={copied ? t("common.copied") : t("common.copy")}
+            forceOpen={copied && open}
+          >
             <button
               type="button"
               className="btn btn-secondary"
-              aria-label={copied ? "Copied" : "Copy"}
+              aria-label={copied ? t("common.copied") : t("common.copy")}
               onClick={onCopy}
             >
               <CopyStateIcon copied={copied} />
-              Copy
+              {t("common.copy")}
             </button>
           </HoverTip>
         }
@@ -462,17 +510,18 @@ function GetMoreCard({
   onSetUpStyles: () => void;
   onSetUpDictionary: () => void;
 }) {
+  const t = useT();
   return (
-    <section className="dictation-hint" aria-label="Get more from dictation">
+    <section className="dictation-hint" aria-label={t("recorder.dictation.hint.title")}>
       <button
         type="button"
         className="dictation-hint-dismiss"
-        aria-label="Dismiss"
+        aria-label={t("recorder.dictation.hint.dismiss")}
         onClick={onDismiss}
       >
         <IconCrossSmall size={14} />
       </button>
-      <h2 className="dictation-hint-title">Get more from dictation</h2>
+      <h2 className="dictation-hint-title">{t("recorder.dictation.hint.title")}</h2>
       <div className="dictation-hint-items">
         {showStyles ? (
           <button type="button" className="dictation-hint-item" onClick={onSetUpStyles}>
@@ -480,13 +529,15 @@ function GetMoreCard({
               <IconFontStyle size={16} />
             </span>
             <span className="dictation-hint-item-body">
-              <span className="dictation-hint-item-name">Writing style</span>
+              <span className="dictation-hint-item-name">
+                {t("recorder.dictation.hint.style.name")}
+              </span>
               <span className="dictation-hint-item-desc">
-                Choose how transcriptions read: casual, standard, or formal.
+                {t("recorder.dictation.hint.style.description")}
               </span>
             </span>
             <span className="dictation-hint-setup">
-              Set up <IconChevronRightSmall size={15} />
+              {t("recorder.dictation.hint.setUp")} <IconChevronRightSmall size={15} />
             </span>
           </button>
         ) : null}
@@ -496,13 +547,15 @@ function GetMoreCard({
               <IconSpeachToText size={16} />
             </span>
             <span className="dictation-hint-item-body">
-              <span className="dictation-hint-item-name">Personal dictionary</span>
+              <span className="dictation-hint-item-name">
+                {t("recorder.dictation.hint.dictionary.name")}
+              </span>
               <span className="dictation-hint-item-desc">
-                Teach it the names and jargon it keeps mishearing.
+                {t("recorder.dictation.hint.dictionary.description")}
               </span>
             </span>
             <span className="dictation-hint-setup">
-              Set up <IconChevronRightSmall size={15} />
+              {t("recorder.dictation.hint.setUp")} <IconChevronRightSmall size={15} />
             </span>
           </button>
         ) : null}
@@ -522,13 +575,14 @@ function ShortcutLegend({
   pushToTalk: string;
   toggle: string;
 }) {
+  const t = useT();
   return (
-    <dl className={className} aria-label="Dictation shortcuts">
+    <dl className={className} aria-label={t("recorder.dictation.shortcuts.aria")}>
       <div className="dictation-shortcut">
         <span className="dictation-shortcut-icon" aria-hidden>
           <IconMicrophone size={15} />
         </span>
-        <dt>Push to talk</dt>
+        <dt>{t("recorder.dictation.shortcuts.pushToTalk")}</dt>
         <dd>
           <KeycapShortcut label={pushToTalk} />
         </dd>
@@ -537,7 +591,7 @@ function ShortcutLegend({
         <span className="dictation-shortcut-icon" aria-hidden>
           <IconInfinity size={15} />
         </span>
-        <dt>Hands-free</dt>
+        <dt>{t("recorder.dictation.shortcuts.handsFree")}</dt>
         <dd>
           <KeycapShortcut label={toggle} />
         </dd>
@@ -562,13 +616,13 @@ function groupHistoryItems(items: DictationHistoryItemDto[]): HistoryGroup[] {
 
 function formatGroupLabel(iso: string) {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Earlier";
+  if (Number.isNaN(date.getTime())) return translate("recorder.dictation.earlier");
   const now = new Date();
-  if (isSameDate(date, now)) return "Today";
+  if (isSameLocalDay(date, now)) return translate("common.today");
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (isSameDate(date, yesterday)) return "Yesterday";
-  return date.toLocaleDateString(undefined, {
+  if (isSameLocalDay(date, yesterday)) return translate("common.yesterday");
+  return formatDate(date, {
     weekday: "long",
     month: "short",
     day: "numeric",
@@ -578,30 +632,20 @@ function formatGroupLabel(iso: string) {
 function formatTime(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
+  return formatDate(date, {
+    ...clockTimeOptions(),
   });
 }
 
 function formatTranscriptTimestamp(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString(undefined, {
+  return formatDate(date, {
     weekday: "long",
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
-}
-
-function isSameDate(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
 }
 
 function messageFromError(err: unknown) {
@@ -609,5 +653,5 @@ function messageFromError(err: unknown) {
     const message = (err as { message?: unknown }).message;
     if (typeof message === "string") return message;
   }
-  return "Dictation history is unavailable.";
+  return translate("recorder.dictation.unavailableError");
 }

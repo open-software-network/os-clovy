@@ -1,0 +1,925 @@
+{
+  "schema_version": 1,
+  "changes": [
+    "remover-clovy-api",
+    "cli-substitui-agente-nativo (fase4)"
+  ],
+  "implementation_base": "8b19b7474216434efd7ab9f08cc0ca50b5d9b5a7",
+  "preserved_original_head": "f75f05a0a5daff9d21627ba990b7b0bff37e32be",
+  "original_history_rewritten": false,
+  "original_commit_coverage": [
+    {
+      "commit": "4fb10a51a83f02f8841dfc1a4c8cefeb8a0eac52",
+      "subject": "Delete the retired agent-runtime tree",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-4fb10a51-3/summary.json",
+          "exit": 6,
+          "summary_sha256": "f9431e530aae3155ffbbc4e43abaeff11443b79dda745d514ade992735c67ee2",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 5
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-4fb10a51-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-4fb10a51-2/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-4fb10a51-3/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "0ddde3d36c42608eb055880c906cbbe77fe0f5d9",
+      "subject": "Remove native chat wiring and sidecar packaging",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/rename-deletions-1/summary.json",
+          "exit": 6,
+          "snapshot": "400b2e6db020c4019ad6a0309f86a8d53005511c",
+          "summary_sha256": "a2dc6042e4f72bdaa4d9256dafe4f5a8cfc1667f3934538d275dbcbccf0f99dd",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 10
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/rename-remainder-2/summary.json",
+          "exit": 6,
+          "snapshot": "312844f6006f8d60c2ab5bda62f7930e30378bbd",
+          "summary_sha256": "36d3544b75162b385b9ffe33976b3614e50826896d2bce6b3615d2543d92e545",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 20
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 3
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-0ddde3d3-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-0ddde3d3-2/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-0ddde3d3-3/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-0ddde3d3-4/summary.json",
+          "exit": 130
+        }
+      ],
+      "mapping": "rename-review-map.json"
+    },
+    {
+      "commit": "72fccafa6dd9f9689f996aa6340c4cb02367dbb6",
+      "subject": "Replace chat workspace test suite: remove legacy version",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-72fccafa-1/summary.json",
+          "exit": 0,
+          "summary_sha256": "bc5a790ea6cec5e913aca5afbc7f10b10fd93611715cd8264c163409607b1550",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-72fccafa-1/summary.json",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "commit": "2f831daf6ccd8db369d146945168b322700a2447",
+      "subject": "Replace chat workspace test suite: add CLI-only version",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2f831daf-1/summary.json",
+          "exit": 0,
+          "summary_sha256": "4d39e2ed37e496ec102fe68fae80488a88393f9e8ac5fa7a23c75aaa86a17612",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2f831daf-1/summary.json",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "commit": "1a18338d6bfff7766c5dac54dc79fca072e1534b",
+      "subject": "Document CLI-only chat and native agent retirement",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-1a18338d-1/summary.json",
+          "exit": 6,
+          "summary_sha256": "02ae396e2c32eee595558b6bb641bbcc96463845a5f8f0081a9cd4519a1a69be",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 1
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 6
+            }
+          }
+        }
+      ],
+      "attempts": []
+    },
+    {
+      "commit": "6ae504f54c8757821bf3afe45555fdf7eb53944d",
+      "subject": "Route notes and dictation directly through user providers",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-6ae504f5-2/summary.json",
+          "exit": 6,
+          "summary_sha256": "3df8d24bfe671a9b5e936fd57c1e940e203c58e0f168c6b9f26d3dfe96b494ae",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 1
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 1
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-6ae504f5-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-6ae504f5-2/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "2be3ce81d9622f606d1c2ffbb9cf0843892df3cf",
+      "subject": "Load the text picker from the direct OpenRouter catalog",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2be3ce81-1/summary.json",
+          "exit": 6,
+          "summary_sha256": "afaaf6dad951e70776c79112e46fcf500d0d835984c8a19582087dd390ff7cb4",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 2
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 1
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2be3ce81-1/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "85644306b2d319644477bb56d77a40c5304d5ccd",
+      "subject": "Call fal directly for MCP image and video tools",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-85644306-1/summary.json",
+          "exit": 6,
+          "summary_sha256": "155045750b34c3525db6693f1b68f40c4d7a4a5b4a971d2bacb1cf57d2c37e96",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 7
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 3
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-85644306-1/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "2ecc6df4cac46e89f5b5fadde31d45653386334a",
+      "subject": "Archive the backend SQL migrations before retiring its crate",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2ecc6df4-2/summary.json",
+          "exit": 0,
+          "summary_sha256": "6bdd75547e0a6c3b9f73210244290507c31878ac0a1e7908d66a52be6e3755c0",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2ecc6df4-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-2ecc6df4-2/summary.json",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "commit": "7a4c855360dcceaf2fc17a66e9f4d9114b2f596e",
+      "subject": "Delete the retired clovy-api crate",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-7a4c8553-1/summary.json",
+          "exit": 6,
+          "summary_sha256": "15db037cbf98ff15eae46d217d78a2f6612c60413176a627f3213811abee6df6",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 15
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-7a4c8553-1/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "b88b5c57ed600454a66b4102cf5b0f18be8711e0",
+      "subject": "Remove the retired API server and server-only app features",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/b88-deletions-1/summary.json",
+          "exit": 6,
+          "snapshot": "1380bea360521dfc2a16e1a4ee22fa623881cc5b",
+          "summary_sha256": "79b3338935f11201bdd491baaeb5ef9724e0259211f6ded96a77d9a38e195714",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 3
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/b88-remainder-1/summary.json",
+          "exit": 6,
+          "snapshot": "864189516da2ac893f1d7760ea14a4e9acd554de",
+          "summary_sha256": "4aa87f67d00591510e6dc10fd0c55ccc3dc87edda4fe46b17d8c0f36cee28f41",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 6
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 2
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/b88-deletions-1/summary.json",
+          "exit": 6,
+          "snapshot": "1380bea360521dfc2a16e1a4ee22fa623881cc5b"
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/b88-remainder-1/summary.json",
+          "exit": 6,
+          "snapshot": "864189516da2ac893f1d7760ea14a4e9acd554de"
+        }
+      ],
+      "mapping": "b88-rename-review-map.json"
+    },
+    {
+      "commit": "ac83883a12778c5de13459040ed1817f7bc4f149",
+      "subject": "Document the direct-provider desktop architecture and retire server contracts",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-ac83883a-2/summary.json",
+          "exit": 6,
+          "summary_sha256": "aadf4d8f2b4cadf2095c2437038b3e0f54bf7d9fe3f4f1fb81a837fbba1e72df",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 6
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-ac83883a-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-ac83883a-2/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "229c9301893094d00eab797b8635d06b6d84f394",
+      "subject": "Finish sidecar packaging removal and record accepted native evidence",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-229c9301-1/summary.json",
+          "exit": 0,
+          "summary_sha256": "5bcdafaecdea252fb27617f92095b8cefcf25015a8bf056b4abc1c5e672f8cca",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-229c9301-1/summary.json",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "commit": "950e5ea70775a4f349a08a92cc5eb584753ac200",
+      "subject": "Preserve CLI retry context and enforce routine dictation permissions",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-950e5ea7-3/summary.json",
+          "exit": 6,
+          "summary_sha256": "e1b4abbdffa32aa340740f9e34205f77513d4de881ca15aeb99207c3050f4aa8",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 2
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-950e5ea7-1/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-950e5ea7-2/summary.json",
+          "exit": 4
+        },
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-950e5ea7-3/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "5f9e0cb77f652d1f41859d6b9a2a3638dde998a2",
+      "subject": "Handle escaped secret quotes and sandbox workspace paths",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-5f9e0cb7-1/summary.json",
+          "exit": 0,
+          "summary_sha256": "67f0837335457a37cabe5936db01a0565b9f493c0a76da7bb7365605269175c9",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-5f9e0cb7-1/summary.json",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "commit": "228aa4f210203e91134bfe3dbca60247ff2f5ad1",
+      "subject": "fix(chat): preserve steering and enforce routine toolsets",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-228aa4f2-1/summary.json",
+          "exit": 6,
+          "summary_sha256": "9b4a7f2ce1906382e6ac6ad933a617993bff7f408a4a622eb60567e16f0638d2",
+          "reviewers": {
+            "openqodex": {
+              "status": "findings",
+              "finding_count": 1
+            },
+            "coderabbit": {
+              "status": "findings",
+              "finding_count": 1
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-228aa4f2-1/summary.json",
+          "exit": 6
+        }
+      ]
+    },
+    {
+      "commit": "f75f05a0a5daff9d21627ba990b7b0bff37e32be",
+      "subject": "test(cli): cover persisted selection and approval timing",
+      "completed_pairs": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-f75f05a0-1/summary.json",
+          "exit": 0,
+          "summary_sha256": "c5261c0e0e97c2570c67dbd118f4c40b50e095b90be816ea4953d2655dd38f38",
+          "reviewers": {
+            "openqodex": {
+              "status": "completed",
+              "finding_count": 0
+            },
+            "coderabbit": {
+              "status": "completed",
+              "finding_count": 0
+            }
+          }
+        }
+      ],
+      "attempts": [
+        {
+          "path": ".tmp/verify/remover-clovy-api/review-pair/c-f75f05a0-1/summary.json",
+          "exit": 0
+        }
+      ]
+    }
+  ],
+  "rename_splits": {
+    "0ddde3d3": {
+      "original": "0ddde3d36c42608eb055880c906cbbe77fe0f5d9",
+      "parent": "4fb10a51a83f02f8841dfc1a4c8cefeb8a0eac52",
+      "snapshots": [
+        {
+          "label": "deletions",
+          "commit": "400b2e6db020c4019ad6a0309f86a8d53005511c",
+          "base": "4fb10a51a83f02f8841dfc1a4c8cefeb8a0eac52",
+          "files": 12
+        },
+        {
+          "label": "remainder",
+          "commit": "312844f6006f8d60c2ab5bda62f7930e30378bbd",
+          "base": "400b2e6db020c4019ad6a0309f86a8d53005511c",
+          "files": 117
+        }
+      ],
+      "original_tree": "62e440e61b93daf0ac7ff153a216ffd37f6f7af4",
+      "final_tree": "62e440e61b93daf0ac7ff153a216ffd37f6f7af4",
+      "tree_equal": true,
+      "removed_paths": [
+        "src-tauri/src/agent_runtime/api.rs",
+        "src-tauri/src/agent_runtime/domain.rs",
+        "src-tauri/src/agent_runtime/home_import.rs",
+        "src-tauri/src/agent_runtime/migration.rs",
+        "src-tauri/src/agent_runtime/mod.rs",
+        "src-tauri/src/agent_runtime/native_connectors.rs",
+        "src-tauri/src/agent_runtime/persona.rs",
+        "src-tauri/src/agent_runtime/protocol.rs",
+        "src-tauri/src/agent_runtime/repository.rs",
+        "src-tauri/src/agent_runtime/skill_identity.rs",
+        "src-tauri/tests/agent_runtime_persistence.rs",
+        "src/test/composer-model-popover-position.test.ts"
+      ],
+      "reviews": [
+        {
+          "snapshot": "400b2e6db020c4019ad6a0309f86a8d53005511c",
+          "summary": "review-pair/rename-deletions-1/summary.md",
+          "exit": 6,
+          "dispositions": "review-findings-dispositions.md"
+        },
+        {
+          "snapshot": "312844f6006f8d60c2ab5bda62f7930e30378bbd",
+          "summary": "review-pair/rename-remainder-2/summary.md",
+          "exit": 6,
+          "dispositions": "review-findings-dispositions.md"
+        }
+      ],
+      "aggregate_coverage_complete": true,
+      "worktree_removed": true
+    },
+    "b88b5c57": {
+      "original": "b88b5c57ed600454a66b4102cf5b0f18be8711e0",
+      "parent": "7a4c855360dcceaf2fc17a66e9f4d9114b2f596e",
+      "original_tree": "a5ac09ebca8cc16419bf68918ce7397f5aeb298f",
+      "final_tree": "a5ac09ebca8cc16419bf68918ce7397f5aeb298f",
+      "tree_equal": true,
+      "snapshots": [
+        {
+          "role": "deletions",
+          "commit": "1380bea360521dfc2a16e1a4ee22fa623881cc5b",
+          "parent": "7a4c855360dcceaf2fc17a66e9f4d9114b2f596e",
+          "files": 3
+        },
+        {
+          "role": "remainder",
+          "commit": "864189516da2ac893f1d7760ea14a4e9acd554de",
+          "parent": "1380bea360521dfc2a16e1a4ee22fa623881cc5b",
+          "files": 114
+        }
+      ],
+      "old_paths": [
+        "src-tauri/src/clovy_api_dictation_tests.rs",
+        "src-tauri/src/clovy_api_llm_tests.rs",
+        "src-tauri/src/clovy_api_notes_tests.rs"
+      ],
+      "all_original_paths_covered": true,
+      "aggregate_path_count": 117,
+      "renames_in_either_snapshot": false,
+      "reviews": [
+        {
+          "snapshot": "1380bea360521dfc2a16e1a4ee22fa623881cc5b",
+          "summary": "review-pair/b88-deletions-1/summary.md",
+          "exit": 6,
+          "findings": 3,
+          "dispositions": "review-findings-dispositions.md#b88-deletions-1",
+          "evidence": "b88-deletion-followup-evidence.txt",
+          "coderabbit_limit": "completed without fresh detailed file review"
+        },
+        {
+          "snapshot": "864189516da2ac893f1d7760ea14a4e9acd554de",
+          "summary": "review-pair/b88-remainder-1/summary.md",
+          "exit": 6,
+          "findings": 8,
+          "dispositions": "review-findings-dispositions.md#b88-remainder-1",
+          "limitations": [
+            "OpenQodex surrounding-code packet capped 1540 symbols; all 471 changed ranges supplied."
+          ]
+        }
+      ],
+      "authorization": "Owner explicitly authorized b88 and any strictly necessary equivalent rename splits on 2026-10-29",
+      "bundle": "b88-review-only.bundle",
+      "aggregate_coverage_complete": true,
+      "worktree_removed": true
+    }
+  },
+  "approved_local_delta": {
+    "review_snapshot_commit": "966aad9f600fbddc5b809816b8b7f9d8af0c5007",
+    "review_snapshot_tree": "b35e1f5ed741ddb68a5a51c088532cc513bcb2c3",
+    "summary": ".tmp/verify/remover-clovy-api/review-pair/resumption-final-delta-3/summary.json",
+    "exit": 0,
+    "file_sha256_before_closure_metadata": {
+      "src-tauri/src/agent_sessions/api.rs": "8181ccd040a26cdbf71e43a821be1fad572a70fc8fd833507e2a5348eb682152",
+      "src-tauri/src/agent_sessions/retirement.rs": "694e3ecd63611db429fb42dc68d83c64cc9d9ab76c4be9a3f4e7beb1f118c1bd",
+      "src-tauri/src/commands.rs": "d464cd21449237b33dbc1276a001235eabd5268b662e7ba310503106438e46bb",
+      "src-tauri/src/mcp_server/tools/vault_skills.rs": "c280f27e2a38421b74a43ecb6f9342c7227f1efcbfd8c118711c89ed38119735",
+      "src-tauri/src/mcp_server/tools/vault_skills_tests.rs": "4ea3ebf7ff7703cadfb142f959f78c33fca32a6e1f2950e0bf36cf668c288daa",
+      "openspec/changes/remover-clovy-api/tasks.md": "72183d8c5a1db9544630715a63e75939f43e5e0f99a5c58a972f6b4409b6de16",
+      "openspec/changes/cli-substitui-agente-nativo/tasks.md": "d0237689a7f19e51196b36d333d2bce2bdf34f555454db20079490d6c4b5af26",
+      "src-tauri/src/day_intelligence/mod.rs": "f9d364f2ce3063d75fc1193b2018d55796a48e485b066d1d4e8d1b40451eb22b",
+      "CONTEXT.md": "98e683f3e7704c752fd4bfadc159fccd95f1cdc25ac0d1a31cc453d82fe96892",
+      "docs/plugins/notion-implementation-plan.md": "8029a6e35cd70e720c4361d4b567aad7e3d9b35ced689debdf485548175080d7",
+      "docs/llm-providers.md": "d3f1b72e4b3ac273a87f7e47382bea016a1d265b4f1bd0bc91d21b7c6075b09b",
+      "src-tauri/src/dictation.rs": "23524c9e4ffb28ba8ed93bb96d61e092226141d38ccd1801a73a3b9c617fc2e0",
+      "src/components/settings/AppSettings.tsx": "c0f22ee9a22d05439519c31229b26b41fed56511526622b3b872ccda2aa04970",
+      "src/components/settings/ModelPickerPopover.tsx": "2ce04980880899452484bb3f07fb2ed28287ee4c1ceef5dd663e5ca0008c5e65",
+      "src/test/text-model-catalog.test.tsx": "b82ff661463d5232325b535ef20c32fa10c96636ebcedd8af9b7f26318066af3",
+      "src-tauri/src/providers/fal/client.rs": "980e207a254be30498e95ac5b55b23ae29625f6cf75b1511147ff87ace8ccb76",
+      "src-tauri/src/providers/fal/image_edit.rs": "182bfb032c514c1be78b66e0bc6d8b75307dcab7f90ea88b21cc395d5a36f65b",
+      "src-tauri/src/providers/fal/queue.rs": "412374b9be48cce5d8e2aec5b628c4edd0f15ed43caa41e8ee6cd881314cf215",
+      "src-tauri/src/providers/fal/tests.rs": "fe09d3a887e8763712fbdf06f2c6c5cd6c836accb64a294d5a7faf42c1a53439",
+      "src-tauri/src/video_download_url.rs": "468f835ab2ac1a31fbbbd52af576320ab00458d4d8b249c110c5024aa9dab40f",
+      "src-tauri/src/approval_broker/testing.rs": "89291a93bf30863f065d4ea72fbbff8a93f17fb9bb83542cfcc02c3e2b1ef23a",
+      "docs/plugins/slack-implementation-plan.md": "1ea7cc67d907ad4a1bf73a11e5de4be73cbf0bcf429b16a2a2ce23474f0e5a25",
+      "docs/index.md": "9b252fdd5b732bc379f1698602c94365f2b654a468e500f0a07f0145b25e47fd",
+      "docs/adr/0013-stream-inference-responses-through-june-api.md": "8056f1b9565e193700ec7a6f692817a0c7f6081ac27655d80c03fc6d7f61d358",
+      "docs/adr/0021-june-api-v1-compatibility-policy.md": "aad73228ae00f0377762d0efda59a034016334ab1390e16871ba0b86be39f5dc",
+      "docs/qa/computer-use-parity.md": "acd7f28429092ae22eae3ae3d939a09b91eb8e47940c7cb63c08374a767e4017",
+      "docs/mcp-server.md": "fda3447ac4f4d2d75698c6f1005d23e6167fbca19d0e5a5bd820530a852b458e",
+      "src/components/agent/AgentWorkspace.tsx": "bb05c3a81f8167d757d4641fa2957d7bf98a27163b608edf035b8ed1937ce787",
+      "src/test/agent-workspace-runtime.test.tsx": "fb5d092d2bf61899502cb79e66f8a2694282e089a5043d2c55c5629e5f14c020",
+      "src-tauri/src/mcp_server/tools/mod.rs": "5730551bbea4e828e823c228465ca6522f2452b61ce6e65287cc62897719c656",
+      "src-tauri/src/mcp_server/tools/read.rs": "69538da6c1c7f5059c092cdd143c5c6a6165acae9049b47c263f4b1eab6d2c86",
+      "src-tauri/src/mcp_server/tools/read_tests.rs": "7ebd821bf68e10844e1872259aae2bdb4e0b9adb158d7f43532d1ae70472b238",
+      "src-tauri/src/mcp_server/tools/media.rs": "56d3deac3aa941a3ed3434e62f3cd518e87065726ec9ecf5cf9a61114e9d118f",
+      "src-tauri/src/mcp_server/tools/notes.rs": "a7a997b4bf7a169ea3c34cc43adbf5e71213f44a279c0b94e749f4c64d4da18c",
+      "src-tauri/src/mcp_server/tools/connectors.rs": "fb67c93b7bbd3ab9215e6fdaad633015d7b724a2a475abc5fca78aa021004c43"
+    },
+    "byte_identity_evidence": ".tmp/verify/remover-clovy-api/unchanged-delta-after-17-of-17.json",
+    "tests_or_delta_review_repeated": false,
+    "summary_sha256": "d40af1933bba8e88554dca686fddcdb7a2c98e7ac129e4bf7065469b6c7227ec"
+  },
+  "closure_metadata_only": [
+    "openspec/changes/remover-clovy-api/tasks.md",
+    "openspec/changes/cli-substitui-agente-nativo/tasks.md",
+    "openspec/changes/remover-clovy-api/review-map.json"
+  ],
+  "limitations": [
+    "CodeRabbit completed rename-deletions-1, c-7a4c8553-1 and b88-deletions-1 without fresh detailed file review; these are explicit limitations, not fresh detailed CR coverage.",
+    "Pre-cut smoke waived; run-20261028-final accepted with recorded limitations.",
+    "Real Groq/OpenRouter/fal inference remains owner manual post-merge; no production keys or paid inference.",
+    "Windows native checks and real Codex fallback unproven; no new full CI/native build claim."
+  ],
+  "dispositions_source": ".tmp/verify/remover-clovy-api/review-findings-dispositions.md",
+  "additional_reviewed_delta": {
+    "approved_snapshot": "966aad9f600fbddc5b809816b8b7f9d8af0c5007",
+    "base": "b513d9ad2b1b63c5cf7a8a79514f98f65406a348",
+    "base_tree": "b35e1f5ed741ddb68a5a51c088532cc513bcb2c3",
+    "approved_base_tree_equal": true,
+    "base_note": "Original harness snapshot object unavailable after owned checkout cleanup; reconstructed only its exact approved tree from all 35 retained file hashes. No repeat review of that unchanged delta.",
+    "snapshot": "089cc5deac79e9b77d6eb8124fe3b3a28a76b34a",
+    "tree": "081781cf2072c9b1064dce4720ff321286468589",
+    "files": {
+      "scripts/check-clovy-api-references.mjs": "23e93dc2457a4a11b7bd41e766562da740115c704c7e1d4a545eb049f045dcbd",
+      "src/test/clovy-api-references-guard.test.mjs": "5c698d81240fcda0bf3c536ec821ba48482e1a2c9fc2084ce79b48d140dc5711",
+      "src/lib/errors.ts": "a5a7447c2463e5732c585bf93e4128eeef720f0d8f53018f0ebc863c503bb937",
+      "src/i18n/messages/lib.ts": "6cb69aef65a18e27770df0b887bfc48d8e79e4086ac34b45337d05545666fb0e",
+      "src/test/i18n-app-locale.test.ts": "90b99bcadf079cd0c6e154ae310c5bc55b327b6e1dd30acc60b7b85ed3581af4",
+      "src/test/tauri-dev-launcher.test.mjs": "4f8d245834d7b760bfc7757909f66bf3b2eed5e6cfc2c8c85d968ef8b8760ed0"
+    },
+    "summary": "review-pair/b88-corrections-3/summary.json",
+    "status": "accepted",
+    "reviews": [
+      {
+        "summary": "review-pair/b88-corrections-1/summary.json",
+        "exit": 6,
+        "base": "b513d9ad2b1b63c5cf7a8a79514f98f65406a348",
+        "snapshot": "beac7a133ec4977dad313abbe3ba91490f62e13c",
+        "findings": 1,
+        "dispositions": "review-findings-dispositions.md#b88-corrections-1",
+        "summary_sha256": "2f4dc3d675245f6245ed24533792678783d12c2642607452e03ed6ce158479be"
+      },
+      {
+        "summary": "review-pair/b88-corrections-3/summary.json",
+        "exit": 0,
+        "base": "beac7a133ec4977dad313abbe3ba91490f62e13c",
+        "snapshot": "089cc5deac79e9b77d6eb8124fe3b3a28a76b34a",
+        "findings": 0,
+        "summary_sha256": "60268375dcf878452f274b7c479fe71c53c81f7e14fb21534638a58d27f9123a"
+      }
+    ],
+    "previous_snapshot": "beac7a133ec4977dad313abbe3ba91490f62e13c",
+    "final_review_base": "beac7a133ec4977dad313abbe3ba91490f62e13c",
+    "attempts": [
+      {
+        "summary": "review-pair/b88-corrections-2/summary.json",
+        "exit": 4,
+        "reason": "CodeRabbit quota; advertised 13 minutes; OpenQodex completed without findings"
+      }
+    ],
+    "exit": 0,
+    "bundle": "b88-corrections-review-only.bundle",
+    "bundle_sha256": "2c460094cb6458940c9479bcf5cb650dc29d79326ca8a56292d7fe51e6a3b90b",
+    "review_worktree_removed": true
+  },
+  "known_preexisting_limitations": {
+    "implementation_base": "8b19b7474216434efd7ab9f08cc0ca50b5d9b5a7",
+    "base_file": "src-tauri/src/clovy_api.rs",
+    "endpoint_function_unchanged": true,
+    "endpoint_function_sha256": "b1a6cabdc9d27dae9262c3410385c1e0ec333df3c68d99abf571959e874a9b21",
+    "current_endpoint": "src-tauri/src/providers/notes.rs:239-280",
+    "cleanup_parser_unchanged": true,
+    "cleanup_parser_sha256": "3563efcc8c8e724c431bfd01233cf8f63751071885fd14a6236d1c1fc67938f6",
+    "current_cleanup": "src-tauri/src/providers/openrouter.rs:176-182",
+    "limitations": [
+      "Existing endpoint note generation does not reserve the shared llm pacing slot.",
+      "Existing cleanup accepts complete-sentence partial text on finish_reason length. These are pre-existing behavior, not fixed or newly proven by this cutover."
+    ],
+    "scope_basis": "Owner requires existing CLI/endpoint note routes preserved; no new product behavior authorized by the rename review procedure."
+  },
+  "coverage": {
+    "complete": 17,
+    "total": 17,
+    "pending": [],
+    "failed_attempts_counted": false
+  },
+  "findings_dispositions": [
+    {
+      "section": "# Per-commit findings dispositions",
+      "details": "These dispositions do not waive incomplete reviews: every exit4/10 round still requires a new completed pair. Final tasks.md will link completed rounds and these supporting artifacts."
+    },
+    {
+      "section": "4fb10a51, round1 (exit4, incomplete)",
+      "details": "- `agent-runtime/package.json:1`, Deleted desktop build dependency: valid at the deliberately isolated deletion commit; refuted as a remaining final-tree defect. The orchestrator explicitly required a pure deletion commit (2026-10-28). Following commit `db0bab17` removes package scripts, Tauri sidecar packaging, before-dev hooks and the runtime packager. `a3b5d82e` also removes the renamed macOS release wrapper's obsolete SEA/runtime sections. Final release build exited0 with34 bundle files and no sidecar; packaging regression11/11 passed.\n- `agent-runtime/src/sdk-engine.ts:1`, Identity test references deleted engine: the following `db0bab17` changes `src/test/technical-identity.test.mjs` to remove the deleted engine read. Full frontend1834/1834 passed.\n- `agent-runtime/src/service.ts:1`, Runtime deletion breaks desktop agent integration: the following `db0bab17` removes native host wiring and uses CLI session persistence. Native post-cut Claude completed four turns and cancellation persisted; release packaging passed. No native runtime remains required at the final tree.\n\nThe split is a review-size accommodation, not a claim that intermediate pure-deletion commits independently build. Supporting diff: `review-split-followup-evidence.diff`; integration evidence: `final-make-verify-all.log`, `release-bundle-build.log`, `release-bundle-files.txt`, `run-20261028-final/report.md`."
+    },
+    {
+      "section": "1714bb2c, round1 (exit4, CodeRabbit quota)",
+      "details": "- `docs/release-macos.md:89`, Release path still requires the retired runtime: fixed by the later final group `a3b5d82e`. The renamed `scripts/build-macos-release.sh` is now covered by the sidecar guard. RED reproduced the omission; GREEN11/11 and `bash -n` passed. The final group's review must complete before acceptance."
+    },
+    {
+      "section": "4fb10a51, round2 (exit4, CodeRabbit quota)",
+      "details": "OpenQodex completed all coverage. Six findings all concern intentionally intermediate dependencies: deleted package breaks build; deleted manifest breaks identity test; development main entry point missing; SDK desktop dependency; SDK identity-test dependency; service desktop integration. These are resolved by db0bab17 and the release wrapper fix a3b5d82e as above. The CodeRabbit quota means this round remains blocked despite the completed OpenQodex coverage."
+    },
+    {
+      "section": "db0bab17, round1 (interrupted pair, incomplete OpenQodex)",
+      "details": "The pair did not leave a summary after stopping the parallel queue; raw OpenQodex artifacts are preserved, and a fresh paired round is required. Its findings were still evaluated:\n\n- Duplicate macOS release failures in package.json/build-agent-runtime.mjs: fixed by a3b5d82e.\n- Lost historical attachment context and rejected run replay on retry: reproduced with fake CLI tests; fix in progress, with persisted retry ancestry and fresh conversation boundary.\n- Routine get_dictation toolset bypass: reproduced by two Rust tests (catalog and direct call both permitted despite empty toolsets). Fix filters the catalog and rechecks permission before dispatch, including revocation.\n- Legacy session engine mismatch, note hydration overwriting newer selections, rename input focus: six expected RED failures, then96 related frontend tests passed, typecheck/Biome0, Impeccable empty. Fixes pending combined commit/review."
+    },
+    {
+      "section": "4fb10a51, round3 (exit6, both complete)",
+      "details": "Accepted pair summary: `review-pair/c-4fb10a51-3/summary.md`. Five findings (deleted package build target; missing dev main; retained SDK identity test; native SDK dependency; service integration) are the deliberately intermediate dependencies described above. Each is refuted in remover-clovy-api tasks7.3 with the follow-up commits and final gate/build/native evidence. CodeRabbit reported a completed result with no fresh detailed review; that exact tool detail remains in the summary, without claiming a fresh review."
+    },
+    {
+      "section": "Current fix mapping after tree-preserving review splits",
+      "details": "Release wrapper fix is now229c9301; historical attachment/retry, routine dictation and frontend fixes are950e5ea7; escaped secret quotes and sandbox path fixes are5f9e0cb7. Source trees and passing gates are unchanged by the history rewrites. Full maps are in coverage-rewritten-history.json and full-test-rewritten-history.json.\n\nThe escape findings were baseline-identical, but were fixed instead of left as refutations: RED3 failures, GREEN58 tests, desktop Rust2121/0/21, clippy/fmt, and actual sandbox-exec on synthetic paths passed. Each fix commit still needs its own completed paired review.\n\nThe chat-test partial-deletion coverage omission persisted in isolated-file rounds c-18413364-1 and-2. Both exit4 rounds are rejected. Complete old-file deletion72fccafa and complete CLI-only addition2f831daf each completed a paired review with exit0 (c-72fccafa-1/summary.md and c-2f831daf-1/summary.md), with the same final tree; this does not waive or omit any changed range."
+    },
+    {
+      "section": "0ddde3d3, round1 (exit4, CodeRabbit quota)",
+      "details": "OpenQodex completed666/666 changed hunks. This is evidence for triage, not an accepted paired gate. Two new findings are being reproduced and corrected: persisted historical steering omitted from CLI replay; unattended Claude file/web built-ins ignoring saved routine toolsets. ReadTools catalog/dispatch also needs the existing routine context guard; RED confirms catalog leakage and argument parsing before denial.\n\nOther findings: two obsolete macOS release references fixed229c9301; historical attachments fixed950e5ea7; quoted-secret escaping fixed5f9e0cb7; legacy engine display/submission mismatch, rename focus, and late note hydration fixed950e5ea7. The engine mismatch has two reported locations but one root cause. Final reviews must cover all correction commits."
+    },
+    {
+      "section": "Context/policy fix commit228aa4f2",
+      "details": "All three behaviors reproduced and fixed: bound routine read catalogs/dispatch, persisted Steering replay, and Claude routine file/web built-ins. Full Rust2126/0/21, clippy all-targets/fmt/scanner pass; make verify only known owner-excluded Biome errors. Detailed evidence: review-fix-context-policy-delivery.md. No new native/paid proof; owner manual post-merge provider flows remain explicitly not proven. Pair review of this commit is still required."
+    },
+    {
+      "section": "0ddde3d3, round2 (exit4, CodeRabbit quota)",
+      "details": "Summary review-pair/c-0ddde3d3-2/summary.md: OpenQodex complete, CodeRabbit rejected included quota. Release duplicates are fixed229c9301, retry/attachment/frontend findings950e5ea7, routine Claude built-ins228aa4f2. The newly reported src/lib/tauri.ts:68 workspace-test steering expectations describe the intentionally intermediate wiring commit: its parent workspace test is deleted in72fccafa then replaced by the complete CLI-only test in2f831daf, both paired exit0. Current frontend1843 tests passed. This is not a remaining final-tree defect and does not waive the still-incomplete pair for0ddde3d3."
+    },
+    {
+      "section": "CodeRabbit findings, 0ddde3d3 round3 (pair still running)",
+      "details": "- Rename focus: fixed950e5ea7; regression passed again with review-usage-green.log.\n- Tavily key hidden but retained: intentional accepted D8, cli-substitui design.md407 explicitly hides the unused key and preserves its harmless saved value. MemorySecretStore preservation test confirms that contract; no current desktop consumer or actual Keychain inspection. No row reintroduced and no automatic credential deletion.\n- Internal CLI ID in usage panel: behavioral RED5 failures, scoped frontend fix with75 GREEN tests, typecheck/Biome0, Impeccable empty; review-usage-* evidence. Pending commit.\n- Routine snapshot test reads global settings without mutex: confirmed; added existing GLOBAL_SETTINGS_TEST_LOCK to the test only, verification pending in the coverage group."
+    },
+    {
+      "section": "Resumption: current HEAD f75f05a0, 0ddde3d3 round4",
+      "details": "The current history has17 commits, of which three have completed paired coverage (4fb10a51 exit6 with recorded refutations,72fccafa and2f831daf exit0). `resumption-coverage.json` lists exact commits and attempts. Prior dispositions saying usage labels and the routine settings lock were pending are superseded by f75f05a0 and its `spec-coverage-gates-summary.json` (frontend1849/0; desktop+companion2161/0/21).\n\nRound4 used the prescribed unmodified review-pair.sh with `diff.renames=false` in its environment, a clean detached review-only checkout, parent4fb10a51 and the unchanged exact synthetic-fixture allowlist. No build ran concurrently. CodeRabbit completed117 of the129 expected paths and omitted the same12 rename source paths as round3. After that deterministic failure was known, this run interrupted its own remaining OpenQodex work rather than consuming another full doomed round. The generated summary reports exit130, OpenQodex interrupted and CodeRabbit scope_mismatch; it is not accepted coverage. Round3's exit4 remains unresolved. No reviewer flags, global Git settings, harness files, history or review artifacts were modified. The owned review-only checkout was removed.\n\nSummary: `review-pair/c-0ddde3d3-4/summary.md`; exact missing paths: its `summary.json` tools.coderabbit.detail.scope.not_reviewed. A further identical attempt is not planned. Integration needs an orchestrator-approved coverage mechanism for both sides of the renames (or an upstream reviewer/adapter correction); source/commit preservation remains binding.\n\nRound4 findings triage:\n\n- `LlmProvidersSection.tsx`: refuted by the persisted retired-chat normalization already implemented in registry/providers and its passing fixtures, recorded in phase4 task4.4 and group2 tests. No retired chat value reaches current provider output after load.\n- `routines.rs` settings test lock: fixed in f75f05a0; `spec-coverage-routine-lock-green.log` and final full gate.\n- `agent_sessions/api.rs` retry workspace: confirmed in the final source, new regression/correction in this resumption.\n- `retirement.rs`: NoEntry already maps to success in `credentials.rs:16-20`; the short-circuit and startup wait are real and corrected in this resumption, without accessing actual credentials.\n- `036_retire_native_chat.sql` routine claims: refuted. `start_scheduler` (`routines.rs:698-712`) awaits `reconcile_after_restart` (`578-616`), which ends with `reconcile` (`491-504`). That always calls `release_terminal_claims` (`506-549`), selects matching claims for already-terminal routine runs (including cancelled), clears them and advances schedules. It does not require the routine run to remain running. Immutable SQL is preserved."
+    },
+    {
+      "section": "Scoped corrections pair resumption-fixes-1 (exit4, CodeRabbit quota)",
+      "details": "Summary: `review-pair/resumption-fixes-1/summary.md`. OpenQodex completed19/19 changed ranges and reported one real effect of the first correction: the general vault/skill guard denied vault discovery for every routine because the routine policy has no vault toolset. The owner-requested correction concerns the skills toolset, not changing vault discovery.\n\nThe additional behavioral test `routine_vault_discovery_does_not_require_the_skill_toolset` reproduced that failure (`resumption-vault-red.log`,1 failed). The fix narrows the routine check to `list_skills`/`load_skill`; discovery still requires a bound turn and reaches the native-app boundary as before. This final delta postdates the paired snapshot and requires review; the previous OpenQodex result is not claimed for the new bytes.\n\nCodeRabbit used no credits and refused the pair after its three included reviews were consumed, announcing29 minutes. No identical quota loop was started. The required pair remains incomplete (exit4); corrections stay uncommitted while the gate is blocked. The exact reviewed seven-file patch is preserved as `resumption-reviewed-fixes-1.patch`, and the owned review-only checkout was removed after checking its file hashes."
+    },
+    {
+      "section": "Rename-only snapshot400b2e6d: complete pair, exit6",
+      "details": "`review-pair/rename-deletions-1/summary.md` completed both tool statuses; OpenQodex covered all12 hunks, with no missing ranges. CodeRabbit returned completed and explicitly stated “No fresh detailed file review was performed in this run”; no fresh detailed review is claimed. Ten OpenQodex findings concern the deletion-only intermediate snapshot authorized by the owner. They are refuted as final-tree defects by the second snapshot312844f6006f8d60c2ab5bda62f7930e30378bbd (tree exactly0ddde3d3, proof `rename-review-map.json`):\n\n- `src-tauri/src/agent_runtime/api.rs:1`: restored under `src-tauri/src/agent_sessions/api.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/domain.rs:1`: restored under `src-tauri/src/agent_sessions/domain.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/home_import.rs:1`: restored under `src-tauri/src/agent_sessions/home_import.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/migration.rs:1`: restored under `src-tauri/src/agent_sessions/migration.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/mod.rs:1`: restored under `src-tauri/src/agent_sessions/mod.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/persona.rs:1`: restored under `src-tauri/src/agent_sessions/persona.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/protocol.rs:1`: restored under `src-tauri/src/agent_sessions/protocol.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/repository.rs:1`: restored under `src-tauri/src/agent_sessions/repository.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/skill_identity.rs:1`: restored under `src-tauri/src/agent_sessions/skill_identity.rs` in312844f6; declarations, startup/repository, registrations and imports use agent_sessions. Exact wiring: `rename-followup-wiring.txt`.\n- `src-tauri/src/agent_runtime/native_connectors.rs:1`: deliberately retired native connector implementation;312844f6 removes its callers along with host/tools/secret wiring. Exact exhaustive grep of src-tauri/src at312844f6 returns no native_connectors references (exit1), recorded in `rename-followup-wiring.txt`.\n\nFinal existing validation: `spec-coverage-make-verify-all.log` and `spec-coverage-gates-summary.json` (desktop+companion2161 passed/0 failed/21 ignored, frontend1849 passed), `run-20261028-final/report.md` (accepted CLI/MCP), and `resumption-rust-green-final.log` (256 affected tests). The deletion-only snapshot is never claimed to build. This covers old paths only;117 remaining paths still require their pair.\n\nAn orchestration error launched `rename-remainder-1` before checkout had advanced after a mapping assertion failed (native_connectors is retired, not restored). Both HEAD/base were400b2e6d, with zero files; the pair immediately returned4 (OpenQodex report_missing, CodeRabbit no committed changes). This provides no coverage. The runner now asserts a nonempty diff before invoking the unmodified harness. Correct second snapshot goes to fresh rename-remainder-2; no identical retry or reviewer/harness change."
+    },
+    {
+      "section": "Rename remainder312844f6: complete pair, exit6",
+      "details": "`review-pair/rename-remainder-2/summary.md`: both reviewers completed the117-file snapshot, no omitted paths/ranges. The tree equals original0ddde3d3 (`rename-review-map.json`). Dispositions of all23 findings:\n\n- package.json:14 and deleted build-agent-runtime.mjs:1: fixed229c9301; release wrapper RED/GREEN11/11, `release-bundle-build.log`, `release-bundle-files.txt`, accepted run-20261028-final report.\n- api.rs:371 branch attachments: fixed950e5ea7, historical attachment/retry behavioral regressions; `review-fix-gates-summary.json`, `resumption-rust-green-final.log`.\n- api.rs:839 and repository.rs:170 overlapping runs: preexisting repository claim behavior, not introduced by the native removal. create_run is byte-identical to base8b19b747 (hash in `rename-remainder-baseline-provenance.json`); both old and new CLI retries call that same transaction. The approved design364 explicitly retains the engine-neutral repository behavior. Refuted as a cutover regression; atomic multi-window session claiming is a separate follow-up, not claimed fixed.\n- events.rs:99 completion identity: both message.completed persistence/emission branch and complete_assistant_message are byte-identical to base host/repository; exact hashes in provenance JSON. The design364 explicitly moves existing event persistence unchanged. Refuted as an introduced identity change, not as a proof that every hydration race is absent.\n- events.rs:485 escaped secret suffix: fixed5f9e0cb7; `review-fix-escaping-{red,green,rust-all}.log`, behavioral escaping coverage retained.\n- migration.rs:229 unreadable Hermes definitions: entire file byte-identical to base; approved design364 labels this retained Hermes importer inert. No new import path or manifest behavior introduced. Separate historical importer concern, not a cutover regression.\n- persona.rs:314 saved personality: entire file byte-identical; design364 explicitly records that Home stopped consuming persona on2026-10-17 (ADR-0064), before this branch. Preserving settings commands does not introduce the earlier prompt omission. Separate product follow-up, not claimed fixed.\n- repository.rs:1062 legacy skill setting: reconcile_obsidian_skill_settings byte-identical to base; no change to canonicalization order by this cutover. Separate legacy preference reconciliation concern; not claimed fixed.\n- skill_identity.rs:87 nested metadata: entire module byte-identical to base, retained identity migration behavior. Separate preexisting parser concern; not a new mutation introduced here.\n- connectors/agent_tools.rs:431 ignored search filters, :447 ignored write fields, :453 schema-required coordinates, :1035 empty update body: input_schema and issues_search/create/update are byte-identical to their former native_connectors implementations (provenance JSON). The move preserves existing GitHub tool contracts as required; no field/filter behavior changed. Refuted as cutover regressions; improving that inherited schema/dispatch contract is a separate follow-up, not represented as fixed.\n- routines.rs:759 built-in grants: fixed228aa4f2, `review-fix-routine-builtins-red.log`, `review-fix-context-policy-all-rust.log`; routine toolsets are passed to CLI policy.\n- AgentWorkspace.tsx:1193, AgentSessionBar.tsx:128, useNoteChat.ts:139: fixed950e5ea7, legacy engine resolution/rename focus/late hydration behavioral regressions and final1849 frontend pass (`spec-coverage-gates-summary.json`).\n- tauri.ts:67 stale steering tests: intentional intermediate state, complete old/new test snapshots72fccafa and2f831daf each have paired exit0; final frontend1849 pass.\n- retirement.rs:33 missing Keychain/all services: NoEntry already success in credentials.rs16-20; local resumption fix attempts all services and retries incomplete references, proven with injected deletion and `resumption-retirement-red-executed.log`, `resumption-rust-green-final.log`. Final delta pair remains required.\n- routines.rs:2098 settings lock: fixedf75f05a0, `spec-coverage-routine-lock-green.log` and final full gate.\n- commands.rs:3238 asynchronous cleanup: corrected in local resumption delta, validated256 affected tests and final clippy; final delta pair remains required.\n\nThe baseline refutations concern introduction/scope, not assertions that inherited defects are absent. No speculative unrelated redesign was added to the owner's two changes. All preserved correction commits and final new bytes still require their own paired coverage before final integration acceptance."
+    },
+    {
+      "section": "1a18338d: complete pair, exit6",
+      "details": "`review-pair/c-1a18338d-1/summary.md`, both reviewers complete. Seven findings:\n\n- release-macos.md94 obsolete release steps: fixed229c9301, release regression11/11 and existing release-bundle-build.log/files proof.\n- release-windows.md40 bundled-agent qualification: fixed laterac83883a; current line88 explicitly requires an installed CLI and its own login. No Windows run is claimed.\n- CONTEXT.md7 retired claims: provider prose already fixedac83883a, but Skill/Toolset and MCP glossary still had native-loop/legacy-agent assertions. Corrected locally to Clovy MCP relay and local authority, with ADR-0072. Final docs delta still needs review.\n- agent-note-tools.md16 note reference mismatch: corrected the canonical CONTEXT Note reference entry to get_note and its existing owning doc; no tool rename.\n- notion-implementation-plan.md165 Hermes: the old top banner incorrectly redirected historical Hermes text to the retired native runtime. Replaced with an explicit historical-plan notice and the current gateway/broker ADRs, retaining old plan text as history.\n- README.md50 accounts claim: fixedac83883a; current line84 says No Clovy account or billing, lines30-32/48 explain installed CLI/account.\n- llm-providers.md233 direct MCP versus gateway: two configurations were conflated. Existing attended CLI-owned connections remain CLI-owned; app-configured MCP uses Clovy's gateway with its own credential custody. Added this scope distinction to the guide, no runtime/security/ADR decision changed. Final docs delta still needs review.\n\nStatic check of the three edited docs: changed relative targets resolve, retired note-reference name and native-agent glossary assertion removed, git diff --check clean. No frontend/Rust build is required for these prose changes."
+    },
+    {
+      "section": "6ae504f5 round1: incomplete, CodeRabbit quota",
+      "details": "`review-pair/c-6ae504f5-1/summary.md` exit4, OpenQodex complete and CodeRabbit quota31 minutes. No coverage acceptance; one fresh pair must run after the advertised deadline plus margin in `current-quota-window.json` (2026-10-28T22:33:59.870549Z). No credits or early retries.\n\nOpenQodex HUD finding confirmed by native timer regression (`resumption-hud-timer-red.log`,1 expected failure): paste_completed scheduled native hide at900ms, preempting the frontend's3s missing-OpenRouter-key notice. The fix changes only the native paste-completion fallback to3500ms, leaving normal frontend immediate hide, discarded recordings and shutdown behavior intact. Native tests cover the minimum notice-plus-exit duration and unchanged controls. Source visual styling/frontend unchanged; no new app launch or visual proof is claimed. Focused GREEN/clippy results follow in the final checkpoint; new code requires the final delta pair."
+    },
+    {
+      "section": "6ae504f5 round2: complete pair, exit6",
+      "details": "`review-pair/c-6ae504f5-2/summary.md`: both reviewers completed after the single finite quota wait; no early call or credits. HUD timer finding corrected with RED/GREEN198 tests and clippy/fmt, as above; final delta pair still required.\n\nCodeRabbit Keychain concern is refuted by compile-time isolation: `src-tauri/src/llm/secrets.rs:15-28` has mutually exclusive cfg(not(test)) KeychainSecretStore and cfg(test) MemorySecretStore branches; KeychainSecretStore itself is cfg(not(test)) at33. That code is already present in6ae504f5 as well as currentHEAD. `providers/mod.rs:567-569` obtains the same store, and commands.rs:3060-3061/3144-3145 compile both benchmark and timing modules only under cfg(test). Their child test process therefore cannot compile or select the production Keychain implementation through this API. This is source/configuration evidence, not an actual credential read/write experiment."
+    },
+    {
+      "section": "c-2be3ce81-1 — all three findings corrected locally",
+      "details": "- OpenQodex retry: AppSettings generation onRetry now fetches directly in named read-only partitions; default partition retains opening the picker.\n- CodeRabbit effective settings: saving/removing global keys merges only providerApiKeysConfigured into effective settings, retaining all partition model overrides.\n- OpenQodex detail cards: ModelPickerPopover permits the generation catalog portal without the unrelated all-models flyout.\n- Five regressions demonstrated RED (resumption-catalog-ui-red-executed.log); GREEN32/0 across four suites (resumption-catalog-ui-green-final.log). Direct installed tsc --noEmit exit0 and scoped Biome exit0 (25 existing warnings), logs resumption-catalog-ui-{typecheck,biome}-final.log. Impeccable detector [] in resumption-catalog-ui-impeccable.json. pnpm auto-install/noTTY failures were runner setup, not test results; no versions changed.\n- Browser shim proof via existing Chrome: ui-proof/result.json (zero page/console errors), catalog-hover.png and partition-key-preservation.png inspected. Pointer/focus details, named-partition retry, save/remove override preservation passed. Browser/fake IPC only; no inference/native proof claimed.\n- These corrected bytes still require the final delta pair; this original-commit pair does not claim to review the later correction."
+    },
+    {
+      "section": "c-85644306-1 — completed pair, disposition in progress",
+      "details": "- OQ image cache: already corrected in b88b5c57. client.rs finish_image_entry serializes completion accounting under state lock; concurrent_images_respect_completed_cache_budget regression at fal/tests.rs872 covers concurrent completion.\n- OQ restart recovery findings at client.rs377/403 and providers/mod.rs1198: duplicate condition, outside the explicitly recorded in-process recovery contract. remover tasks.md50 already states the bounded job memory does not promise app-restart survival, at original85644306 and finalHEAD. media-generation spec guarantees queue polling to completion/deadline; same-process key recovery has video_keeps_its_job_during_queueing_and_credential_recovery and an_inaccessible_video_can_resume_with_a_rotated_key_without_resubmit. Cross-restart recovery is NOT claimed proven or implemented; no new persistence architecture is introduced in this correction.\n- CR redirect check: refuted against production call chain queue.rs199-205 -> video_download_url.rs40-60, Policy::none + no_proxy + address pinning. Existing pinned_video_download_client_does_not_follow_redirect_to_loopback and media_redirects_never_forward_a_request_or_key cover the builder and fake-origin path.\n- Pending fixes: definitive submit rejection retry for images/video (must retain ambiguous/post-acceptance dedupe), transient DNS classification, pre-decode returned geometry validation, normalize BMP/TIFF to PNG without losing source pixels. No real provider request or contract acceptance assertion.\n\nAll c-85644306-1 dispositions now complete. The four pending corrections above are applied in fal/client.rs, queue.rs, image_edit.rs and the shared video_download_url.rs boundary. Definite submit rejections clear only the stored outcome under its existing mutex; ambiguous errors and post-acceptance errors remain cached. Header geometry is checked before pixel decoding. BMP/TIFF are converted to PNG without resizing. Typed DNS failures map to transient upstream while unsafe URLs/addresses remain terminal and never requested.\n\nEvidence: resumption-fal-red.log (2 behavioral failures/33 passes), resumption-fal-green.log (36/0), resumption-download-url-green.log (28/0, same compiled binary), resumption-fal-clippy.log (all-targets locked -D warnings exit0), resumption-fal-fmt.log (exit0). The retry regression covers four rejection statuses for both image/video, successful replay and a separate post-acceptance key rejection control. DNS uses an injected resolver, no public DNS/network; media uses local fake peers. Existing geometry, cache concurrency and redirect tests remain green. No app/release build or live inference. Corrected bytes still need the final delta review."
+    },
+    {
+      "section": "c-7a4c8553-1 — all15 findings treated against final branch",
+      "details": "Both tools completed; CodeRabbit explicitly says no fresh detailed file review was performed. This is retained as a limitation, not called a fresh detailed115-file review. OpenQodex reports115 deleted paths/47 units and15 findings.\n\n- Cargo.toml / app Cargo.toml default-dev startup (2 findings): b88b5c57 updates scripts/tauri-before-dev.mjs and tauri-dev.mjs to Vite-only startup, no backend manifest/server process. Existing launcher tests25/25 and accepted final native proof remain the evidence; no rebuild.\n- Cargo.toml / providers/lib.rs make verify (2 findings): b88 removes backend aggregate targets from Makefile; current verify is desktop/frontend/companion/scanners. Existing full gate spec-coverage-make-verify-all.log has only the two owner-excluded Biome configuration errors, no deleted-workspace error.\n- API client_contract workflow and rust-toolchain setup (2 findings): b88 deletes .github/workflows/clovy-api.yml and .github/actions/setup-rust/action.yml, updates coverage.yml/dependabot; metadata/absence captured in c-7a-final-tree-evidence.txt.\n- app Cargo.toml identity test (1): b88 updates src/test/technical-identity.test.mjs; final frontend1849 passed.\n- handlers/share.rs, share_viewer.rs, share_viewer_page.js, app/main.rs, services/share.rs (5): intentionally retired sharing has no replacement per design.md Non-goal25/task5.1. b88 removes desktop commands/UI/module and old local share keys. Existing links are not promised a replacement viewer. This is not a current surviving caller defect.\n- API lib.rs note/profile deletion (1): b88 removes remote revocation dependency and migration53 purges only retired share keys. db/migrations.rs retired_sharing_keys_are_purged_without_changing_notes_or_history and commands.rs profile_record_deletion_is_local_and_preserves_default_profile passed (spec-coverage-make-verify-all.log2070/1750). Notes/history stay intact.\n- services/agent_chat.rs model classifier (1): removal is explicit task5.1; local keyword triage remains before fal submission. No unsupported claim of multilingual model classification is retained. Existing group5 RED/GREEN classifier/registry tests and final server-reference guard cover the cut.\n- .env.example setup guides (1): ac83883a updates README, CONTRIBUTING and docs/development to the surviving ROOT .env.example, with no cd into the retired API directory. Current paths/commands inspected; root template exists.\n\nThese are staged-retirement dependencies resolved by later ORIGINAL commits, or intentional removals from the approved design. No source was restored and no new historical proof was fabricated.\n\n### Follow-up on the corrected fal admission path\n\nA new regression found completed rejections still occupying all32 slots (resumption-fal-admission-red.log: media_busy on attempt32). finish_image_entry now marks the rejected attempt complete; image_entry prunes only entries whose Arc has no other owner, so a caller already holding an entry retains the shared retry mutex. GREEN37/0 in resumption-fal-admission-green.log.\n\nThe additional real MCP-to-fake-provider check exposed the preexisting size-one SQLite fixture cancellation issue, documented in resumption-mcp-fixture-cause.md with the SQLx0.8.6 primary-source link. Both parallel and serial focused MCP runs failed9/1 with no agent_artifacts table. TestBroker's test-only pool now disables test_before_acquire, removing the cancellation await point that can drop its only in-memory connection. No production database behavior changed. GREEN: MCP105, approval_broker17, chat_engine47 (4 ignored), agent_sessions60, all0 failures; the formerly failing video case also passed alone. Logs resumption-fal-mcp-fixture-green.log, resumption-fixture-*-green.log and resumption-mcp-video-exact-green.log. No additional compiled target or paid request. Final all-target clippy/fmt and delta review still required for this last fixture adjustment."
+    },
+    {
+      "section": "c-ac83883a-2 — completed pair, exit6, six findings",
+      "details": "Five editorial findings corrected in the final delta: Slack auth options stay within the stated local-only boundary; docs/index marks automatic model rollout historical; ADR0013/0021 retirement addenda use singular agreement (original8b19b747 ADR prefixes preserved byte-for-byte); computer-use parity replaces active subscription gating and explicitly labels former plan/rollout states historical.\n\nOpaque edit-source request refuted: current MCP contract is sourcePath, declared in src-tauri/src/mcp_server/tools/media.rs:116 and resolved/canonicalized at229-238 with sandbox workspace enforcement. ADR0008's native-host source reference is not this CLI MCP schema; ADR0063/0072 govern CLI tools and ADR0073 retires server transport. docs/mcp-server.md now clarifies the existing canonical workspace check instead of inventing an incompatible opaque argument. No production interface changed. These six doc changes require the final-delta review; this completed pair covers the original commit only."
+    },
+    {
+      "section": "c-950e5ea7-1 — incomplete pair (exit4), actionable OpenQodex finding",
+      "details": "CodeRabbit quota17minutes; pair excluded from coverage. OpenQodex major: rejected messages replay in branches. Confirmed in current src-tauri/src/agent_sessions/api.rs: branch copying drops run_id, so later CLI replay cannot recognize replaced attempts. Extracted private copy_branch_items, filtering same-session retry parents only when the replacing attempt has reached the selected branch sequence. Ancestor attempts in retry chains are excluded before run provenance is dropped; older branch points still retain their then-current answer. Artifacts attached to omitted items are not copied. No CLI prompt contract or run schema change.\n\nRegression uses in-memory TestBroker and repository writes/readback, no AppHandle/credentials/network: chain of two retries, branching at all three positions. RED failed at second position (two answers vs one). GREEN agent_sessions63/0, chat47/0/4ignored; all-target clippy/fmt/diff0. Paths: resumption-branch-retry-red.log, resumption-branch-retry-green.log, resumption-branch-retry-chat.log, resumption-branch-retry-gates.json. Subsequent original pair and final-delta review still required.\n\nFinal Trail check: `resumption-final-trail-check.log`, exit1,20 lexical matches, first400KB cap. Owner .cursor/AGENTS unchanged by hash and excluded; .gitignore cache instruction does not recreate a pre-cut build; CONTEXT/CONTRIBUTING/PRIVACY/README describe CLI/MCP/direct providers, not authorization to touch keys, permissions, profiles or video. No omitted review ranges count as covered; accepted proof identifier limitations remain in the native report. The remaining matches repeat these same terminology overlaps. This is an evidence-backed refutation, not a green check or complete diff scan; carry it into the eventual commit message/handoff."
+    },
+    {
+      "section": "c-950e5ea7-3 — completed pair exit6, two findings",
+      "details": "CodeRabbit completed with no findings. OpenQodex repeats the branch-history finding corrected/tested above. Its additional catalog-unavailable finding is confirmed and corrected in AgentWorkspace.submit: historical non-CLI models with no catalog resolve through the existing local default command; explicit CLI selections remain unchanged. Two RED tests (pending/failed catalog) then72 GREEN across workspace-runtime/chat-engine; explicit CLI control passes. tsc0; scoped Biome final0 (10 existing warnings, test formatting only). Evidence resumption-engine-fallback-{red,green,typecheck,biome-final}.log. No visual layout/copy change; this behavior is component-tested, not new native inference proof. All later source bytes still require final-delta pair."
+    },
+    {
+      "section": "c-228aa4f2-1 — completed pair exit6, two findings",
+      "details": "OpenQodex's deleted-routine read bypass confirmed: routine_tool_allowed_for_session returns None after its JOIN no longer finds the deleted routine; the former !=Some(false) treated that as unrestricted. Shared private mcp_server/tools::routine_tool_allowed now uses the trusted binding.surface to require explicit authorization for routine-bound toolset guards. Caller graph identified read, dictation, skills, connector and media guards; all now use this boundary. Unbound read access and ordinary attended chat remain intact; get_obsidian_vault keeps its existing bound-turn discovery contract, separate from skills.\n\nRegression deletes a formerly enabled routine and checks catalog removal plus dispatch denial for14 read tools, get_dictation and both skill tools before parsing null arguments. RED reproduced; full mcp_server filter110/0/1ignored. Routines/chat consumers, all-target clippy/fmt/diff0 in resumption-deleted-routine-gates.json and corresponding logs. No AppHandle/credentials/network.\n\nCodeRabbit's indentation concern for routines.rs is refuted by the actual latest cargo fmt --all --check exit0 in resumption-deleted-routine-fmt.log; no routines.rs source edit was needed. Pair covers original228 only; the shared guard is later source and requires final-delta review."
+    },
+    {
+      "section": "resumption-final-delta-1 — completed pair exit6; superseded by corrections",
+      "details": "Exact35-file snapshot2b6207ca2ec724a27d90c272745aa2bd6497f710, treece27cd1696b6ecd4f342017f91421c4ae5f970e1. Original mapping/patch retained in final-delta-review-map-1.json and final-delta-1-reviewed.patch. Three findings confirmed and fixed:\n\n1. Branch artifact filtering incorrectly dropped attachments still referenced by retained retries. Removed that extra filtering, preserving the original artifact-copy contract. Private copy_branch_artifacts allows a real temporary-file/SQLite regression: the retained retry gets an artifact record and rewritten path whose independent bytes survive deletion of the synthetic source file. Rejected messages remain excluded. This supersedes the earlier disposition saying artifacts attached to omitted messages are skipped.\n2. redraw validated display-oriented geometry but decoded stored pixels. It now applies header orientation before rescaling/cropping. Colored-frame regression covers90-degree rotation and horizontal mirroring. Header bounds remain checked before decoding.\n3. Video creates retained definitive rejection entries and exhausted32 admission slots. Entries with no stored result are pruned only when no active caller holds the shared entry; accepted/ambiguous outcomes retain replay protection. Regression performs40 distinct rejected requests then succeeds after a synthetic key correction, with41 POSTs total.\n\nAll three RED failures reproduced in resumption-final-delta-regressions-red.log; GREEN3/0 in the corresponding green log, broader suites/clippy/fmt in resumption-final-delta-fixes-gates.json. The additional non-verdict QA observation was also corrected: computer_use.rs:1715-1746 checks platform/grant/pinned driver/permissions, not the generation model. The QA matrix now reflects those gates and labels the old model gate historical. No native permission or provider proof was rerun. Current source requires resumption-final-delta-2; pair1 does not cover subsequent bytes."
+    },
+    {
+      "section": "resumption-final-delta-2 — completed pair exit6; superseded by final corrections",
+      "details": "Snapshot0374dba7fb78ab33da72d2fec408412e3f1d33ee, treeb6225084a68356ba0a54079e7d0f94e14751d259. Mapping/patch retained as final-delta-review-map-2.json and final-delta-2-reviewed.patch. OpenQodex confirmed an active image retry could be expired using its original timestamp despite holding the shared entry. Expiry pruning now preserves entries held by callers, matching capacity eviction. Regression holds the expired shared mutex, verifies pointer identity remains in cache, then drops the caller and verifies idle expiry still removes it. RED reproduced and fal40/0, clippy/fmt0 in resumption-image-expiry-{red,green,clippy,fmt}.log and gates.json.\n\nBoth CodeRabbit findings were missing spaces around numbers in continuation records. Updated only changed task records, preserving inline code and commit hashes; a header now distinguishes aggregate integration status from the historical records below. These source edits require final-delta3; delta2 is not current-source coverage."
+    },
+    {
+      "section": "b88-deletions-1 — completed pair exit 6, three transient findings",
+      "details": "Snapshot A 1380bea360521dfc2a16e1a4ee22fa623881cc5b deletes only the three authorized old test paths. OpenQodex reports their dangling declarations in clovy_api.rs. All three are expected intermediate-state findings, refuted by snapshot B 864189516da2ac893f1d7760ea14a4e9acd554de: clovy_api.rs itself is removed, src-tauri/src/lib.rs declares providers, and providers/mod.rs declares the three extant relocated test files. Exact B/HEAD declarations and path existence are captured in b88-deletion-followup-evidence.txt. B's entire tree equals original b88 tree a5ac09ebca8cc16419bf68918ce7397f5aeb298f (b88-rename-review-map.json). No final source/test module is missing. Existing accepted final Rust compilation/all-target clippy in resumption-image-expiry-{green,clippy}.log covers these unchanged declarations; no build/test is repeated.\n\nCodeRabbit returned completed/no findings but explicitly said no fresh detailed file review was performed. Preserve that limit; do not describe it as fresh detailed CR coverage. Pair B remains mandatory before aggregate b88 coverage is complete."
+    },
+    {
+      "section": "b88-remainder-1 — completed pair exit 6, eight findings",
+      "details": "Both tools completed; OpenQodex supplied all 471/471 changed ranges, no missing ranges. Its packet capped surrounding code (1540 symbols), an explicit review limit. CodeRabbit completed a fresh review. All eight verdict findings are disposed below; seven unique concerns include two duplicate documentation findings.\n\n1. OpenQodex + CodeRabbit, current documentation excluded: confirmed. scripts/check-clovy-api-references.mjs now scans docs and root Markdown, with ADRs plus four exact historical records exempt (retired server PRD, retired telemetry plan, July completed transcription plan/design). New docs are not blanket-exempt. The precise historical set is visible in the checker; current docs regression RED then GREEN. These historical records are not current configuration guidance.\n2. OpenQodex, staged references bypass: confirmed. The guard scans indexed regular-file blobs independently via bounded git cat-file batches, then worktree/untracked files, with deduplicated findings. A temporary-repo regression stages a violation then cleans/deletes only the worktree file; both remain rejected until the index deletion is staged. RED then GREEN. No production index/config is changed by the test.\n3. OpenQodex, endpoint pacing: refuted as introduced by this change; the entire generate_note_from_transcript_local function is byte-identical to the pre-implementation base 8b19b747 src-tauri/src/clovy_api.rs. The selected Endpoint branch is also unchanged. Exact comparison/hash in b88-preexisting-route-evidence.json; current providers/notes.rs:56-64,239-280. The owner explicitly requires the existing endpoint route preserved. This remains a known pre-existing limitation, not a claim that pacing is implemented. A product change to unify endpoint scheduling is outside this cutover.\n4. OpenQodex, length-limited cleanup: refuted as introduced by this change; the full response parse/extract/scaffolding suffix in providers/openrouter.rs:176-182 is byte-identical to the pre-implementation direct route in 8b19b747 clovy_api.rs. Comparison/hash in b88-preexisting-route-evidence.json. Existing notes.rs tests explicitly cover the shared parser's complete-sentence truncation behavior. This is a pre-existing cleanup limitation, not a false assertion that truncated output is impossible or new inference proof. Changing that existing output contract is outside the authorized rename/cutover closure.\n5. OpenQodex, raw network HUD errors: confirmed. src/lib/errors.ts restores localization for transport-text variants of the retained direct-transport code. English/Portuguese copy in src/i18n/messages/lib.ts names the provider, not a retired Clovy server. Regression covers both locales, timeout, unrelated codes and an unchanged retired-service reason; no old billing/auth mappings return. RED then GREEN.\n6. OpenQodex, Windows startup fixture: confirmed. src/test/tauri-dev-launcher.test.mjs uses path.delimiter and a pnpm.cmd wrapper on Windows, with a shared Node capture script and quoted executable paths. Existing launcher test passes on macOS. Actual Windows execution remains unproven, explicitly retained as a limitation.\n7. CodeRabbit, chat-provider guidance: refuted. src-tauri/src/llm/registry.rs:391-416 normalizes chat to CLI; the existing test at 1021-1051 rejects Endpoint/OpenRouter for Chat without changing the text model. LlmProvidersSection's chat picker uses getOptionsForUsage(\"chat\"), not the endpoint notes choices. CLI guidance in both locales is correct and unchanged.\n\nFocused verification: b88-corrections-red-direct.log (3 expected failures), b88-corrections-green.log (25/25), b88-corrections-typecheck.log (exit 0), b88-corrections-biome.log (format applied, one style info subsequently corrected), b88-corrections-reference-guard.log (exit 0). The initial pnpm wrapper attempted dependency verification and aborted before running tests; b88-corrections-red.log is an infrastructure failure, not RED evidence. Existing installed Vitest/TypeScript/Biome were invoked directly afterward, without installing or purging dependencies. No Rust code/build, actual provider request, or native app proof was added. The six changed files require their own paired gate against approved snapshot 966aad9f; the earlier 35-file approval is not claimed for these new bytes."
+    },
+    {
+      "section": "b88-corrections-1 — completed pair exit 6, one finding corrected",
+      "details": "OpenQodex completed without findings. CodeRabbit correctly distinguished request-builder errors from connection failures. src/lib/errors.ts now leaves builder errors to their existing native-detail fallback; the transport matcher continues to localize sending/timeouts. The regression checks both locales and distinguishes builder failures from real connection errors. RED reproduced in b88-builder-wording-red.log, then 11/11 GREEN in b88-builder-wording-green-final.log. Only errors.ts and its existing locale test changed after the six-file review; those two files require b88-corrections-2 against snapshot beac7a133ec4977dad313abbe3ba91490f62e13c. No other approved code or Rust source changed."
+    },
+    {
+      "section": "b88-corrections-3 — completed pair exit 0, final added delta accepted",
+      "details": "Both mandatory reviewers completed with no findings on snapshot 089cc5deac79e9b77d6eb8124fe3b3a28a76b34a against beac7a133ec4977dad313abbe3ba91490f62e13c. The intermediate b88-corrections-2 exited 4 due CodeRabbit quota and is excluded. Pair3 was deferred once until 05:00 UTC, beyond the advertised 13-minute window, without credits. Pair1 plus pair3 cover all six additional files at their final hashes; the earlier 35-file delta retains its separate accepted exit0 gate, with no repeated tests/review of unchanged source. Exact tree/hash chain and bundle are in b88-correction-review-map.json."
+    },
+    {
+      "section": "Final closure Trail check — exit 1, twenty lexical matches refuted",
+      "details": "final-closure-trail.log checks only the first 400 KB of 472 changed files against18 learnings; it is not a complete scan or a green result. All20 matches are lexical and repeat the already adjudicated scope boundaries. Owner .cursor/hooks.json and AGENTS.md remain hash-identical to the preserved owner manifest and are excluded from this commit. The .gitignore cache wording is an existing policy, not a new build/cache operation. CONTEXT.md:5,33,305,318,343 defines CLI/MCP/providers, isolation, permissions and tool contracts; it does not copy keys, grant permissions, enable video work or relabel omitted review ranges as covered. CONTRIBUTING.md:33 and PRIVACY.md:3 describe the same current product boundary. No native app was launched, no paid inference/credits used, no external harness changed, and incomplete review attempts remain excluded in the durable map. Final two-file gate b88-corrections-3 exited0 with both tools complete/no findings. Original35 and added6 files were hash-verified against their approved snapshots before metadata closure. The commit message records these refutations; personal learning is kept outside the repo to preserve the owner's Trail migration."
+    }
+  ],
+  "evidence_root": ".tmp/verify/remover-clovy-api/",
+  "disposition_history_note": "Chronological records: later corrections and final accepted gates supersede earlier pending statements. Failed/quota attempts are never counted as completed coverage.",
+  "trail_check": {
+    "exit": 1,
+    "conflicts": 20,
+    "complete_scan": false,
+    "log": ".tmp/verify/remover-clovy-api/final-closure-trail.log",
+    "refutation": "## Final closure Trail check — exit 1, twenty lexical matches refuted\n\nfinal-closure-trail.log checks only the first 400 KB of 472 changed files against18 learnings; it is not a complete scan or a green result. All20 matches are lexical and repeat the already adjudicated scope boundaries. Owner .cursor/hooks.json and AGENTS.md remain hash-identical to the preserved owner manifest and are excluded from this commit. The .gitignore cache wording is an existing policy, not a new build/cache operation. CONTEXT.md:5,33,305,318,343 defines CLI/MCP/providers, isolation, permissions and tool contracts; it does not copy keys, grant permissions, enable video work or relabel omitted review ranges as covered. CONTRIBUTING.md:33 and PRIVACY.md:3 describe the same current product boundary. No native app was launched, no paid inference/credits used, no external harness changed, and incomplete review attempts remain excluded in the durable map. Final two-file gate b88-corrections-3 exited0 with both tools complete/no findings. Original35 and added6 files were hash-verified against their approved snapshots before metadata closure. The commit message records these refutations; personal learning is kept outside the repo to preserve the owner's Trail migration.",
+    "diff_limit": "first 400 KB"
+  }
+}

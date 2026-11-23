@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 import { printCurrentWebview } from "./tauri";
 
 /**
@@ -28,7 +29,7 @@ export async function exportNoteAsPdf(
   }
 
   const previousTitle = document.title;
-  document.title = noteTitle.trim() || "Meeting notes";
+  document.title = noteTitle.trim() || t("lib.notePdf.defaultTitle");
 
   try {
     await print();

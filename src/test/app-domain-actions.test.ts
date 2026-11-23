@@ -34,20 +34,10 @@ function note(folderIds: string[]): NoteDto {
 function dependencies(flush: ReturnType<typeof vi.fn>): CreateAppDomainActionsDependencies {
   const currentNote = note(["folder-old"]);
   return {
-    agentSessions: [],
-    completedSessions: {},
     dispatch: vi.fn(),
     noteSaveController: { flush } as unknown as NoteSaveController,
-    pendingSessionProjectRef: { current: null },
-    sessionCompletionTouchedRef: { current: new Set() },
-    sessionCompletionWritesRef: { current: new Map() },
-    sessionFolders: {},
-    setActiveAgentSession: vi.fn(),
-    setActiveView: vi.fn(),
-    setAgentOrigin: vi.fn(),
-    setCompletedSessions: vi.fn(),
+    folderChangesRef: { current: { notes: new Map(), deletedProjects: new Map() } },
     setError: vi.fn(),
-    setSessionFolders: vi.fn(),
     state: {
       ...createInitialState(),
       notes: [currentNote],

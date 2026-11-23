@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  generatedMediaToolKind,
   humanizeToolName,
   toolActivityLabel,
   toolActivitySentence,
@@ -50,24 +49,5 @@ describe("toolActivityLabel", () => {
     expect(toolActivitySentence("read_file")).toBe("Reading files.");
     expect(toolActivitySentence("gh")).toBe("Using GitHub.");
     expect(toolActivitySentence(undefined)).toBe("Using a tool.");
-  });
-});
-
-describe("generatedMediaToolKind", () => {
-  it("recognizes image and video generation tools", () => {
-    expect(generatedMediaToolKind("generate_image")).toBe("image");
-    expect(generatedMediaToolKind("june_image.edit_image")).toBe("image");
-    expect(generatedMediaToolKind("mcp__june_video__generate_video")).toBe("video");
-    // animate_image is image-to-video — the placeholder must be the video one.
-    expect(generatedMediaToolKind("june_video.animate_image")).toBe("video");
-  });
-
-  it("ignores tools that read or analyze media without producing it", () => {
-    // A vision/screenshot tool must not open a generation canvas that never fills.
-    expect(generatedMediaToolKind("read_image")).toBeUndefined();
-    expect(generatedMediaToolKind("screenshot")).toBeUndefined();
-    expect(generatedMediaToolKind("analyze_image")).toBeUndefined();
-    expect(generatedMediaToolKind("generate_report")).toBeUndefined();
-    expect(generatedMediaToolKind(undefined)).toBeUndefined();
   });
 });

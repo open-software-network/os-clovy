@@ -1,0 +1,42 @@
+diff --git a/cli/src/native/e2e_tests.rs b/cli/src/native/e2e_tests.rs
+index 3c2c388..db4fdc1 100644
+--- a/cli/src/native/e2e_tests.rs
++++ b/cli/src/native/e2e_tests.rs
+@@ -6564 +6564 @@ async fn e2e_inspect() {
+-async fn e2e_click_stale_ref_falls_back_to_role_name() {
++async fn e2e_click_stale_ref_rejects_same_name_replacement() {
+@@ -6625,3 +6625 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
+-    // Now click the stale "Target" ref. Before the fix this returned:
+-    //   "CDP error (DOM.getBoxModel): Could not compute box model."
+-    // After the fix it falls back to role/name lookup and succeeds.
++    // A replacement with the same accessible name must not receive the click.
+@@ -6633,4 +6631 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
+-    assert_success(&resp);
+-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+-
+-    // Verify the fallback click hit the right (recreated) button.
++    assert_eq!(resp["success"], false, "{resp}");
+@@ -6639,5 +6634 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
+-    assert_eq!(
+-        get_data(&resp)["title"],
+-        "clicked",
+-        "Stale ref should have been resolved via role/name fallback"
+-    );
++    assert_eq!(get_data(&resp)["title"], "replaced");
+diff --git a/cli/src/native/element.rs b/cli/src/native/element.rs
+index 41e4f88..0d3ad27 100644
+--- a/cli/src/native/element.rs
++++ b/cli/src/native/element.rs
+@@ -71 +71 @@ impl RefMap {
+-                allow_role_fallback: true,
++                allow_role_fallback: false,
+@@ -475,0 +476,4 @@ pub async fn resolve_element_center(
++        if !entry.allow_role_fallback {
++            return Err(format!("Element ref {ref_id} is stale"));
++        }
++
+@@ -737,0 +742,4 @@ pub async fn resolve_element_object_id(
++        if !entry.allow_role_fallback {
++            return Err(format!("Element ref {ref_id} is stale"));
++        }
++

@@ -354,3 +354,53 @@ allowlist and per-model constraints from Venice's `/models` at build/deploy time
 rather than pinning ids by hand" follow-up; the durable fix (generating all
 three lists from one catalog fetch, which would also let the picker safely
 carry models with non-default constraints) remains open.
+
+## Addendum (2026-10-08): fal replaces Venice for video
+
+Venice is retired (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`). Video generation and
+animation run on fal queue endpoints behind the same Clovy API job contract
+(`jobId`, poll, terminal bytes). The curated text-to-video list is
+`fal-ai/wan/v2.2-a14b/text-to-video` (default) and
+`alibaba/wan-3.0/text-to-video`; animation uses the matching image-to-video
+endpoints, so an animation is never a text-to-video call in disguise. The fast
+path's 5s / 720p / 16:9 shape is valid for every curated model, and per-model
+ranges are validated before any charge. The quote is the documented fal list
+price per video second at the requested resolution, not a provider quote call.
+Completion is streamed bytes through `/v1/video/status/{jobId}`; fal never
+returns a download URL to the client. The three-place sync rule above still
+holds (`VIDEO_MODELS`, `KNOWN_VIDEO_MODELS`, `video_pricing`). The internal
+queue handle is now provider-neutral (`provider_request_id`). A user's own fal
+key travels as `x-fal-api-key` on creation and on every status poll of that
+job, because Clovy API never stores it; such a job is user-funded. The
+`private`-tier policy of the list above no longer applies: fal makes no
+retention promise that Clovy can pass on.
+
+## Addendum (2026-10-08): a key problem pauses the same job, it never restarts it
+
+A user-funded job needs a valid key from the fal account that started it on
+every poll. When a poll cannot use the key (Clovy API answers
+`fal_api_key_required`, `fal_api_key_rejected`, or `fal_request_inaccessible`,
+or the desktop cannot read the saved key), the job stays on the server. The
+agent's `generate_video` tool therefore returns a normal
+`waitingForProviderKey` result with the job id instead of failing the run. The
+chat renders that persisted result as a paused video card (the existing video
+error state, carrying the job id and the reason to fix), never as a finished
+video. The tool's optional `jobId` argument continues that job: it sends no
+submit and polls only that id, which goes out as one percent-encoded path
+segment. The only deadline is Clovy API's existing ledger lifetime. Its 404
+`job_not_found` cannot tell a job past its lifetime from an evicted,
+restarted, unknown, or foreign one, so the desktop reports the job as
+unavailable and never recreates it on its own. Rejected alternatives: waiting
+inside the call (no surface shows the reason while a tool runs), a
+frontend-only resume (bypasses the tool's artifact recording), host-side
+hidden state, and recreating the job (a second paid submit).
+
+
+## Addendum - 2026-10-28: direct providers only
+
+The server transport and funding portions are superseded for this fork by
+[ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
+on CLI engines and Clovy tools remain local through MCP. The server is removed,
+not replaced or deployed with a breaking contract. Earlier decisions above
+remain as historical records; current behavior follows ADR-0073 and ADR-0072.

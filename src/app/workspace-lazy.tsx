@@ -9,6 +9,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useT } from "../i18n";
 
 type WorkspaceLoader<Props extends object> = {
   Component: ComponentType<Props>;
@@ -88,32 +89,30 @@ class WorkspaceLoadErrorBoundary extends Component<
 }
 
 function WorkspaceLoadFailure({ onRetry }: { onRetry: () => void }) {
+  const t = useT();
   return (
     <section className="workspace-fallback workspace-load-error" role="alert">
-      <h2>Couldn't open this view</h2>
-      <p>Clovy couldn't load this part of the app. Try again.</p>
+      <h2>{t("app.workspace.loadFailedTitle")}</h2>
+      <p>{t("app.workspace.loadFailedBody")}</p>
       <button type="button" className="primary-action primary-solid" onClick={onRetry}>
-        Try again
+        {t("common.tryAgain")}
       </button>
     </section>
   );
 }
 
-type AgentWorkspaceModule = typeof import("../components/agent/AgentWorkspace");
-type AgentWorkspaceProps = NonNullable<ComponentProps<AgentWorkspaceModule["AgentWorkspace"]>>;
 type FoldersWorkspaceModule = typeof import("../components/folders/FoldersWorkspace");
 type FoldersWorkspaceProps = ComponentProps<FoldersWorkspaceModule["FoldersWorkspace"]>;
 type NoteEditorModule = typeof import("../components/note-editor/NoteEditor");
 type NoteEditorProps = ComponentProps<NoteEditorModule["NoteEditor"]>;
 type RoutinesViewModule = typeof import("../components/routines/RoutinesView");
-type RoutinesViewProps = ComponentProps<RoutinesViewModule["RoutinesView"]>;
+type RoutinesViewProps = Record<string, never>;
 type AppSettingsModule = typeof import("../components/settings/AppSettings");
 type AppSettingsProps = ComponentProps<AppSettingsModule["AppSettings"]>;
+type ActivityTimelineViewModule =
+  typeof import("../components/activity-timeline/ActivityTimelineView");
+type ActivityTimelineViewProps = ComponentProps<ActivityTimelineViewModule["ActivityTimelineView"]>;
 
-const agentWorkspace = createWorkspaceLoader<AgentWorkspaceModule, AgentWorkspaceProps>(
-  () => import("../components/agent/AgentWorkspace"),
-  (module) => module.AgentWorkspace,
-);
 const foldersWorkspace = createWorkspaceLoader<FoldersWorkspaceModule, FoldersWorkspaceProps>(
   () => import("../components/folders/FoldersWorkspace"),
   (module) => module.FoldersWorkspace,
@@ -130,12 +129,19 @@ const appSettings = createWorkspaceLoader<AppSettingsModule, AppSettingsProps>(
   () => import("../components/settings/AppSettings"),
   (module) => module.AppSettings,
 );
+const activityTimelineView = createWorkspaceLoader<
+  ActivityTimelineViewModule,
+  ActivityTimelineViewProps
+>(
+  () => import("../components/activity-timeline/ActivityTimelineView"),
+  (module) => module.ActivityTimelineView,
+);
 
-export const AgentWorkspaceRoute = agentWorkspace.Component;
 export const FoldersWorkspaceRoute = foldersWorkspace.Component;
 export const NoteEditorRoute = noteEditor.Component;
 export const RoutinesViewRoute = routinesView.Component;
 export const AppSettingsRoute = appSettings.Component;
+export const ActivityTimelineViewRoute = activityTimelineView.Component;
 
 const deferredWorkspacePreloads = [
   // Meeting-start navigation lands here, so queue the note editor first.
@@ -143,6 +149,7 @@ const deferredWorkspacePreloads = [
   routinesView.preload,
   appSettings.preload,
   foldersWorkspace.preload,
+  activityTimelineView.preload,
 ];
 
 type IdleCallbackWindow = Window & {
@@ -180,8 +187,13 @@ export function prefetchRemainingWorkspacesAfterPaint() {
 }
 
 function WorkspaceFallback() {
+  const t = useT();
   return (
-    <section className="workspace-fallback" aria-label="Loading view" aria-busy="true">
+    <section
+      className="workspace-fallback"
+      aria-label={t("app.workspace.loading")}
+      aria-busy="true"
+    >
       <span className="workspace-fallback-title" />
       <div className="workspace-fallback-lines" aria-hidden="true">
         <span />
@@ -192,4 +204,4 @@ function WorkspaceFallback() {
   );
 }
 
-export const preloadInitialWorkspace = agentWorkspace.preload;
+export const preloadInitialWorkspace = activityTimelineView.preload;

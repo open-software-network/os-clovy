@@ -19,31 +19,26 @@ use crate::{
     domain::{
         processing::{
             add_latency_checkpoint, manual_notes_for_generation,
-            process_saved_source_audio_with_progress, NoteProcessingProgressReporter,
-            ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT,
+            process_saved_source_audio_with_cancellation, process_saved_source_audio_with_progress,
+            NoteProcessingProgressReporter, ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT,
+            TRANSCRIPTION_RATE_LIMITED_CODE,
         },
-        processing_queue,
+        processing_queue::{self, RetryOrigin},
         types::{
             AppError, AssignNoteToFolderRequest, AssignSessionToFolderRequest,
             AssignSessionToProfileRequest, BootstrapResponse, CheckRecordingSourceReadinessRequest,
             ClaudeProjectCandidateDto, CompletedSessionDto, CreateDictionaryEntryRequest,
             CreateFolderRequest, CreateNoteRequest, DeleteDictionaryEntryRequest,
             DeleteFolderRequest, DeleteNoteRequest, DeleteNotesRequest, DictionaryEntryDto,
-            DownloadNoteAudioRequest, DownloadNoteAudioResponse, ExplainAgentApprovalRequest,
-            ExplainAgentApprovalResponse, FinishRecordingResponse, GetNoteRequest,
-            ImportClaudeProjectsRequest, ListNotesRequest, ListNotesResponse, MemoryDto,
-            MemorySettingsDto, MicrophonePermissionResponse, NoteDto, OpenPrivacySettingsRequest,
-            ProcessingStatus, ProfileDataSummaryDto, RecordingOrigin, RecordingOriginMetadata,
-            RecordingSessionDto, RecordingSource, RecordingSourceMode, RecordingSourceReadinessDto,
-            RecordingStatusDto, RemoveNoteFromFolderRequest, RemoveSessionFromFolderRequest,
-            RenameFolderRequest, RetryProcessingRequest, SessionFolderDto, SessionProfileDto,
-            SessionRequest, SetSessionCompletedRequest, ShareAddInvitesRequest, ShareCreateRequest,
-            ShareCreatedDto, ShareDeleteRequest, ShareDto, ShareGetRequest, ShareInviteKeyDto,
-            ShareInviteKeySaveRequest, ShareInviteKeysGetRequest, ShareInvitesAddedDto,
-            ShareKeyDto, ShareKeyGetRequest, ShareKeySaveRequest, ShareRevokeInviteRequest,
-            ShareSummaryDto, SourceReadinessDto, StartMeetingRecordingRequest,
-            StartRecordingRequest, SubmitIssueReportRequest, SubmitIssueReportResponse,
-            SuggestAgentSessionTitleRequest, SuggestAgentSessionTitleResponse,
+            DownloadNoteAudioRequest, DownloadNoteAudioResponse, FinishRecordingResponse,
+            GetNoteRequest, ImportClaudeProjectsRequest, ListNotesRequest, ListNotesResponse,
+            MemoryDto, MemorySettingsDto, MicrophonePermissionResponse, NoteDto,
+            OpenPrivacySettingsRequest, ProcessingStatus, ProfileDataSummaryDto, RecordingOrigin,
+            RecordingOriginMetadata, RecordingSessionDto, RecordingSource, RecordingSourceMode,
+            RecordingSourceReadinessDto, RecordingStatusDto, RemoveNoteFromFolderRequest,
+            RemoveSessionFromFolderRequest, RenameFolderRequest, RetryProcessingRequest,
+            SessionFolderDto, SessionProfileDto, SessionRequest, SetSessionCompletedRequest,
+            SourceReadinessDto, StartMeetingRecordingRequest, StartRecordingRequest,
             UpdateDictionaryEntryRequest, UpdateNoteRequest, UpdateNoteResponse,
         },
     },
@@ -64,7 +59,6 @@ use tokio::sync::OnceCell;
 
 const MEMORY_CONTENT_MAX_CHARS: usize = 4_000;
 const FOLDER_INSTRUCTIONS_MAX_CHARS: usize = 4_000;
-const ISSUE_REPORT_ATTACHMENT_LIMIT: usize = 20;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SQLITE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 static MEMORY_SETTINGS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -112,7 +106,7 @@ impl CaptureStartupGuard {
     }
 
     fn rollback(&mut self) {
-        self.rollback_with(|session_id| finish_capture(session_id).map(|_| ()));
+        self.rollback_with(|session_id| finish_capture(session_id, None).map(|_| ()));
     }
 
     fn rollback_with<F>(&mut self, stop_capture: F)
@@ -224,17 +218,29 @@ pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError
         notes,
         active_recoveries,
         active_recording,
-        provider_configured: crate::providers::provider_configured(),
     })
 }
 
 #[tauri::command]
+pub fn app_preferences_get(
+    state: tauri::State<'_, crate::app_preferences::AppPreferencesState>,
+) -> Result<crate::app_preferences::AppPreferences, AppError> {
+    crate::app_preferences::get(state.inner())
+}
+
+#[tauri::command]
+pub fn app_preferences_set(
+    state: tauri::State<'_, crate::app_preferences::AppPreferencesState>,
+    request: crate::app_preferences::AppPreferences,
+) -> Result<crate::app_preferences::AppPreferences, AppError> {
+    crate::app_preferences::set(state.inner(), request)
+}
+
+#[tauri::command]
 pub fn experimental_flags_get(
-    app: AppHandle,
     state: tauri::State<'_, crate::experimental_settings::ExperimentalSettingsState>,
 ) -> Result<crate::experimental_settings::ExperimentalSettingsSnapshot, AppError> {
-    crate::experimental_settings::get(state.inner())
-        .map(|settings| crate::experimental_settings::snapshot(&app, settings))
+    crate::experimental_settings::get(state.inner()).map(crate::experimental_settings::snapshot)
 }
 
 #[tauri::command]
@@ -325,75 +331,26 @@ pub async fn update_note(
     )))
 }
 
-/// Revoke the remote share for an item and drop its local keys, if the item is
-/// shared. Called before deleting a shared item so its server-side ciphertext
-/// and invite ACL don't outlive it: once the source note/session is gone the
-/// owner has no Share dialog left to revoke from, and existing recipient links
-/// would keep opening forever. Fail closed - if the revoke can't be confirmed
-/// the caller keeps the item rather than orphaning a live share.
-async fn revoke_item_share(
-    repos: &Repositories,
-    item_kind: &str,
-    item_id: &str,
-) -> Result<(), AppError> {
-    if let Some(record) = repos.share_key_for_item(item_kind, item_id).await? {
-        delete_remote_share_or_accept_missing(&record.share_id).await?;
-        repos.delete_share_keys(&record.share_id).await?;
-    }
-    Ok(())
-}
-
-async fn delete_remote_share_or_accept_missing(share_id: &str) -> Result<(), AppError> {
-    match crate::clovy_api::share_delete(share_id).await {
-        Ok(()) => Ok(()),
-        // `share_not_found` is deliberately ambiguous for non-enumeration. For
-        // deletion, either meaning is terminal for this local profile: the
-        // remote share is already absent or cannot be managed by this account,
-        // so retaining the stale key would permanently block item deletion.
-        Err(error) if is_share_not_found(&error) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn is_share_not_found(error: &AppError) -> bool {
-    matches!(
-        error.code.as_str(),
-        "clovy_request_failed" | "june_request_failed"
-    ) && error.message == "share_not_found"
-}
-
-async fn delete_profile_records_with_share_revoker<F, Fut>(
+/// Delete a profile's local records and return its recording files for removal.
+async fn delete_profile_records(
     repos: &Repositories,
     profile: &str,
-    mut revoke_share: F,
-) -> Result<Vec<String>, AppError>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), AppError>>,
-{
+) -> Result<Vec<String>, AppError> {
     if profile == "default" {
         return Ok(Vec::new());
     }
-
-    for record in repos.share_keys_for_profile_notes(profile).await? {
-        revoke_share(record.share_id.clone()).await?;
-        repos.delete_share_keys(&record.share_id).await?;
-    }
-
-    let audio_paths = repos.audio_artifact_paths_for_profile(profile).await?;
-    repos.delete_profile_data(profile).await?;
-    Ok(audio_paths)
+    Ok(repos
+        .delete_profile_data_with_artifact_paths(profile)
+        .await?)
 }
 
 #[tauri::command]
 pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(), AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    revoke_item_share(&repos, "note", &request.note_id).await?;
     let audio_paths = repos
-        .audio_artifact_paths_for_note(&request.note_id)
+        .delete_note_with_artifact_paths(&request.note_id)
         .await?;
-    repos.delete_note(&request.note_id).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -423,11 +380,7 @@ pub async fn delete_notes(app: AppHandle, request: DeleteNotesRequest) -> Result
 
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    for note_id in &note_ids {
-        revoke_item_share(&repos, "note", note_id).await?;
-    }
-    let audio_paths = repos.audio_artifact_paths_for_notes(&note_ids).await?;
-    repos.delete_notes(&note_ids).await?;
+    let audio_paths = repos.delete_notes_with_artifact_paths(&note_ids).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -543,10 +496,20 @@ pub fn sticky_active_profile(app: AppHandle) -> String {
 
 #[tauri::command]
 pub async fn delete_folder(app: AppHandle, request: DeleteFolderRequest) -> Result<(), AppError> {
-    repositories(&app)
+    let paths = request.delete_notes.then(|| app_paths(&app)).transpose()?;
+    let files = repositories(&app)
         .await?
-        .delete_folder(&request.folder_id, request.delete_notes)
+        .delete_folder_with_artifact_paths(&request.folder_id, request.delete_notes)
         .await?;
+    if let Some(paths) = paths {
+        for path in files {
+            if let Err(error) = paths.remove_recording_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("failed to remove deleted folder recording {path}: {error}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -649,16 +612,10 @@ pub async fn move_profile_data_to_default(
 
 #[tauri::command]
 pub async fn delete_profile_data(app: AppHandle, profile: String) -> Result<(), AppError> {
-    // "Delete permanently" is a privacy promise: remote note shares are
-    // revoked before their source rows disappear, and recordings on disk go
-    // with those rows, mirroring delete_note / delete_notes.
+    // Recording files go with the deleted local rows, as in delete_note.
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    let audio_paths =
-        delete_profile_records_with_share_revoker(&repos, &profile, |share_id| async move {
-            delete_remote_share_or_accept_missing(&share_id).await
-        })
-        .await?;
+    let audio_paths = delete_profile_records(&repos, &profile).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -793,16 +750,20 @@ pub async fn set_memory_enabled(
     app: AppHandle,
     enabled: bool,
 ) -> Result<MemorySettingsDto, AppError> {
-    // Keep the transaction lock through persistence, direct policy mutation,
-    // live-runtime convergence, and the authoritative response read. Otherwise
-    // two commands can persist in order but finish out of order, allowing an
-    // older response to overwrite the UI after a newer choice has landed.
+    let path = memory_settings_path(&app)?;
+    set_memory_enabled_with_settings(&path, enabled).await
+}
+
+/// Shared settings mutation, including the same global write lock used by
+/// memory persistence. Tests use a temporary settings file through this path.
+pub(crate) async fn set_memory_enabled_with_settings(
+    path: &Path,
+    enabled: bool,
+) -> Result<MemorySettingsDto, AppError> {
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     let settings = MemorySettingsDto { enabled };
-    let path = memory_settings_path(&app)?;
-    persist_memory_settings(&path, &settings)?;
-    // The persisted file is authoritative for Clovy's own memory write gate.
-    Ok(load_memory_settings(&path))
+    persist_memory_settings(path, &settings)?;
+    Ok(load_memory_settings(path))
 }
 
 pub(crate) async fn create_memory_with_settings(
@@ -812,6 +773,48 @@ pub(crate) async fn create_memory_with_settings(
     folder_id: Option<&str>,
     content: &str,
     source: &str,
+) -> Result<MemoryDto, AppError> {
+    create_memory_with_settings_for_turn(
+        repos,
+        settings_path,
+        profile,
+        folder_id,
+        content,
+        source,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_memory_with_settings_for_turn(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    folder_id: Option<&str>,
+    content: &str,
+    source: &str,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+) -> Result<MemoryDto, AppError> {
+    create_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        folder_id,
+        content,
+        source,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn create_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    folder_id: Option<&str>,
+    content: &str,
+    source: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
 ) -> Result<MemoryDto, AppError> {
     // Every write path (Tauri command AND the loopback proxy) takes the
     // settings lock across the enabled check and the insert, so a save that
@@ -827,22 +830,177 @@ pub(crate) async fn create_memory_with_settings(
         ));
     }
     repos
-        .create_memory(profile, folder_id, content, source)
+        .create_memory_authorized(profile, folder_id, content, source, authority)
         .await
 }
 
-async fn update_memory_with_settings(
+/// Agent-only deletion: the global settings lock spans project validation,
+/// DELETE, tombstone and commit. Explicit user deletion stays unconditional.
+pub(crate) async fn forget_memory_with_settings(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    ensure_memory_enabled(settings_path)?;
+    repos.forget_memory(profile, id).await
+}
+
+#[cfg(test)]
+pub(crate) async fn forget_memory_with_settings_for_turn(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+) -> Result<(), AppError> {
+    forget_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn forget_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<(), AppError> {
+    if authority.is_none() {
+        return forget_memory_with_settings(repos, settings_path, profile, id).await;
+    }
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    ensure_memory_enabled(settings_path)?;
+    repos.forget_memory_authorized(profile, id, authority).await
+}
+
+pub(crate) async fn update_memory_with_settings(
     repos: &Repositories,
     settings_path: &Path,
     profile: &str,
     id: &str,
     content: &str,
 ) -> Result<MemoryDto, AppError> {
+    update_memory_with_settings_for_turn(repos, settings_path, profile, id, content, None).await
+}
+
+pub(crate) async fn update_memory_with_settings_for_turn(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    content: &str,
+    turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
+) -> Result<MemoryDto, AppError> {
+    update_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        content,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn update_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    content: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<MemoryDto, AppError> {
     // Same lock discipline as create: check + write under the settings lock.
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
     let content = validated_memory_content(content)?;
-    repos.update_memory(profile, id, content).await
+    repos
+        .update_memory_authorized(profile, id, content, authority)
+        .await
+}
+
+#[cfg(test)]
+mod memory_bound_write_tests {
+    use super::*;
+    use crate::approval_broker::testing::TestBroker;
+    use crate::llm::cli::CliKind;
+
+    #[tokio::test]
+    async fn memory_write_waiting_for_settings_lock_refuses_stopped_turn() {
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        let repos = Repositories::new(broker.pool().clone());
+        let memory = repos
+            .create_memory("default", None, "Original", "user")
+            .await
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memory.json");
+        let guard = MEMORY_SETTINGS_LOCK.lock().await;
+        let write = update_memory_with_settings_for_turn(
+            &repos,
+            &path,
+            "default",
+            &memory.id,
+            "Changed",
+            Some((&binding.session_id, &binding.run_id, &binding.authority)),
+        );
+        tokio::pin!(write);
+        assert!(futures_util::poll!(write.as_mut()).is_pending());
+        sqlx::query::query("UPDATE agent_runs SET status = 'cancelled' WHERE id = ?")
+            .bind(&binding.run_id)
+            .execute(broker.pool())
+            .await
+            .unwrap();
+        drop(guard);
+        assert_eq!(write.await.unwrap_err().code, "turn_expired");
+        assert_eq!(
+            repos.list_memories("default", None, false).await.unwrap()[0].content,
+            "Original"
+        );
+        assert_eq!(
+            create_memory_with_settings_for_turn(
+                &repos,
+                &path,
+                "default",
+                None,
+                "Denied",
+                "agent",
+                Some((&binding.session_id, &binding.run_id, &binding.authority))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "turn_expired"
+        );
+        assert_eq!(
+            forget_memory_with_settings_for_turn(
+                &repos,
+                &path,
+                "default",
+                &memory.id,
+                Some((&binding.session_id, &binding.run_id, &binding.authority))
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "turn_expired"
+        );
+        let tombstones: i64 =
+            sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM memory_tombstones WHERE id = ?")
+                .bind(&memory.id)
+                .fetch_one(broker.pool())
+                .await
+                .unwrap();
+        assert_eq!(tombstones, 0);
+    }
 }
 
 fn ensure_memory_enabled(settings_path: &Path) -> Result<(), AppError> {
@@ -873,7 +1031,7 @@ fn persist_memory_settings(path: &Path, settings: &MemorySettingsDto) -> Result<
     })
 }
 
-fn validated_memory_content(content: &str) -> Result<&str, AppError> {
+pub(crate) fn validated_memory_content(content: &str) -> Result<&str, AppError> {
     let content = content.trim();
     if content.is_empty() {
         return Err(AppError::new(
@@ -924,104 +1082,6 @@ pub(crate) fn load_memory_settings(path: &Path) -> MemorySettingsDto {
 
 fn memory_disabled_error() -> AppError {
     AppError::new("memory_disabled", "Memory is disabled for this scope.")
-}
-
-#[tauri::command]
-pub async fn suggest_agent_session_title(
-    request: SuggestAgentSessionTitleRequest,
-) -> Result<SuggestAgentSessionTitleResponse, AppError> {
-    let title =
-        crate::clovy_api::suggest_agent_session_title(&request.prompt, request.response.as_deref())
-            .await?;
-    Ok(SuggestAgentSessionTitleResponse { title })
-}
-
-#[tauri::command]
-pub async fn submit_issue_report(
-    app: AppHandle,
-    request: SubmitIssueReportRequest,
-) -> Result<SubmitIssueReportResponse, AppError> {
-    let app_version = app.package_info().version.to_string();
-    let diagnostics = if request.attachment_names.len() >= ISSUE_REPORT_ATTACHMENT_LIMIT
-        || request.attachment_paths.len() >= ISSUE_REPORT_ATTACHMENT_LIMIT
-    {
-        None
-    } else {
-        match issue_report_agent_diagnostics(&app, request.stored_session_id.as_deref()).await {
-            Ok(diagnostics) => diagnostics,
-            Err(error) => {
-                tracing::warn!(
-                    error_code = %error.code,
-                    "issue report diagnostics were unavailable; submitting the report without them"
-                );
-                None
-            }
-        }
-    };
-    crate::clovy_api::submit_issue_report(&request, &app_version, diagnostics.as_deref()).await
-}
-
-async fn issue_report_agent_diagnostics(
-    app: &AppHandle,
-    stored_session_id: Option<&str>,
-) -> Result<Option<String>, AppError> {
-    let Some(stored_session_id) = stored_session_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    let repositories = repositories(app).await?;
-    let row = sqlx::query::query(
-        "SELECT id, status, error_code, completed_at
-         FROM agent_runs
-         WHERE session_id = ?
-         ORDER BY started_at DESC
-         LIMIT 1",
-    )
-    .bind(stored_session_id)
-    .fetch_optional(&repositories.pool)
-    .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    use sqlx::row::Row as _;
-    if row.get::<String, _>("status") != "failed" {
-        return Ok(None);
-    }
-    let Some(error_code) = row.get::<Option<String>, _>("error_code") else {
-        return Ok(None);
-    };
-    let stored_session_id = diagnostic_field(stored_session_id, 128);
-    let agent_run_id = diagnostic_field(&row.get::<String, _>("id"), 128);
-    let error_code = diagnostic_field(&error_code, 128);
-    let completed_at = diagnostic_field(
-        row.get::<Option<String>, _>("completed_at")
-            .as_deref()
-            .unwrap_or("unknown"),
-        64,
-    );
-    Ok(Some(format!(
-        "Clovy agent runtime diagnostics\n\nStored session ID: {stored_session_id}\nAgent run ID: {agent_run_id}\nError code: {error_code}\nCompleted at: {completed_at}\n"
-    )))
-}
-
-fn diagnostic_field(value: &str, max_chars: usize) -> String {
-    crate::agent_runtime::host::sanitize_log(value)
-        .replace(['\r', '\n'], " ")
-        .chars()
-        .take(max_chars)
-        .collect()
-}
-
-#[tauri::command]
-pub async fn explain_agent_approval(
-    request: ExplainAgentApprovalRequest,
-) -> Result<ExplainAgentApprovalResponse, AppError> {
-    let explanation =
-        crate::clovy_api::explain_agent_approval(&request.description, request.command.as_deref())
-            .await?;
-    Ok(ExplainAgentApprovalResponse { explanation })
 }
 
 #[tauri::command]
@@ -1092,23 +1152,6 @@ pub async fn check_recording_source_readiness(
         .map_err(|error| AppError::new("readiness_check_failed", error.to_string()))
 }
 
-/// Opens the clovy-api `/verify` page (enclave attestation, routing,
-/// retention) in the default browser. Must route through Rust: the webview
-/// installs no new-window handler, so `target="_blank"` anchors are silently
-/// dropped — same reason the accounts portal links go through a command.
-#[tauri::command]
-pub fn clovy_open_verify_page() -> Result<(), AppError> {
-    crate::os_accounts::open_in_browser(&crate::clovy_api::verify_url())
-}
-
-const CLOVY_COMMUNITY_URL: &str = "https://t.me/+B4Z8KUqEsRc4ZGVh";
-
-/// Opens the Clovy Telegram community in the default browser.
-#[tauri::command]
-pub fn clovy_open_community_page() -> Result<(), AppError> {
-    crate::os_accounts::open_in_browser(CLOVY_COMMUNITY_URL)
-}
-
 /// Opens an arbitrary external link in the default browser. This is the
 /// generic sibling of the fixed-URL commands above: the frontend's global
 /// anchor interceptor (src/lib/external-links.ts) routes every external
@@ -1127,19 +1170,7 @@ pub fn clovy_open_external_url(url: String) -> Result<(), AppError> {
             "Only http(s) links can be opened externally.",
         ));
     }
-    crate::os_accounts::open_in_browser(url.trim())
-}
-
-/// Compatibility IPC aliases for frontend bundles from before the technical
-/// identity migration.
-#[tauri::command]
-pub fn june_open_verify_page() -> Result<(), AppError> {
-    clovy_open_verify_page()
-}
-
-#[tauri::command]
-pub fn june_open_community_page() -> Result<(), AppError> {
-    clovy_open_community_page()
+    crate::system_browser::open_in_browser(url.trim())
 }
 
 #[tauri::command]
@@ -1161,9 +1192,12 @@ pub async fn open_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
             "screenRecording" | "systemAudio" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             }
+            "inputMonitoring" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+            }
             _ => "x-apple.systempreferences:com.apple.preference.security",
         };
-        let status = std::process::Command::new("/usr/bin/open")
+        let status = crate::hide_console::command("/usr/bin/open")
             .arg(url)
             .status()
             .map_err(|error| AppError::new("settings_open_failed", error.to_string()))?;
@@ -1185,7 +1219,7 @@ pub async fn open_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
 #[cfg(target_os = "windows")]
 fn open_non_macos_privacy_settings(request: OpenPrivacySettingsRequest) -> Result<(), AppError> {
     match request.pane.as_str() {
-        "microphone" => crate::os_accounts::open_in_browser("ms-settings:privacy-microphone"),
+        "microphone" => crate::system_browser::open_in_browser("ms-settings:privacy-microphone"),
         _ => Err(AppError::new(
             "settings_open_unsupported",
             "This privacy settings shortcut is only supported on macOS.",
@@ -1220,11 +1254,9 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(target)
-            .spawn()
-            .map(|_| ())
+        let mut command = crate::hide_console::command("/usr/bin/open");
+        command.arg("-R").arg(target);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to reveal path in Finder: {error}"))
     }
     #[cfg(target_os = "windows")]
@@ -1237,7 +1269,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
         // not escape the inner quotes as `\"`, which makes Explorer fall
         // back to the default folder instead of selecting the file. Keep the
         // path as an OsString so non-UTF-8 Windows paths are not lossy-formatted.
-        let mut command = std::process::Command::new("explorer.exe");
+        let mut command = crate::hide_console::command("explorer.exe");
         let mut arg = OsString::new();
         if target.is_dir() {
             arg.push("\"");
@@ -1248,174 +1280,28 @@ pub fn reveal_path(path: String) -> Result<(), String> {
             arg.push(target.as_os_str());
             arg.push("\"");
         }
-        command
-            .raw_arg(arg)
-            .spawn()
-            .map(|_| ())
+        command.raw_arg(arg);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to reveal path in Explorer: {error}"))
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let dir = target.parent().unwrap_or(target);
-        std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .map(|_| ())
+        let mut command = crate::hide_console::command("xdg-open");
+        command.arg(dir);
+        spawn_reaped(&mut command)
             .map_err(|error| format!("Failed to open containing directory: {error}"))
     }
 }
 
-/// Copies the exact bundled developer extension into app data and reveals the
-/// destination. The source manifest is validated before and after copying so a
-/// release-package manifest whose key was stripped can never be offered as an
-/// unpacked build with a random extension id.
-#[tauri::command]
-pub fn unpack_bundled_extension(app: AppHandle) -> Result<String, AppError> {
-    let source = app
-        .path()
-        .resource_dir()
-        .map_err(|error| AppError::new("bundled_extension_unavailable", error.to_string()))?
-        .join("native")
-        .join("extension");
-    crate::extension_host::validate_extension_manifest(&source.join("manifest.json"))?;
-
-    let data_dir = crate::app_paths::app_data_dir(&app)
-        .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
-    fs::create_dir_all(&data_dir)
-        .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
-    let destination = data_dir.join("extension-unpacked");
-    let staging = data_dir.join("extension-unpacked.tmp");
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
-    }
-    copy_directory(&source, &staging).map_err(|error| {
-        let _ = fs::remove_dir_all(&staging);
-        AppError::new("bundled_extension_unpack_failed", error.to_string())
-    })?;
-    crate::extension_host::validate_extension_manifest(&staging.join("manifest.json"))?;
-
-    replace_directory_from_staging(&staging, &destination, |from, to| fs::rename(from, to))
-        .map_err(|error| AppError::new("bundled_extension_unpack_failed", error.to_string()))?;
-
-    let destination_string = destination.to_string_lossy().into_owned();
-    reveal_path(destination_string.clone())
-        .map_err(|error| AppError::new("bundled_extension_reveal_failed", error))?;
-    Ok(destination_string)
-}
-
-fn replace_directory_from_staging(
-    staging: &Path,
-    destination: &Path,
-    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let destination_name = destination.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "extension destination has no file name",
-        )
-    })?;
-    let mut backup_name = destination_name.to_os_string();
-    backup_name.push(".backup");
-    let backup = destination.with_file_name(backup_name);
-
-    if backup.exists() {
-        if destination.exists() {
-            fs::remove_dir_all(&backup)?;
-        } else {
-            rename(&backup, destination)?;
-        }
-    }
-
-    let had_destination = destination.exists();
-    if had_destination {
-        rename(destination, &backup)?;
-    }
-
-    if let Err(replace_error) = rename(staging, destination) {
-        if had_destination {
-            rename(&backup, destination).map_err(|restore_error| {
-                std::io::Error::new(
-                    restore_error.kind(),
-                    format!(
-                        "failed to replace extension directory ({replace_error}); failed to restore backup ({restore_error})"
-                    ),
-                )
-            })?;
-        }
-        return Err(replace_error);
-    }
-
-    if had_destination {
-        fs::remove_dir_all(backup)?;
-    }
+/// Spawns a short-lived helper without blocking the caller and reaps it on a
+/// background thread, so it never lingers as a zombie.
+fn spawn_reaped(command: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
-}
-
-fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(destination)?;
-    let staging_root = destination.canonicalize()?;
-    copy_directory_contents(source, destination, &staging_root)
-}
-
-fn copy_directory_contents(
-    source: &Path,
-    destination: &Path,
-    staging_root: &Path,
-) -> std::io::Result<()> {
-    ensure_destination_within_staging(destination, staging_root)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        ensure_destination_within_staging(&destination_path, staging_root)?;
-        if file_type.is_dir() {
-            fs::create_dir(&destination_path)?;
-            ensure_destination_within_staging(&destination_path, staging_root)?;
-            copy_directory_contents(&source_path, &destination_path, staging_root)?;
-        } else if file_type.is_file() {
-            fs::copy(source_path, &destination_path)?;
-            ensure_destination_within_staging(&destination_path, staging_root)?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_destination_within_staging(
-    destination: &Path,
-    staging_root: &Path,
-) -> std::io::Result<()> {
-    let candidate = match fs::symlink_metadata(destination) {
-        Ok(_) => destination.canonicalize()?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = destination.parent().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "extension destination has no parent",
-                )
-            })?;
-            let name = destination.file_name().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "extension destination has no file name",
-                )
-            })?;
-            parent.canonicalize()?.join(name)
-        }
-        Err(error) => return Err(error),
-    };
-    if candidate.starts_with(staging_root) {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "extension destination escapes the staging directory",
-        ))
-    }
 }
 
 #[tauri::command]
@@ -1441,18 +1327,28 @@ pub async fn start_meeting_recording(
         }
         Err(error) => return Err(error),
     };
-    let bundle_families = state.start_bundle_families(&request.request_id)?;
-    let mut completion =
-        MeetingStartCompletionGuard::new(state.inner(), request.request_id.clone());
-
-    let outcome = match execute_meeting_recording(
-        app,
-        &note_id,
-        request.source_mode.unwrap_or_default(),
-        bundle_families,
-    )
+    finish_meeting_start(state.inner(), &request.request_id, async {
+        let bundle_families = state.start_bundle_families(&request.request_id)?;
+        let video = state.start_video(&request)?;
+        execute_meeting_recording(
+            app,
+            &note_id,
+            request.source_mode.unwrap_or_default(),
+            bundle_families,
+            video,
+        )
+        .await
+    })
     .await
-    {
+}
+
+pub(crate) async fn finish_meeting_start(
+    state: &MeetingStartRequestState,
+    request_id: &str,
+    operation: impl std::future::Future<Output = Result<(NoteDto, RecordingSessionDto), AppError>>,
+) -> Result<MeetingStartRecordingOutcome, AppError> {
+    let mut completion = MeetingStartCompletionGuard::new(state, request_id.to_owned());
+    let outcome = match operation.await {
         Ok((note, recording)) => MeetingStartRecordingOutcome::Started {
             note: Box::new(note),
             recording: Box::new(recording),
@@ -1468,6 +1364,7 @@ async fn execute_meeting_recording(
     note_id: &str,
     requested_source_mode: RecordingSourceMode,
     bundle_families: Vec<String>,
+    video: Option<crate::domain::types::RecordingVideoRequest>,
 ) -> Result<(NoteDto, RecordingSessionDto), AppError> {
     let repos = repositories(&app).await?;
     let profile = active_profile(&app);
@@ -1507,6 +1404,9 @@ async fn execute_meeting_recording(
             StartRecordingRequest {
                 note_id: note.id.clone(),
                 source_mode: Some(source_mode),
+                expected_profile: None,
+                agent_request_id: None,
+                video,
             },
             false,
             origin.clone(),
@@ -1557,6 +1457,14 @@ async fn execute_meeting_recording(
 }
 
 #[tauri::command]
+pub async fn detect_meeting_window(
+) -> Result<Option<crate::domain::types::MeetingWindowDto>, AppError> {
+    tokio::task::spawn_blocking(crate::audio::capture::video::detect_meeting_window)
+        .await
+        .map_err(|error| AppError::new("window_detection_failed", error.to_string()))?
+}
+
+#[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
     request: StartRecordingRequest,
@@ -1572,7 +1480,25 @@ async fn start_recording_inner(
 ) -> Result<RecordingSessionDto, AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    let note = repos.get_note(&request.note_id).await?;
+    let note = repos
+        .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
+        .await?;
+    let authorized_start = if let Some(request_id) = request.agent_request_id.as_deref() {
+        let profile = request.expected_profile.as_deref().ok_or_else(|| {
+            AppError::new(
+                "agent_recorder_target_invalid",
+                "The agent recording needs a bound data partition.",
+            )
+        })?;
+        let binding = app
+            .state::<crate::agent_recorder::AgentRecorderBroker>()
+            .authorization_for_start(request_id, profile, &request.note_id)?;
+        crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, &binding, profile)
+            .await?;
+        Some(binding)
+    } else {
+        None
+    };
     let source_mode = request.source_mode.unwrap_or_default();
     // Readiness probing and capture startup both wait on the system-audio
     // helper (up to tens of seconds); run them off the async runtime.
@@ -1610,6 +1536,34 @@ async fn start_recording_inner(
             ));
         }
     }
+    if let Some(request_id) = request.agent_request_id.as_deref() {
+        if let Some(binding) = authorized_start.as_ref() {
+            crate::mcp_server::tools::revalidate_binding(
+                Some(&app),
+                &repos.pool,
+                binding,
+                request.expected_profile.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        }
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_target(
+                request_id,
+                request.expected_profile.as_deref().ok_or_else(|| {
+                    AppError::new(
+                        "agent_recorder_target_invalid",
+                        "The agent recording needs a bound data partition.",
+                    )
+                })?,
+                &request.note_id,
+            )?;
+        if is_capture_active() {
+            return Err(AppError::new(
+                "recording_already_active",
+                "Another recording is already running.",
+            ));
+        }
+    }
     if finish_existing_capture {
         finish_active_capture_before_start(&app, &repos).await?;
     } else if is_capture_active() {
@@ -1619,10 +1573,62 @@ async fn start_recording_inner(
         ));
     }
     let capture_paths = paths.clone();
+    // Permission/readiness waits may outlive deletion or reassignment.
+    repos
+        .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
+        .await?;
+    if let Some(request_id) = request.agent_request_id.as_deref() {
+        if let Some(binding) = authorized_start.as_ref() {
+            crate::mcp_server::tools::revalidate_binding(
+                Some(&app),
+                &repos.pool,
+                binding,
+                request.expected_profile.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        }
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_target(
+                request_id,
+                request.expected_profile.as_deref().ok_or_else(|| {
+                    AppError::new(
+                        "agent_recorder_target_invalid",
+                        "The agent recording needs a bound data partition.",
+                    )
+                })?,
+                &request.note_id,
+            )?;
+    }
     let capture_note_id = note.id.clone();
+    let capture_request_id = request.agent_request_id.clone();
+    let capture_profile = request.expected_profile.clone();
     let calendar_app = app.clone();
+    let authorization: Option<crate::audio::capture::CaptureStartAuthorization> =
+        authorized_start.as_ref().map(|binding| {
+            let authority = binding.authority.clone();
+            let app = app.clone();
+            let request_id = capture_request_id.clone();
+            let profile = capture_profile.clone();
+            let note_id = capture_note_id.clone();
+            Arc::new(move || {
+                authority.check_live()?;
+                app.state::<crate::agent_recorder::AgentRecorderBroker>()
+                    .validate_target(
+                        request_id.as_deref().unwrap_or_default(),
+                        profile.as_deref().unwrap_or_default(),
+                        &note_id,
+                    )
+            }) as crate::audio::capture::CaptureStartAuthorization
+        });
     let started = start_capture_with_timeout(move |abandoned| {
-        start_capture_with_cancel(app, &capture_paths, capture_note_id, source_mode, abandoned)
+        start_capture_with_cancel(
+            app,
+            &capture_paths,
+            capture_note_id,
+            source_mode,
+            abandoned,
+            authorization,
+        )
     })
     .await?;
     let mut startup_guard = CaptureStartupGuard::new(&paths, &started);
@@ -1656,6 +1662,39 @@ async fn start_recording_inner(
     // The capture now has all rows required for reload/recovery. Optional
     // diagnostics below must not roll it back if their future is cancelled.
     startup_guard.disarm();
+    if let Some(video) = request.video {
+        let partial = started.partial_path.with_file_name("window.partial.mp4");
+        let final_path = partial.with_file_name("window.mp4");
+        match repos
+            .create_video_artifact(
+                &note.id,
+                &started.session_id,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+        {
+            Ok(()) => {
+                if let Err(_error) = crate::audio::capture::attach_video(
+                    &started.session_id,
+                    repos.clone(),
+                    partial,
+                    final_path,
+                    video.window_id,
+                    tokio::runtime::Handle::current(),
+                ) {
+                    let result = crate::audio::capture::video::VideoResult {
+                        failure_reason: Some("capture_failed".into()),
+                        ..Default::default()
+                    };
+                    let _ = repos
+                        .finalize_video_artifact(&started.session_id, &result)
+                        .await;
+                }
+            }
+            Err(error) => eprintln!("failed to persist optional video: {error}"),
+        }
+    }
     spawn_recording_recovery_checkpoint_worker(repos.clone(), started.session_id.clone());
     if let Err(error) = repos
         .add_checkpoint(
@@ -1767,7 +1806,7 @@ where
     start_capture_with_timeout_and_cleanup(
         start_capture,
         |started| {
-            if let Err(error) = finish_capture(&started.session_id) {
+            if let Err(error) = finish_capture(&started.session_id, None) {
                 eprintln!(
                     "failed to tear down abandoned recording {} after start timeout: {}",
                     started.session_id, error.message
@@ -1849,12 +1888,82 @@ where
     .map_err(|error| AppError::new("recording_start_failed", error.to_string()))?
 }
 
+async fn revalidate_active_recorder_request(
+    app: &AppHandle,
+    request: &SessionRequest,
+    action: crate::agent_recorder::AgentRecorderAction,
+) -> Result<Option<crate::audio::capture::CaptureStartAuthorization>, AppError> {
+    if request.agent_request_id.is_none() {
+        return Ok(None);
+    }
+    let request_id = request.agent_request_id.clone().expect("checked above");
+    let (original_binding, _) = app
+        .state::<crate::agent_recorder::AgentRecorderBroker>()
+        .request_authorization(&request_id)?;
+    let status = capture_status(&request.session_id)?;
+    let note_id = status.note_id.ok_or_else(|| {
+        AppError::new(
+            "recording_target_invalid",
+            "The active recording has no note.",
+        )
+    })?;
+    let repos = repositories(app).await?;
+    revalidate_saved_recorder_request(
+        app,
+        &repos,
+        request.agent_request_id.as_deref(),
+        request.expected_profile.as_deref(),
+        &note_id,
+        &request.session_id,
+        action,
+        None,
+    )
+    .await?;
+    let profile = request.expected_profile.clone().ok_or_else(|| {
+        AppError::new(
+            "agent_recorder_target_invalid",
+            "A bound data partition is required.",
+        )
+    })?;
+    let session_id = request.session_id.clone();
+    let binding = app
+        .state::<crate::agent_recorder::AgentRecorderBroker>()
+        .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
+    if binding.authority != original_binding.authority {
+        return Err(AppError::new(
+            "turn_expired",
+            "The recorder authority changed.",
+        ));
+    }
+    let authority = original_binding.authority;
+    let app = app.clone();
+    Ok(Some(Arc::new(move || {
+        authority.check_live()?;
+        let current = app
+            .state::<crate::agent_recorder::AgentRecorderBroker>()
+            .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
+        if current.authority != authority {
+            return Err(AppError::new(
+                "turn_expired",
+                "The recorder authority changed.",
+            ));
+        }
+        authority.check_live()
+    })))
+}
+
 #[tauri::command]
 pub async fn pause_recording(
     app: AppHandle,
     request: SessionRequest,
 ) -> Result<RecordingStatusDto, AppError> {
-    let snapshot = pause_capture(&request.session_id)?;
+    let authorization = revalidate_active_recorder_request(
+        &app,
+        &request,
+        crate::agent_recorder::AgentRecorderAction::Pause,
+    )
+    .await?;
+    let snapshot = pause_capture(&request.session_id, authorization.as_ref())?;
     checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
     Ok(snapshot.status)
 }
@@ -1864,7 +1973,13 @@ pub async fn resume_recording(
     app: AppHandle,
     request: SessionRequest,
 ) -> Result<RecordingStatusDto, AppError> {
-    let snapshot = resume_capture(&request.session_id)?;
+    let authorization = revalidate_active_recorder_request(
+        &app,
+        &request,
+        crate::agent_recorder::AgentRecorderAction::Resume,
+    )
+    .await?;
+    let snapshot = resume_capture(&request.session_id, authorization.as_ref())?;
     checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
     Ok(snapshot.status)
 }
@@ -2030,7 +2145,89 @@ async fn persist_recording_recovery_state(
     Ok(())
 }
 
+/// The app a rate-limited note resumes in; every processing run builds its
+/// progress reporter from it first.
+static RATE_LIMIT_RESUME_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+/// After the pause's own time, so Groq's window has surely reset.
+const RATE_LIMIT_RESUME_MARGIN_MS: i64 = 5_000;
+/// Wall-clock checks while waiting: a monotonic sleep stops while the Mac
+/// sleeps, and the resume time is a clock time.
+const RATE_LIMIT_RESUME_POLL: Duration = Duration::from_secs(60);
+
+/// A note paused by a provider rate limit
+/// (`TRANSCRIPTION_RATE_LIMITED_CODE`) runs again at the time its message
+/// names, while Clovy stays open and the note still shows that pause. The run
+/// is the Retry run: finished turns are reused, only the missing ones are sent.
+fn schedule_rate_limited_resume(note_id: &str, recording_session_id: &str, error: &AppError) {
+    if error.code != TRANSCRIPTION_RATE_LIMITED_CODE {
+        return;
+    }
+    let Some(resume_at_ms) = error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("resumeAtMs"))
+        .and_then(serde_json::Value::as_i64)
+    else {
+        return;
+    };
+    let Some(app) = RATE_LIMIT_RESUME_APP.get().cloned() else {
+        return;
+    };
+    let note_id = note_id.to_string();
+    let recording_session_id = recording_session_id.to_string();
+    let paused_message = error.message.clone();
+    tracing::info!(%note_id, resume_at_ms, "note transcription paused by a rate limit");
+    tauri::async_runtime::spawn(async move {
+        let resume_at_ms = resume_at_ms.saturating_add(RATE_LIMIT_RESUME_MARGIN_MS);
+        loop {
+            let remaining_ms = resume_at_ms - Utc::now().timestamp_millis();
+            if remaining_ms <= 0 {
+                break;
+            }
+            tokio::time::sleep(
+                RATE_LIMIT_RESUME_POLL.min(Duration::from_millis(remaining_ms as u64)),
+            )
+            .await;
+        }
+        let Ok(repos) = repositories(&app).await else {
+            return;
+        };
+        // One claim per pause: a Retry that got there first, or another
+        // resume, leaves nothing to claim.
+        if !repos
+            .claim_paused_note(&note_id, &paused_message)
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // Boxed: the resumed run can pause and schedule another resume.
+        let resumed: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<NoteDto, AppError>> + Send>,
+        > = Box::pin(retry_processing_from(
+            app,
+            RetryProcessingRequest {
+                expected_profile: None,
+                agent_request_id: None,
+                note_id: note_id.clone(),
+                step: None,
+                recording_session_id: Some(recording_session_id),
+            },
+            RetryOrigin::Resume,
+        ));
+        if let Err(error) = resumed.await {
+            tracing::warn!(%note_id, code = %error.code, "rate-limited note did not resume");
+            // The claim set the note to transcribing; give the pause back so
+            // the note keeps its message and its Retry.
+            let _ = repos
+                .set_note_status(&note_id, ProcessingStatus::Failed, Some(paused_message))
+                .await;
+        }
+    });
+}
+
 fn note_processing_progress_reporter(app: &AppHandle) -> NoteProcessingProgressReporter {
+    let _ = RATE_LIMIT_RESUME_APP.set(app.clone());
     let app = app.clone();
     NoteProcessingProgressReporter::new(move |progress| {
         if let Err(error) = app.emit(NOTE_PROCESSING_PROGRESS_EVENT, progress) {
@@ -2045,24 +2242,38 @@ pub async fn finish_recording(
     request: SessionRequest,
 ) -> Result<FinishRecordingResponse, AppError> {
     let timing = ProcessingTiming::from_done(Instant::now());
+    let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let finalization_started = Instant::now();
-    let finished = finish_capture(&request.session_id)?;
+    let session_id = request.session_id.clone();
+    let authorization = revalidate_active_recorder_request(
+        &app,
+        &request,
+        crate::agent_recorder::AgentRecorderAction::Stop,
+    )
+    .await?;
+    let finished =
+        run_blocking_capture(move || finish_capture(&session_id, authorization.as_ref())).await?;
     let response = finish_recording_session_with_timing(
         &repos,
+        paths,
         finished,
         finalization_started,
         timing,
         note_processing_progress_reporter(&app),
     )
     .await?;
-    if response.processing_started {
-        crate::p3a::record_question_best_effort(
-            app,
-            crate::p3a::questions::Question::NotesMeetingsRecorded,
-        );
-    }
     Ok(response)
+}
+
+/// Runs a capture finalization off the async runtime: it joins the writer
+/// thread and waits for system capture to stop.
+async fn run_blocking_capture<T: Send + 'static>(
+    finish: impl FnOnce() -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    tokio::task::spawn_blocking(finish)
+        .await
+        .map_err(|error| AppError::new("audio_finalization_failed", error.to_string()))?
 }
 
 async fn finish_active_capture_before_start(
@@ -2070,9 +2281,10 @@ async fn finish_active_capture_before_start(
     repos: &Repositories,
 ) -> Result<(), AppError> {
     let finalization_started = Instant::now();
-    if let Some(finished) = finish_active_capture()? {
+    if let Some(finished) = run_blocking_capture(finish_active_capture).await? {
         finish_recording_session_with_timing(
             repos,
+            app_paths(app)?,
             finished,
             finalization_started,
             ProcessingTiming::untracked(),
@@ -2089,8 +2301,13 @@ async fn finish_recording_session(
     finished: crate::audio::capture::FinishedRecording,
     finalization_started: Instant,
 ) -> Result<FinishRecordingResponse, AppError> {
+    let temp = tempfile::tempdir()
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
+    let paths = AppPaths::from_data_dir(temp.path().join("data"))
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
     finish_recording_session_with_timing(
         repos,
+        paths,
         finished,
         finalization_started,
         ProcessingTiming::untracked(),
@@ -2101,6 +2318,7 @@ async fn finish_recording_session(
 
 async fn finish_recording_session_with_timing(
     repos: &Repositories,
+    paths: AppPaths,
     finished: crate::audio::capture::FinishedRecording,
     finalization_started: Instant,
     timing: ProcessingTiming,
@@ -2468,8 +2686,11 @@ async fn finish_recording_session_with_timing(
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let _ = process_saved_source_audio_with_progress(
+        // Audio files and artifact rows are durable before waiting for optional video.
+        task_repos.wait_for_video_capture(&task_session_id).await;
+        let result = process_saved_source_audio_with_progress(
             &task_repos,
+            &paths,
             &task_note_id,
             &task_session_id,
             task_source_mode,
@@ -2482,6 +2703,9 @@ async fn finish_recording_session_with_timing(
         )
         .await;
         ticket.finish();
+        if let Err(error) = &result {
+            schedule_rate_limited_resume(&task_note_id, &task_session_id, error);
+        }
     });
     Ok(FinishRecordingResponse {
         note,
@@ -2639,8 +2863,19 @@ pub async fn retry_processing(
     app: AppHandle,
     request: RetryProcessingRequest,
 ) -> Result<NoteDto, AppError> {
+    retry_processing_from(app, request, RetryOrigin::Manual).await
+}
+
+async fn retry_processing_from(
+    app: AppHandle,
+    request: RetryProcessingRequest,
+    origin: RetryOrigin,
+) -> Result<NoteDto, AppError> {
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
+    repos
+        .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
+        .await?;
     let sources = retry_audio_sources(
         &repos,
         &paths,
@@ -2648,12 +2883,67 @@ pub async fn retry_processing(
         request.recording_session_id.as_deref(),
     )
     .await?;
-    let (ticket, depth) = processing_queue::enqueue(&request.note_id);
-    if depth <= 1 {
-        repos
-            .set_note_status(&request.note_id, ProcessingStatus::Transcribing, None)
+    if request.agent_request_id.is_some() {
+        revalidate_saved_recorder_request(
+            &app,
+            &repos,
+            request.agent_request_id.as_deref(),
+            request.expected_profile.as_deref(),
+            &request.note_id,
+            request.recording_session_id.as_deref().ok_or_else(|| {
+                AppError::new(
+                    "recording_target_invalid",
+                    "A recording session is required for agent retries.",
+                )
+            })?,
+            crate::agent_recorder::AgentRecorderAction::Retry,
+            None,
+        )
+        .await?;
+        let note = repos
+            .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
             .await?;
+        if note.processing_status != ProcessingStatus::Failed {
+            return Err(AppError::new(
+                "note_not_failed",
+                "Only failed note processing can be retried.",
+            ));
+        }
+        revalidate_saved_recorder_request(
+            &app,
+            &repos,
+            request.agent_request_id.as_deref(),
+            request.expected_profile.as_deref(),
+            &request.note_id,
+            request.recording_session_id.as_deref().unwrap_or_default(),
+            crate::agent_recorder::AgentRecorderAction::Retry,
+            None,
+        )
+        .await?;
     }
+    let accepted_binding = if let Some(request_id) = request.agent_request_id.as_deref() {
+        Some(
+            app.state::<crate::agent_recorder::AgentRecorderBroker>()
+                .saved_authorization(
+                    request_id,
+                    request.expected_profile.as_deref().unwrap_or_default(),
+                    &request.note_id,
+                    request.recording_session_id.as_deref().unwrap_or_default(),
+                    crate::agent_recorder::AgentRecorderAction::Retry,
+                    None,
+                )?,
+        )
+    } else {
+        None
+    };
+    let (ticket, _depth) = processing_queue::enqueue(&request.note_id);
+    // Show the retry at once, but only on a note that is still failed: never
+    // over a ready note, and a resume's claim already did it for the resume.
+    let marked_by_this_run = accepted_binding.is_none()
+        && origin == RetryOrigin::Manual
+        && repos
+            .mark_failed_note_transcribing(&request.note_id)
+            .await?;
 
     let mut note = repos.get_note(&request.note_id).await?;
     note.queued_recordings = processing_queue::queued_behind(&request.note_id);
@@ -2672,30 +2962,97 @@ pub async fn retry_processing(
         .recording_session_source_mode(&task_recording_session_id)
         .await?
         .unwrap_or(RecordingSourceMode::MicrophoneOnly);
+    if let Some(binding) = accepted_binding.as_ref() {
+        authorize_queued_audio(
+            &repos.pool,
+            binding,
+            request.expected_profile.as_deref().unwrap_or_default(),
+            &task_note_id,
+            &task_recording_session_id,
+        )
+        .await?;
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request.agent_request_id.as_deref().unwrap_or_default())?;
+    }
     let progress = note_processing_progress_reporter(&app);
+    let task_profile = request.expected_profile.clone();
     tokio::spawn(async move {
         let queue_lock = ticket.lock();
         let _guard = queue_lock.lock().await;
+        if let Some(binding) = accepted_binding.as_ref() {
+            if authorize_queued_audio(
+                &task_repos.pool,
+                binding,
+                task_profile.as_deref().unwrap_or_default(),
+                &task_note_id,
+                &task_recording_session_id,
+            )
+            .await
+            .is_err()
+            {
+                ticket.finish();
+                return;
+            }
+        }
         let timing = ProcessingTiming::untracked();
-        add_latency_checkpoint(
-            &task_repos,
-            &task_recording_session_id,
-            "processing_dequeued",
-            timing.checkpoint_details(serde_json::json!({})),
-        )
-        .await;
-        let note = match task_repos.get_note(&task_note_id).await {
+        if accepted_binding.is_none() {
+            add_latency_checkpoint(
+                &task_repos,
+                &task_recording_session_id,
+                "processing_dequeued",
+                timing.checkpoint_details(serde_json::json!({})),
+            )
+            .await;
+        }
+        let note = match task_repos
+            .get_note_with_profile(&task_note_id, task_profile.as_deref())
+            .await
+        {
             Ok(note) => note,
             Err(_) => {
                 ticket.finish();
                 return;
             }
         };
+        // Whatever ran after this run was queued may have finished the note:
+        // a second run would generate it again, billed, and replace the
+        // result. Checked under the lock for every run, whatever its depth.
+        if !processing_queue::queued_retry_should_run(
+            origin,
+            note.processing_status,
+            ticket.runs_completed_since_enqueue(),
+            marked_by_this_run,
+        ) {
+            tracing::info!(
+                note_id = %task_note_id,
+                ?origin,
+                status = ?note.processing_status,
+                "retry skipped: the note no longer needs it"
+            );
+            ticket.finish();
+            return;
+        }
+        if let Some(profile) = task_profile.as_deref() {
+            if !queued_retry_target_exists(
+                &task_repos.pool,
+                profile,
+                &task_note_id,
+                &task_recording_session_id,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                tracing::warn!(note_id=%task_note_id,"queued retry skipped: saved recording target changed data partition");
+                ticket.finish();
+                return;
+            }
+        }
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let _ = process_saved_source_audio_with_progress(
+        let effect = process_saved_source_audio_with_progress(
             &task_repos,
+            &paths,
             &task_note_id,
             &task_recording_session_id,
             task_source_mode,
@@ -2710,11 +3067,78 @@ pub async fn retry_processing(
             manual_notes,
             timing,
             progress.clone(),
-        )
-        .await;
+        );
+        let result = if let Some(binding) = accepted_binding.as_ref() {
+            run_authorized_queued_audio(
+                &task_repos.pool,
+                binding,
+                task_profile.as_deref().unwrap_or_default(),
+                &task_note_id,
+                &task_recording_session_id,
+                effect,
+            )
+            .await
+        } else {
+            effect.await
+        };
         ticket.finish();
+        if let Err(error) = &result {
+            schedule_rate_limited_resume(&task_note_id, &task_recording_session_id, error);
+        }
     });
     Ok(note)
+}
+
+/// Admission after a processing-queue wait. The cloned host authority stays
+/// meaningful after the one-shot UI request is consumed, but not after Stop.
+pub(crate) async fn run_authorized_queued_audio<T>(
+    pool: &sqlx_sqlite::SqlitePool,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+    effect: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    authorize_queued_audio(pool, binding, profile, note_id, session_id).await?;
+    effect.await
+}
+
+pub(crate) async fn authorize_queued_audio(
+    pool: &sqlx_sqlite::SqlitePool,
+    binding: &crate::mcp_server::turns::TurnBinding,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    crate::db::repositories::guard_bound_turn(
+        &mut tx,
+        profile,
+        &binding.session_id,
+        &binding.run_id,
+        &binding.authority,
+    )
+    .await?;
+    let owns:i64=sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions r JOIN notes n ON n.id=r.note_id WHERE r.id=? AND n.id=? AND n.profile=?").bind(session_id).bind(note_id).bind(profile).fetch_one(&mut *tx).await?;
+    if owns != 1 {
+        return Err(AppError::new(
+            "recording_not_found",
+            "The queued recording target no longer belongs to the authorized data partition.",
+        ));
+    }
+    binding.authority.check_live()?;
+    tx.commit().await?;
+    binding.authority.check_live()
+}
+
+pub(crate) async fn queued_retry_target_exists(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+) -> Result<bool, AppError> {
+    let owns:i64=sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions r JOIN notes n ON n.id=r.note_id WHERE r.id=? AND n.id=? AND n.profile=?").bind(session_id).bind(note_id).bind(profile).fetch_one(pool).await?;
+    Ok(owns == 1)
 }
 
 async fn retry_audio_sources(
@@ -2752,11 +3176,110 @@ async fn retry_audio_sources(
     Ok(sources)
 }
 
+fn discard_recovery_files(paths: &AppPaths, files: &[String]) -> Result<(), AppError> {
+    for path in files {
+        paths
+            .remove_recording_file(path)
+            .map_err(|error| AppError::new("audio_delete_failed", error.to_string()))?;
+    }
+    Ok(())
+}
+
+// Serialize the file validation/discard stage. Release before the processing
+// queue so another recovery can validate without waiting on a provider.
+static RECORDING_RECOVERY_STAGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[allow(clippy::too_many_arguments)]
+async fn revalidate_saved_recorder_request(
+    app: &AppHandle,
+    repos: &Repositories,
+    request_id: Option<&str>,
+    profile: Option<&str>,
+    note_id: &str,
+    session_id: &str,
+    action: crate::agent_recorder::AgentRecorderAction,
+    recovery_action: Option<crate::agent_recorder::RecordingRecoveryAction>,
+) -> Result<(), AppError> {
+    let Some(request_id) = request_id else {
+        return Ok(());
+    };
+    let profile = profile.ok_or_else(|| {
+        AppError::new(
+            "agent_recorder_target_invalid",
+            "A bound data partition is required.",
+        )
+    })?;
+    let binding = app
+        .state::<crate::agent_recorder::AgentRecorderBroker>()
+        .saved_authorization(
+            request_id,
+            profile,
+            note_id,
+            session_id,
+            action,
+            recovery_action,
+        )?;
+    crate::mcp_server::tools::revalidate_binding(Some(app), &repos.pool, &binding, profile).await?;
+    let exists:i64=sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions r JOIN notes n ON n.id=r.note_id WHERE r.id=? AND n.id=? AND n.profile=?").bind(session_id).bind(note_id).bind(profile).fetch_one(&repos.pool).await?;
+    if exists != 1 {
+        return Err(AppError::new(
+            "recording_not_found",
+            "The authorized note and recording session no longer exist in this data partition.",
+        ));
+    }
+    crate::mcp_server::tools::revalidate_binding(Some(app), &repos.pool, &binding, profile).await?;
+    app.state::<crate::agent_recorder::AgentRecorderBroker>()
+        .validate_request(request_id)?;
+    Ok(())
+}
+
+pub(crate) async fn discard_recoverable_recording(
+    repos: &Repositories,
+    paths: &crate::app_paths::AppPaths,
+    info: &crate::db::repositories::RecordingRecoveryInfo,
+    authorization: impl std::future::Future<Output = Result<(), AppError>>,
+) -> Result<NoteDto, AppError> {
+    let video_paths = repos
+        .video_artifact_paths_for_session(&info.session_id)
+        .await?;
+    let source_paths = repos
+        .source_artifact_paths_for_session(&info.session_id)
+        .await?;
+    authorization.await?;
+    // Revoke database ownership before unlinking. A worker that renames after
+    // cleanup then sees the missing row and removes its own late output.
+    repos
+        .commit_recording_discard(&info.session_id, &info.note_id)
+        .await?;
+    // Hydration is intentionally after cleanup: commit success is independent of
+    // whether a concurrently deleted note can still be returned to the caller.
+    let files: Vec<String> = source_paths
+        .into_iter()
+        .flat_map(|artifact| [artifact.partial_path, artifact.final_path])
+        .chain([info.partial_path.clone(), info.final_path.clone()])
+        .flatten()
+        .chain(video_paths)
+        .collect();
+    discard_recovery_files(paths, &files)?;
+    Ok(repos.get_note(&info.note_id).await?)
+}
+
 #[tauri::command]
 pub async fn recover_recording(
     app: AppHandle,
     request: crate::domain::types::RecoverRecordingRequest,
 ) -> Result<NoteDto, AppError> {
+    let recovery_action = match request.action.as_str() {
+        "validate" => crate::agent_recorder::RecordingRecoveryAction::Validate,
+        "discard" => crate::agent_recorder::RecordingRecoveryAction::Discard,
+        _ => {
+            return Err(AppError::new(
+                "invalid_recovery_action",
+                "Recovery action must be validate or discard.",
+            ))
+        }
+    };
+    let recovery_guard = RECORDING_RECOVERY_STAGE.lock().await;
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let progress = note_processing_progress_reporter(&app);
@@ -2769,32 +3292,65 @@ pub async fn recover_recording(
             ),
         ));
     };
-    if request.action == "discard" {
-        for artifact in repos
-            .source_artifact_paths_for_session(&request.session_id)
-            .await?
-        {
-            for path in [&artifact.partial_path, &artifact.final_path]
-                .into_iter()
-                .flatten()
-            {
-                let _ = paths
-                    .remove_recording_file(path)
-                    .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
-            }
-        }
-        for path in [&info.partial_path, &info.final_path].into_iter().flatten() {
-            let _ = paths
-                .remove_recording_file(path)
-                .map_err(|error| AppError::new("audio_delete_failed", error.to_string()));
-        }
-        return Ok(repos
-            .mark_recording_discarded(&info.session_id, &info.note_id)
-            .await?);
+    repos
+        .get_note_with_profile(&info.note_id, request.expected_profile.as_deref())
+        .await?;
+    revalidate_saved_recorder_request(
+        &app,
+        &repos,
+        request.agent_request_id.as_deref(),
+        request.expected_profile.as_deref(),
+        &info.note_id,
+        &info.session_id,
+        crate::agent_recorder::AgentRecorderAction::Recover,
+        Some(recovery_action),
+    )
+    .await?;
+    let status: Option<String> =
+        sqlx::query_scalar::query_scalar("SELECT status FROM recording_sessions WHERE id=?")
+            .bind(&request.session_id)
+            .fetch_optional(&repos.pool)
+            .await?;
+    if status.as_deref() != Some("recoverable")
+        || crate::audio::capture::current_status()
+            .as_ref()
+            .is_some_and(|active| active.session_id == request.session_id)
+    {
+        return Err(AppError::new(
+            "recording_not_recoverable",
+            "Only an interrupted recoverable recording can be validated or discarded.",
+        ));
     }
+    if request.action == "discard" {
+        let authorization = revalidate_saved_recorder_request(
+            &app,
+            &repos,
+            request.agent_request_id.as_deref(),
+            request.expected_profile.as_deref(),
+            &info.note_id,
+            &info.session_id,
+            crate::agent_recorder::AgentRecorderAction::Recover,
+            Some(recovery_action),
+        );
+        return discard_recoverable_recording(&repos, &paths, &info, authorization).await;
+    }
+    let _ =
+        crate::domain::processing::optional_note_video_input(&repos, &paths, &request.session_id)
+            .await;
     let source_paths = repos
         .source_artifact_paths_for_session(&request.session_id)
         .await?;
+    revalidate_saved_recorder_request(
+        &app,
+        &repos,
+        request.agent_request_id.as_deref(),
+        request.expected_profile.as_deref(),
+        &info.note_id,
+        &info.session_id,
+        crate::agent_recorder::AgentRecorderAction::Recover,
+        Some(recovery_action),
+    )
+    .await?;
     if !source_paths.is_empty() {
         let mut valid_sources = Vec::new();
         for artifact in source_paths {
@@ -2816,6 +3372,17 @@ pub async fn recover_recording(
             let recovered_path = path.to_string_lossy().into_owned();
             let source = RecordingSource::from(artifact.source.as_str());
             let valid = source_audio_passes_validation(source, &validation);
+            revalidate_saved_recorder_request(
+                &app,
+                &repos,
+                request.agent_request_id.as_deref(),
+                request.expected_profile.as_deref(),
+                &info.note_id,
+                &info.session_id,
+                crate::agent_recorder::AgentRecorderAction::Recover,
+                Some(recovery_action),
+            )
+            .await?;
             repos
                 .finalize_source_artifact(
                     &artifact.id,
@@ -2842,6 +3409,17 @@ pub async fn recover_recording(
                 ));
             }
         }
+        revalidate_saved_recorder_request(
+            &app,
+            &repos,
+            request.agent_request_id.as_deref(),
+            request.expected_profile.as_deref(),
+            &info.note_id,
+            &info.session_id,
+            crate::agent_recorder::AgentRecorderAction::Recover,
+            Some(recovery_action),
+        )
+        .await?;
         if valid_sources.is_empty() {
             repos
                 .set_note_status(
@@ -2855,8 +3433,15 @@ pub async fn recover_recording(
         repos
             .mark_recording_recovery_valid(&info.session_id)
             .await?;
+        drop(recovery_guard);
         return process_recovered_source_audio(
+            &app,
+            request
+                .agent_request_id
+                .as_deref()
+                .zip(request.expected_profile.as_deref()),
             &repos,
+            &paths,
             &info.note_id,
             &info.session_id,
             info.source_mode,
@@ -2880,6 +3465,17 @@ pub async fn recover_recording(
     let file_size = std::fs::metadata(&path)
         .map(|metadata| metadata.len() as i64)
         .unwrap_or_default();
+    revalidate_saved_recorder_request(
+        &app,
+        &repos,
+        request.agent_request_id.as_deref(),
+        request.expected_profile.as_deref(),
+        &info.note_id,
+        &info.session_id,
+        crate::agent_recorder::AgentRecorderAction::Recover,
+        Some(recovery_action),
+    )
+    .await?;
     repos
         .update_recording_session(
             &info.session_id,
@@ -2902,6 +3498,17 @@ pub async fn recover_recording(
             },
         )
         .await?;
+    revalidate_saved_recorder_request(
+        &app,
+        &repos,
+        request.agent_request_id.as_deref(),
+        request.expected_profile.as_deref(),
+        &info.note_id,
+        &info.session_id,
+        crate::agent_recorder::AgentRecorderAction::Recover,
+        Some(recovery_action),
+    )
+    .await?;
     if !source_audio_passes_validation(RecordingSource::Microphone, &validation) {
         repos
             .set_note_status(
@@ -2922,8 +3529,15 @@ pub async fn recover_recording(
             &checksum,
         )
         .await?;
+    drop(recovery_guard);
     process_recovered_source_audio(
+        &app,
+        request
+            .agent_request_id
+            .as_deref()
+            .zip(request.expected_profile.as_deref()),
         &repos,
+        &paths,
         &info.note_id,
         &info.session_id,
         RecordingSourceMode::MicrophoneOnly,
@@ -2938,8 +3552,12 @@ pub async fn recover_recording(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_recovered_source_audio(
+    app: &AppHandle,
+    authorization: Option<(&str, &str)>,
     repos: &Repositories,
+    paths: &AppPaths,
     note_id: &str,
     session_id: &str,
     source_mode: RecordingSourceMode,
@@ -2949,15 +3567,58 @@ async fn process_recovered_source_audio(
     let (ticket, _depth) = processing_queue::enqueue(note_id);
     let queue_lock = ticket.lock();
     let _guard = queue_lock.lock().await;
-    let note = match repos.get_note(note_id).await {
+    let dequeue_binding = if let Some((request_id, profile)) = authorization {
+        let binding = app
+            .state::<crate::agent_recorder::AgentRecorderBroker>()
+            .saved_authorization(
+                request_id,
+                profile,
+                note_id,
+                session_id,
+                crate::agent_recorder::AgentRecorderAction::Recover,
+                Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
+            )?;
+        authorize_queued_audio(&repos.pool, &binding, profile, note_id, session_id).await?;
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request_id)?;
+        Some(binding)
+    } else {
+        None
+    };
+    let note = match repos
+        .get_note_with_profile(note_id, authorization.map(|(_, profile)| profile))
+        .await
+    {
         Ok(note) => note,
         Err(error) => {
             ticket.finish();
             return Err(error.into());
         }
     };
-    let result = process_saved_source_audio_with_progress(
+    let cancellation = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some((request_id, profile)) = authorization {
+                if let Err(error) = revalidate_saved_recorder_request(
+                    app,
+                    repos,
+                    Some(request_id),
+                    Some(profile),
+                    note_id,
+                    session_id,
+                    crate::agent_recorder::AgentRecorderAction::Recover,
+                    Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
+                )
+                .await
+                {
+                    return error;
+                }
+            }
+        }
+    };
+    let effect = process_saved_source_audio_with_cancellation(
         repos,
+        paths,
         note_id,
         session_id,
         source_mode,
@@ -2966,10 +3627,23 @@ async fn process_recovered_source_audio(
         note.generated_content.clone(),
         manual_notes_for_generation(&note),
         ProcessingTiming::untracked(),
-        progress.clone(),
-    )
-    .await;
+        progress,
+        cancellation,
+    );
+    let result = if let (Some(binding), Some((request_id, profile))) =
+        (dequeue_binding.as_ref(), authorization)
+    {
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request_id)?;
+        run_authorized_queued_audio(&repos.pool, binding, profile, note_id, session_id, effect)
+            .await
+    } else {
+        effect.await
+    };
     ticket.finish();
+    if let Err(error) = &result {
+        schedule_rate_limited_resume(note_id, session_id, error);
+    }
     result
 }
 
@@ -3028,134 +3702,6 @@ fn wav_duration_ms(path: &Path) -> Option<i64> {
     (duration_ms > 0).then_some(duration_ms)
 }
 
-// ---- Private sharing (JUN-308) -----------------------------------------
-// Thin proxies to the clovy-api /v1/shares endpoints plus the local key
-// store. All crypto happens in the webview; these commands only move
-// ciphertext, envelopes, metadata, and locally persisted key bytes.
-
-#[tauri::command]
-pub async fn share_create(request: ShareCreateRequest) -> Result<ShareCreatedDto, AppError> {
-    crate::clovy_api::share_create(&request).await
-}
-
-#[tauri::command]
-pub async fn share_list() -> Result<Vec<ShareSummaryDto>, AppError> {
-    crate::clovy_api::share_list().await
-}
-
-#[tauri::command]
-pub async fn share_get(request: ShareGetRequest) -> Result<ShareDto, AppError> {
-    crate::clovy_api::share_get(&request.share_id).await
-}
-
-#[tauri::command]
-pub async fn share_add_invites(
-    request: ShareAddInvitesRequest,
-) -> Result<ShareInvitesAddedDto, AppError> {
-    crate::clovy_api::share_add_invites(&request.share_id, &request.invites).await
-}
-
-#[tauri::command]
-pub async fn share_revoke_invite(request: ShareRevokeInviteRequest) -> Result<(), AppError> {
-    crate::clovy_api::share_revoke_invite(&request.share_id, &request.invite_id).await
-}
-
-#[tauri::command]
-pub async fn share_delete(app: AppHandle, request: ShareDeleteRequest) -> Result<(), AppError> {
-    delete_remote_share_or_accept_missing(&request.share_id).await?;
-    // The share is gone server-side; its locally retained keys are useless
-    // and should not outlive it.
-    repositories(&app)
-        .await?
-        .delete_share_keys(&request.share_id)
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_key_save(app: AppHandle, request: ShareKeySaveRequest) -> Result<(), AppError> {
-    let content_key = decode_share_key_b64(&request.content_key_b64)?;
-    repositories(&app)
-        .await?
-        .save_share_key(&crate::db::repositories::ShareKeyRecord {
-            share_id: request.share_id,
-            item_kind: request.item_kind,
-            item_id: request.item_id,
-            content_key,
-        })
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_key_get(
-    app: AppHandle,
-    request: ShareKeyGetRequest,
-) -> Result<Option<ShareKeyDto>, AppError> {
-    let record = repositories(&app)
-        .await?
-        .share_key_for_item(&request.item_kind, &request.item_id)
-        .await?;
-    Ok(record.map(|record| ShareKeyDto {
-        share_id: record.share_id,
-        content_key_b64: encode_share_key_b64(&record.content_key),
-    }))
-}
-
-#[tauri::command]
-pub async fn share_invite_key_save(
-    app: AppHandle,
-    request: ShareInviteKeySaveRequest,
-) -> Result<(), AppError> {
-    let invite_key = decode_share_key_b64(&request.invite_key_b64)?;
-    repositories(&app)
-        .await?
-        .save_share_invite_key(&crate::db::repositories::ShareInviteKeyRecord {
-            invite_id: request.invite_id,
-            share_id: request.share_id,
-            invite_key,
-        })
-        .await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn share_invite_keys_get(
-    app: AppHandle,
-    request: ShareInviteKeysGetRequest,
-) -> Result<Vec<ShareInviteKeyDto>, AppError> {
-    let records = repositories(&app)
-        .await?
-        .share_invite_keys(&request.share_id)
-        .await?;
-    Ok(records
-        .into_iter()
-        .map(|record| ShareInviteKeyDto {
-            invite_id: record.invite_id,
-            invite_key_b64: encode_share_key_b64(&record.invite_key),
-        })
-        .collect())
-}
-
-/// Origin share links point at; the webview assembles the full link
-/// (including the key-carrying fragment, which must never reach Rust logs).
-#[tauri::command]
-pub fn get_share_base_url() -> Result<String, AppError> {
-    Ok(crate::clovy_api::share_base_url())
-}
-
-fn decode_share_key_b64(value: &str) -> Result<Vec<u8>, AppError> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(value.trim())
-        .map_err(|_| AppError::new("share_key_invalid", "Share key is not valid base64url."))
-}
-
-fn encode_share_key_b64(value: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
-}
-
 /// Cached app repositories pool. The database path is derived from the app
 /// data dir and never changes within a process, so the pool (and its
 /// migrations) are initialized once instead of on every Tauri command.
@@ -3179,21 +3725,21 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
             run_migrations(&pool)
                 .await
                 .map_err(|error| AppError::new("migration_failed", error.to_string()))?;
-            match crate::agent_runtime::legacy_import_completed(&pool).await {
+            match crate::agent_sessions::legacy_import_completed(&pool).await {
                 Ok(true) => {}
                 Ok(false) | Err(_) => {
                     let legacy_home = paths.data_dir.join("hermes");
                     let user_home = app.path().home_dir().ok();
-                    crate::agent_runtime::stop_legacy_hermes_runtime(
+                    crate::agent_sessions::stop_legacy_hermes_runtime(
                         &legacy_home,
                         user_home.as_deref(),
                     )
                     .await;
                     let legacy_state = legacy_home.join("state.db");
                     let artifact_root = paths.data_dir.join("agent-workspaces");
-                    if let Err(error) = crate::agent_runtime::import_legacy_agent_state(
+                    if let Err(error) = crate::agent_sessions::import_legacy_agent_state(
                         &pool,
-                        &crate::agent_runtime::LegacyImportOptions {
+                        &crate::agent_sessions::LegacyImportOptions {
                             hermes_state_db: legacy_state,
                             hermes_home: Some(legacy_home),
                             artifact_root: Some(artifact_root),
@@ -3205,6 +3751,16 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
                     }
                 }
             }
+            // Credential-store prompts must not hold repository initialization.
+            // Failed or interrupted cleanup stays queued for the next launch.
+            let cleanup_pool = pool.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    crate::agent_sessions::retirement::cleanup_secrets(&cleanup_pool).await
+                {
+                    tracing::warn!(code = %error.code, "Retired agent secret cleanup did not complete");
+                }
+            });
             Ok(Repositories::new(pool))
         })
         .await
@@ -3378,37 +3934,17 @@ mod sqlite_pool_configuration_tests {
 mod tests {
     use super::{
         apply_system_audio_permission_probe_result, assemble_recording_source_readiness,
-        capture_start_timeout_error, copy_directory, copy_directory_contents,
-        create_memory_with_settings, delete_profile_records_with_share_revoker, is_share_not_found,
+        capture_start_timeout_error, create_memory_with_settings, delete_profile_records,
         load_memory_settings, persist_memory_settings, recovery_validation_expected_duration_ms,
-        replace_directory_from_staging, should_probe_system_audio_permission,
-        start_capture_with_timeout_and_cleanup, update_memory_with_settings,
-        validated_folder_instructions, CaptureStartupGuard, MEMORY_SETTINGS_LOCK,
+        should_probe_system_audio_permission, start_capture_with_timeout_and_cleanup,
+        update_memory_with_settings, validated_folder_instructions, CaptureStartupGuard,
+        MEMORY_SETTINGS_LOCK,
     };
 
-    #[test]
-    fn recognizes_only_the_ambiguous_share_not_found_error() {
-        assert!(is_share_not_found(&AppError::new(
-            "clovy_request_failed",
-            "share_not_found"
-        )));
-        assert!(is_share_not_found(&AppError::new(
-            "june_request_failed",
-            "share_not_found"
-        )));
-        assert!(!is_share_not_found(&AppError::new(
-            "june_request_failed",
-            "network error"
-        )));
-        assert!(!is_share_not_found(&AppError::new(
-            "storage_unavailable",
-            "share_not_found"
-        )));
-    }
     use crate::{
         app_paths::AppPaths,
         audio::capture::{is_capture_active, CaptureStartState, StartedRecording, StartedSource},
-        db::repositories::{Repositories, ShareKeyRecord},
+        db::repositories::Repositories,
         domain::types::{
             AppError, AudioLevelDto, MemorySettingsDto, RecordingSource, RecordingSourceMode,
             RecordingState, RecordingStatusDto, SourceReadinessDto,
@@ -3423,79 +3959,6 @@ mod tests {
         time::Duration,
     };
 
-    #[cfg(unix)]
-    #[test]
-    fn bundled_extension_copy_skips_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().expect("tempdir");
-        let source = root.path().join("source");
-        let staging = root.path().join("staging");
-        let outside = root.path().join("outside.js");
-        std::fs::create_dir(&source).expect("create source");
-        std::fs::write(source.join("manifest.json"), b"{}").expect("write source file");
-        std::fs::write(&outside, b"outside").expect("write outside file");
-        symlink(&outside, source.join("linked.js")).expect("create source symlink");
-
-        copy_directory(&source, &staging).expect("copy extension");
-
-        assert!(staging.join("manifest.json").is_file());
-        assert!(!staging.join("linked.js").exists());
-    }
-
-    #[test]
-    fn bundled_extension_copy_rejects_destination_outside_staging() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let source = root.path().join("source");
-        let staging = root.path().join("staging");
-        let outside = root.path().join("outside");
-        std::fs::create_dir(&source).expect("create source");
-        std::fs::create_dir(&staging).expect("create staging");
-        std::fs::create_dir(&outside).expect("create outside");
-        std::fs::write(source.join("manifest.json"), b"{}").expect("write source file");
-
-        let error = copy_directory_contents(
-            &source,
-            &outside,
-            &staging.canonicalize().expect("canonical staging"),
-        )
-        .expect_err("outside destination must fail");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(!outside.join("manifest.json").exists());
-    }
-
-    #[test]
-    fn bundled_extension_replace_restores_backup_when_promotion_fails() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let destination = root.path().join("extension-unpacked");
-        let staging = root.path().join("extension-unpacked.tmp");
-        std::fs::create_dir(&destination).expect("create destination");
-        std::fs::create_dir(&staging).expect("create staging");
-        std::fs::write(destination.join("old.js"), b"old").expect("write old extension");
-        std::fs::write(staging.join("new.js"), b"new").expect("write new extension");
-
-        let mut rename_calls = 0;
-        let error = replace_directory_from_staging(&staging, &destination, |from, to| {
-            rename_calls += 1;
-            if rename_calls == 2 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "simulated promotion failure",
-                ));
-            }
-            std::fs::rename(from, to)
-        })
-        .expect_err("promotion must fail");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(rename_calls, 3);
-        assert!(destination.join("old.js").is_file());
-        assert!(!destination.join("new.js").exists());
-        assert!(staging.join("new.js").is_file());
-        assert!(!root.path().join("extension-unpacked.backup").exists());
-    }
-
     async fn test_repositories() -> Repositories {
         let pool = sqlx_sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -3509,110 +3972,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_record_deletion_revokes_note_shares_before_removing_rows() {
+    async fn profile_record_deletion_is_local_and_preserves_default_profile() {
         let repos = test_repositories().await;
-        let profile_note = repos
-            .create_note("research", None)
+        let selected = repos.create_note("research", None).await.unwrap();
+        let default = repos.create_note("default", None).await.unwrap();
+        assert!(delete_profile_records(&repos, "research")
             .await
-            .expect("create profile note");
-        let default_note = repos
-            .create_note("default", None)
+            .unwrap()
+            .is_empty());
+        assert!(repos.get_note(&selected.id).await.is_err());
+        assert_eq!(repos.get_note(&default.id).await.unwrap().id, default.id);
+        assert!(delete_profile_records(&repos, "default")
             .await
-            .expect("create default note");
-        let profile_share = ShareKeyRecord {
-            share_id: "share-research".to_string(),
-            item_kind: "note".to_string(),
-            item_id: profile_note.id.clone(),
-            content_key: vec![1; 32],
-        };
-        let default_share = ShareKeyRecord {
-            share_id: "share-default".to_string(),
-            item_kind: "note".to_string(),
-            item_id: default_note.id.clone(),
-            content_key: vec![2; 32],
-        };
-        repos
-            .save_share_key(&profile_share)
-            .await
-            .expect("save profile share");
-        repos
-            .save_share_key(&default_share)
-            .await
-            .expect("save default share");
-        let revoked = Arc::new(Mutex::new(Vec::new()));
-        let revoked_for_call = Arc::clone(&revoked);
-
-        let audio_paths =
-            delete_profile_records_with_share_revoker(&repos, "research", move |share_id| {
-                let revoked = Arc::clone(&revoked_for_call);
-                async move {
-                    revoked.lock().expect("revoked lock").push(share_id);
-                    Ok(())
-                }
-            })
-            .await
-            .expect("delete profile records");
-
-        assert!(audio_paths.is_empty());
-        assert_eq!(
-            *revoked.lock().expect("revoked lock"),
-            vec!["share-research".to_string()]
-        );
-        assert!(repos.get_note(&profile_note.id).await.is_err());
-        assert!(repos
-            .share_key_for_item("note", &profile_note.id)
-            .await
-            .expect("profile share lookup")
-            .is_none());
-        assert_eq!(
-            repos
-                .share_key_for_item("note", &default_note.id)
-                .await
-                .expect("default share lookup"),
-            Some(default_share)
-        );
-        repos
-            .get_note(&default_note.id)
-            .await
-            .expect("default note remains");
-    }
-
-    #[tokio::test]
-    async fn profile_record_deletion_keeps_rows_and_keys_when_share_revocation_fails() {
-        let repos = test_repositories().await;
-        let note = repos
-            .create_note("research", None)
-            .await
-            .expect("create profile note");
-        let share = ShareKeyRecord {
-            share_id: "share-research".to_string(),
-            item_kind: "note".to_string(),
-            item_id: note.id.clone(),
-            content_key: vec![1; 32],
-        };
-        repos
-            .save_share_key(&share)
-            .await
-            .expect("save profile share");
-
-        let error = delete_profile_records_with_share_revoker(&repos, "research", |_| async {
-            Err(AppError::new("june_request_failed", "network error"))
-        })
-        .await
-        .expect_err("failed revocation must keep local data");
-
-        assert_eq!(error.code, "june_request_failed");
-        repos
-            .get_note(&note.id)
-            .await
-            .expect("profile note remains");
-        assert_eq!(
-            repos
-                .share_key_for_item("note", &note.id)
-                .await
-                .expect("profile share lookup"),
-            Some(share)
-        );
+            .unwrap()
+            .is_empty());
+        assert_eq!(repos.get_note(&default.id).await.unwrap().id, default.id);
     }
 
     #[test]
@@ -4293,5 +4667,361 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(condition());
+    }
+}
+
+fn require_local_transcription_support() -> Result<(), AppError> {
+    if crate::providers::local_transcription_supported() {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "local_transcription_unsupported",
+            "Local transcription requires macOS 14 or later and Apple Silicon.",
+        ))
+    }
+}
+
+#[tauri::command]
+pub fn local_transcription_model_state() -> Result<serde_json::Value, AppError> {
+    require_local_transcription_support()?;
+    #[cfg(target_os = "macos")]
+    return Ok(serde_json::json!(
+        crate::transcription_model::runtime()?.state()
+    ));
+    #[cfg(not(target_os = "macos"))]
+    unreachable!()
+}
+
+#[tauri::command]
+pub async fn install_local_transcription_model(
+    app: AppHandle,
+    channel: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<(), AppError> {
+    require_local_transcription_support()?;
+    #[cfg(target_os = "macos")]
+    {
+        crate::transcription_model::runtime()?
+            .install(&crate::transcription_model::download_base(), |state| {
+                let _ = channel.send(serde_json::json!(state));
+                let _ = app.emit(crate::transcription_model::MODEL_STATE_EVENT, state);
+            })
+            .await
+            .map_err(|reason| AppError::new("local_model_install_failed", reason))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, channel);
+        unreachable!()
+    }
+}
+
+#[tauri::command]
+pub fn cancel_local_transcription_model_install() -> Result<(), AppError> {
+    require_local_transcription_support()?;
+    #[cfg(target_os = "macos")]
+    crate::transcription_model::runtime()?.cancel();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_local_transcription_model(
+    app: AppHandle,
+    state: State<'_, crate::providers::ProviderSettingsState>,
+) -> Result<serde_json::Value, AppError> {
+    require_local_transcription_support()?;
+    #[cfg(target_os = "macos")]
+    {
+        let model = crate::transcription_model::runtime()?;
+        let removal = model.begin_removal();
+        let switched = crate::providers::remove_local_transcription_selection(&state)?;
+        crate::providers::local_transcriber::shutdown().await;
+        let removed = model.remove().await;
+        drop(removal);
+        let _ = app.emit(crate::transcription_model::MODEL_STATE_EVENT, model.state());
+        removed.map_err(|reason| AppError::new("local_model_remove_failed", reason))?;
+        Ok(serde_json::json!({ "switched_to_groq": switched }))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, state);
+        unreachable!()
+    }
+}
+
+#[cfg(test)]
+mod agent_recovery_cleanup_tests {
+    use super::*;
+    #[test]
+    fn discard_removes_only_contained_source_files_and_reports_failed_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().join("profile")).unwrap();
+        let session = paths.recording_session_dir("note", "take").unwrap();
+        std::fs::create_dir_all(&session).unwrap();
+        let mic = session.join("microphone.wav");
+        let system = session.join("system.wav");
+        std::fs::write(&mic, b"synthetic microphone fixture").unwrap();
+        std::fs::write(&system, b"synthetic system fixture").unwrap();
+        let outside = directory.path().join("outside.wav");
+        std::fs::write(&outside, b"must survive").unwrap();
+        assert_eq!(
+            discard_recovery_files(&paths, &[outside.to_string_lossy().into_owned()])
+                .unwrap_err()
+                .code,
+            "audio_delete_failed"
+        );
+        assert!(outside.exists());
+        discard_recovery_files(
+            &paths,
+            &[
+                mic.to_string_lossy().into_owned(),
+                system.to_string_lossy().into_owned(),
+            ],
+        )
+        .unwrap();
+        assert!(!mic.exists());
+        assert!(!system.exists());
+        assert!(outside.exists());
+        discard_recovery_files(&paths, &[mic.to_string_lossy().into_owned()]).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod agent_retry_partition_tests {
+    use super::*;
+    #[tokio::test]
+    async fn queued_retry_refuses_a_saved_target_reassigned_while_waiting() {
+        let pool = sqlx_sqlite::SqlitePool::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query::query("CREATE TABLE notes(id TEXT PRIMARY KEY,profile TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query::query(
+            "CREATE TABLE recording_sessions(id TEXT PRIMARY KEY,note_id TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query::query("INSERT INTO notes VALUES('queued-profile-proof','owner')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query::query(
+            "INSERT INTO recording_sessions VALUES('saved-profile-proof','queued-profile-proof')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(queued_retry_target_exists(
+            &pool,
+            "owner",
+            "queued-profile-proof",
+            "saved-profile-proof"
+        )
+        .await
+        .unwrap());
+        let (owner, _) = processing_queue::enqueue("queued-profile-proof");
+        let owner_lock = owner.lock();
+        let guard = owner_lock.lock().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let task = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let (ticket, _) = processing_queue::enqueue("queued-profile-proof");
+                let lock = ticket.lock();
+                let _ = entered_tx.send(());
+                let _guard = lock.lock().await;
+                queued_retry_target_exists(
+                    &pool,
+                    "owner",
+                    "queued-profile-proof",
+                    "saved-profile-proof",
+                )
+                .await
+                .unwrap()
+            })
+        };
+        entered_rx.await.unwrap();
+        sqlx::query::query("UPDATE notes SET profile='foreign' WHERE id='queued-profile-proof'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(!task.await.unwrap());
+        assert!(!queued_retry_target_exists(
+            &pool,
+            "owner",
+            "different-note",
+            "saved-profile-proof"
+        )
+        .await
+        .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod queued_audio_authority_tests {
+    use super::{authorize_queued_audio, run_authorized_queued_audio};
+    use crate::{
+        domain::{processing_queue, turn_authority::TurnAuthority, types::AppError},
+        mcp_server::turns::TurnBinding,
+    };
+    use sqlx::query::query;
+    use sqlx_sqlite::SqlitePool;
+
+    async fn fixture() -> (SqlitePool, TurnBinding, String) {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for statement in [
+            "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY)",
+            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT,run_config_json TEXT)",
+            "CREATE TABLE session_profiles(session_id TEXT,profile TEXT)",
+            "CREATE TABLE notes(id TEXT PRIMARY KEY,profile TEXT,processing_status TEXT,content TEXT,revision INTEGER,updated_at TEXT)",
+            "CREATE TABLE recording_sessions(id TEXT PRIMARY KEY,note_id TEXT)",
+            "CREATE TABLE effects(id INTEGER)",
+            "INSERT INTO agent_sessions VALUES('conversation')",
+            "INSERT INTO agent_runs VALUES('run','conversation','running','{\"dataPartition\":\"owner\"}')",
+            "INSERT INTO session_profiles VALUES('conversation','owner')",
+        ] { query(statement).execute(&pool).await.unwrap(); }
+        let note = uuid::Uuid::new_v4().to_string();
+        query("INSERT INTO notes VALUES(?,'owner','ready','completed by A',7,'time-A')")
+            .bind(&note)
+            .execute(&pool)
+            .await
+            .unwrap();
+        query("INSERT INTO recording_sessions VALUES('capture',?)")
+            .bind(&note)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let binding = TurnBinding {
+            authority: TurnAuthority::new(),
+            wire_names: None,
+            session_id: "conversation".into(),
+            run_id: "run".into(),
+            data_partition: "owner".into(),
+            cli: crate::llm::cli::CliKind::Claude,
+            safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
+            attended: true,
+            surface: "chat".into(),
+        };
+        (pool, binding, note)
+    }
+
+    // This future performs actual SQLite effects. Production retry and recovery
+    // pass their lazy processing future through the same admission function.
+    async fn effect(pool: &SqlitePool, note: &str) -> Result<(), AppError> {
+        query("INSERT INTO effects VALUES(1)").execute(pool).await?;
+        query("UPDATE notes SET processing_status='transcribing',content='B',revision=8,updated_at='time-B' WHERE id=?").bind(note).execute(pool).await?;
+        Ok(())
+    }
+
+    async fn queued_case(revoke: bool, foreign: bool) {
+        let (pool, binding, note) = fixture().await;
+        let (first, _) = processing_queue::enqueue(&note);
+        let queue_lock = first.lock();
+        let held = queue_lock.lock().await;
+        let (second, _) = processing_queue::enqueue(&note);
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let task = {
+            let pool = pool.clone();
+            let binding = binding.clone();
+            let note = note.clone();
+            tokio::spawn(async move {
+                let lock = second.lock();
+                waiting_tx.send(()).unwrap();
+                let _held = lock.lock().await;
+                let result = run_authorized_queued_audio(
+                    &pool,
+                    &binding,
+                    "owner",
+                    &note,
+                    "capture",
+                    effect(&pool, &note),
+                )
+                .await;
+                second.finish();
+                result
+            })
+        };
+        waiting_rx.await.unwrap();
+        if foreign {
+            query("UPDATE notes SET profile='foreign' WHERE id=?")
+                .bind(&note)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if revoke {
+            binding.authority.revoke();
+        }
+        first.finish();
+        drop(held);
+        let result = task.await.unwrap();
+        if revoke || foreign {
+            assert_eq!(
+                result.unwrap_err().code,
+                if revoke {
+                    "turn_expired"
+                } else {
+                    "recording_not_found"
+                }
+            );
+            let snapshot:(String,String,i64,String,String)=sqlx::query_as::query_as("SELECT processing_status,content,revision,updated_at,profile FROM notes WHERE id=?").bind(&note).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                snapshot,
+                (
+                    "ready".into(),
+                    "completed by A".into(),
+                    7,
+                    "time-A".into(),
+                    if foreign { "foreign" } else { "owner" }.into()
+                )
+            );
+        } else {
+            result.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM effects")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, if revoke || foreign { 0 } else { 1 });
+        // Revocation is independent of terminal DB status: the run is still running.
+        let status: String = sqlx::query_scalar::query_scalar("SELECT status FROM agent_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+    #[tokio::test]
+    async fn stopped_retry_or_recovery_dequeues_without_effect_or_overwriting_ready_result() {
+        queued_case(true, false).await;
+    }
+    #[tokio::test]
+    async fn foreign_recovery_target_remains_untouched_after_dequeue() {
+        queued_case(false, true).await;
+    }
+    #[tokio::test]
+    async fn stopped_foreign_recovery_preserves_all_prior_result_metadata() {
+        queued_case(true, true).await;
+    }
+    #[tokio::test]
+    async fn live_retry_authority_admits_one_effect_after_queue() {
+        queued_case(false, false).await;
+    }
+    #[tokio::test]
+    async fn durable_cancelled_database_status_denies_even_with_live_capability() {
+        let (pool, binding, note) = fixture().await;
+        query("UPDATE agent_runs SET status='cancelled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            authorize_queued_audio(&pool, &binding, "owner", &note, "capture")
+                .await
+                .unwrap_err()
+                .code,
+            "turn_expired"
+        );
     }
 }

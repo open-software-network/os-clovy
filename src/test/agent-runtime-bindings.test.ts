@@ -20,7 +20,7 @@ describe("agent runtime Tauri bindings", () => {
     await agentRuntimeBindings.startRun({
       sessionId: "session-1",
       prompt: "Hello",
-      model: "auto",
+      model: "__clovy_cli_engine__:claude",
       safetyMode: "sandboxed",
       workspacePath: "/tmp/session-1",
       enabledSkillIds: ["notes"],
@@ -37,7 +37,7 @@ describe("agent runtime Tauri bindings", () => {
           request: {
             sessionId: "session-1",
             prompt: "Hello",
-            model: "auto",
+            model: "__clovy_cli_engine__:claude",
             safetyMode: "sandboxed",
             workspacePath: "/tmp/session-1",
             enabledSkillIds: ["notes"],
@@ -47,6 +47,13 @@ describe("agent runtime Tauri bindings", () => {
       ],
       ["cancel_agent_run", { runId: "run-1" }],
     ]);
+  });
+
+  it("exposes skills and interruption approvals without native sidecar controls", () => {
+    expect(agentRuntimeBindings.listSkills).toBeTypeOf("function");
+    expect(agentRuntimeBindings.resolveInterruption).toBeTypeOf("function");
+    expect(agentRuntimeBindings).not.toHaveProperty("compactSession");
+    expect(agentRuntimeBindings).not.toHaveProperty("steerRun");
   });
 
   it("sends typed interruption resolutions", async () => {

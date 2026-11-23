@@ -1,34 +1,39 @@
 import {
+  dayName,
   humanizeSchedule,
   scheduleFromDraft,
   type ScheduleDraft,
 } from "../../lib/routine-schedule";
+import { type TFunction, useT } from "../../i18n";
 import { Select } from "../ui/Select";
 
-const KIND_OPTIONS = [
-  { value: "daily", label: "Daily" },
-  { value: "weekdays", label: "Weekdays" },
-  { value: "weekly", label: "Weekly" },
-  { value: "interval", label: "Interval" },
-  { value: "custom", label: "Custom" },
-];
+function kindOptions(t: TFunction) {
+  return [
+    { value: "daily", label: t("routines.schedule.daily") },
+    { value: "weekdays", label: t("routines.schedule.weekdays") },
+    { value: "weekly", label: t("routines.schedule.weekly") },
+    { value: "interval", label: t("routines.schedule.interval") },
+    { value: "custom", label: t("routines.schedule.custom") },
+  ];
+}
 
 type ScheduleKind = ScheduleDraft["kind"];
 
-const DAY_OPTIONS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-].map((label, day) => ({ value: String(day), label }));
+/** Weekday names in the interface language, Sunday first (cron day 0). English
+ * keeps its fixed names regardless of the system's regional format. */
+function dayOptions() {
+  return Array.from({ length: 7 }, (_, day) => {
+    const name = dayName(day);
+    return { value: String(day), label: name.charAt(0).toUpperCase() + name.slice(1) };
+  });
+}
 
-const UNIT_OPTIONS = [
-  { value: "minutes", label: "minutes" },
-  { value: "hours", label: "hours" },
-];
+function unitOptions(t: TFunction) {
+  return [
+    { value: "minutes", label: t("routines.schedule.minutes") },
+    { value: "hours", label: t("routines.schedule.hours") },
+  ];
+}
 
 /** Structured schedule editing for routines: one row where the cadence
  * select swaps its companion controls inline. Presets cover the schedules
@@ -42,6 +47,7 @@ export function SchedulePicker({
   draft: ScheduleDraft;
   onChange: (draft: ScheduleDraft) => void;
 }) {
+  const t = useT();
   // Carry the clock time across the day-based kinds so flipping
   // Daily → Weekdays keeps the chosen time.
   const heldTime = "time" in draft ? draft.time : "09:00";
@@ -87,18 +93,18 @@ export function SchedulePicker({
       <div className="schedule-picker-controls">
         <Select
           value={draft.kind}
-          options={KIND_OPTIONS}
-          placeholder="Schedule"
-          ariaLabel="Schedule type"
+          options={kindOptions(t)}
+          placeholder={t("routines.schedule.placeholder")}
+          ariaLabel={t("routines.schedule.typeLabel")}
           onChange={(kind) => switchKind(kind as ScheduleKind)}
         />
 
         {draft.kind === "weekly" ? (
           <Select
             value={String(draft.day)}
-            options={DAY_OPTIONS}
-            placeholder="Day"
-            ariaLabel="Day of week"
+            options={dayOptions()}
+            placeholder={t("routines.schedule.day")}
+            ariaLabel={t("routines.schedule.dayOfWeek")}
             onChange={(day) => onChange({ ...draft, day: Number(day) })}
           />
         ) : null}
@@ -107,7 +113,7 @@ export function SchedulePicker({
           <input
             type="time"
             value={draft.time}
-            aria-label="Time"
+            aria-label={t("routines.schedule.time")}
             onChange={(event) => onChange({ ...draft, time: event.currentTarget.value })}
           />
         ) : null}
@@ -118,7 +124,7 @@ export function SchedulePicker({
               type="number"
               min={1}
               value={intervalAmount}
-              aria-label="Repeat every"
+              aria-label={t("routines.schedule.repeatEvery")}
               onChange={(event) => {
                 const amount = Math.max(1, Math.floor(Number(event.currentTarget.value) || 1));
                 onChange({
@@ -129,9 +135,9 @@ export function SchedulePicker({
             />
             <Select
               value={intervalUnit}
-              options={UNIT_OPTIONS}
-              placeholder="Unit"
-              ariaLabel="Interval unit"
+              options={unitOptions(t)}
+              placeholder={t("routines.schedule.unit")}
+              ariaLabel={t("routines.schedule.intervalUnit")}
               onChange={(unit) =>
                 onChange({
                   kind: "interval",
@@ -147,8 +153,8 @@ export function SchedulePicker({
             className="schedule-picker-custom"
             type="text"
             value={draft.expression}
-            aria-label="Custom schedule"
-            placeholder="0 9 * * 1-5 or every 30m"
+            aria-label={t("routines.schedule.customLabel")}
+            placeholder={t("routines.schedule.customPlaceholder")}
             onChange={(event) =>
               onChange({
                 kind: "custom",
@@ -162,9 +168,7 @@ export function SchedulePicker({
       {showPreview ? (
         <p className="schedule-picker-preview">{preview}</p>
       ) : draft.kind === "custom" ? (
-        <p className="schedule-picker-preview">
-          A cron expression, an interval like "every 30m", or a date for a one-time run.
-        </p>
+        <p className="schedule-picker-preview">{t("routines.schedule.customHelp")}</p>
       ) : null}
     </div>
   );

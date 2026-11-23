@@ -2,6 +2,7 @@ import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconStop } from "central-icons/IconStop";
 import { IconTelevision } from "central-icons/IconTelevision";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { clockTimeOptions, intlLocale, t as translate, useT, useTRich } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
@@ -14,9 +15,8 @@ import {
 } from "../../lib/tauri";
 
 function expiryLabel(expiresAtMs: number) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
+  return new Intl.DateTimeFormat(intlLocale(), {
+    ...clockTimeOptions(),
   }).format(new Date(expiresAtMs));
 }
 
@@ -24,14 +24,19 @@ function approvalHeading(pending: PendingComputerUseApprovalDto[]) {
   const targetApps = [
     ...new Set(pending.map((item) => item.targetApp.trim()).filter((target) => target.length > 0)),
   ];
-  if (targetApps.length === 1) return `Clovy wants to use ${targetApps[0]}`;
-  if (targetApps.length > 1) return `Clovy wants to use ${targetApps.length} apps`;
-  return "Clovy wants to use an app";
+  if (targetApps.length === 1)
+    return translate("agent.computerUse.headingApp", { app: targetApps[0] });
+  if (targetApps.length > 1) {
+    return translate("agent.computerUse.headingApps", { count: targetApps.length });
+  }
+  return translate("agent.computerUse.headingUnknown");
 }
 
 /** Always-mounted decision surface for the app-owned Computer use broker.
  * Approval is scoped to one target app and expires with the current task. */
 export function ComputerUseApprovalsTray() {
+  const t = useT();
+  const tr = useTRich();
   const [pending, setPending] = useState<PendingComputerUseApprovalDto[]>([]);
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -114,7 +119,7 @@ export function ComputerUseApprovalsTray() {
   return (
     <aside
       className="connector-approvals computer-use-approvals"
-      aria-label="Computer use approvals"
+      aria-label={t("agent.computerUse.label")}
     >
       <header className="connector-approvals-header">
         <button
@@ -138,15 +143,13 @@ export function ComputerUseApprovalsTray() {
               onClick={() => void stop()}
             >
               <IconStop size={12} aria-hidden />
-              Stop
+              {t("agent.computerUse.stop")}
             </button>
           ) : null}
           <button
             type="button"
             className="connector-approvals-chevron-button"
-            aria-label={
-              collapsed ? "Expand Computer use approvals" : "Collapse Computer use approvals"
-            }
+            aria-label={collapsed ? t("agent.computerUse.expand") : t("agent.computerUse.collapse")}
             aria-expanded={!collapsed}
             onClick={() => setCollapsed((current) => !current)}
           >
@@ -167,16 +170,19 @@ export function ComputerUseApprovalsTray() {
                 <img
                   className="computer-use-approval-capture"
                   src={computerUseCaptureSrc(item.capturePath)}
-                  alt={`Current ${item.targetApp} window before the proposed action`}
+                  alt={t("agent.computerUse.captureAlt", { app: item.targetApp })}
                 />
               ) : null}
               <div className="computer-use-approval-copy">
                 <strong>{item.summary}</strong>
                 <span>
-                  Expires at{" "}
-                  <time dateTime={new Date(item.expiresAtMs).toISOString()}>
-                    {expiryLabel(item.expiresAtMs)}
-                  </time>
+                  {tr("agent.computerUse.expiresAt", {
+                    time: (
+                      <time dateTime={new Date(item.expiresAtMs).toISOString()}>
+                        {expiryLabel(item.expiresAtMs)}
+                      </time>
+                    ),
+                  })}
                 </span>
               </div>
               <div className="computer-use-approval-actions">
@@ -186,7 +192,7 @@ export function ComputerUseApprovalsTray() {
                   disabled={busy}
                   onClick={() => void respond(item.approvalId, false)}
                 >
-                  Deny
+                  {t("agent.computerUse.deny")}
                 </button>
                 <button
                   type="button"
@@ -194,7 +200,7 @@ export function ComputerUseApprovalsTray() {
                   disabled={busy}
                   onClick={() => void respond(item.approvalId, true)}
                 >
-                  Allow for this task
+                  {t("agent.computerUse.allow")}
                 </button>
               </div>
             </li>

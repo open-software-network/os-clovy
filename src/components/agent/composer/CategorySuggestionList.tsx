@@ -13,6 +13,7 @@ import { IconCat } from "central-icons/IconCat";
 import { IconFileText } from "central-icons/IconFileText";
 import { IconVideoClip } from "central-icons/IconVideoClip";
 
+import { useT } from "../../../i18n";
 import type { AgentSkillInfo } from "../../../lib/tauri";
 import type { BuiltinComposerSlashCommandDef } from "../../../lib/agent-composer-slash-commands";
 import { useScrollFade } from "../../../lib/use-scroll-fade";
@@ -39,6 +40,7 @@ export const CategorySuggestionList = forwardRef<
   CategorySuggestionListHandle,
   CategorySuggestionListProps
 >(({ items, command }, ref) => {
+  const t = useT();
   const [selected, setSelected] = useState(0);
   const [activeSource, setActiveSource] = useState<"keyboard" | "pointer" | null>(null);
   const [detail, setDetail] = useState<{
@@ -158,7 +160,11 @@ export const CategorySuggestionList = forwardRef<
   );
 
   if (items.length === 0) {
-    return <div className="agent-category-menu agent-category-menu-empty">No matches</div>;
+    return (
+      <div className="agent-category-menu agent-category-menu-empty">
+        {t("chat.composer.noMatches")}
+      </div>
+    );
   }
 
   const detailItem = detail ? items[detail.index] : undefined;
@@ -187,7 +193,7 @@ export const CategorySuggestionList = forwardRef<
           ref={menuRef}
           className="agent-category-menu"
           role="listbox"
-          aria-label="Slash commands"
+          aria-label={t("chat.composer.slashCommands")}
           onScroll={() => {
             fade.update();
             setDetail(null);
@@ -195,13 +201,13 @@ export const CategorySuggestionList = forwardRef<
         >
           {builtins.length ? (
             <div className="agent-category-menu-section" role="presentation">
-              <div className="agent-category-menu-section-label">Commands</div>
+              <div className="agent-category-menu-section-label">{t("chat.composer.commands")}</div>
               {builtins.map(({ item, index }) => renderCommandRow(item, index))}
             </div>
           ) : null}
           {skills.length ? (
             <div className="agent-category-menu-section" role="presentation">
-              <div className="agent-category-menu-section-label">Skills</div>
+              <div className="agent-category-menu-section-label">{t("chat.composer.skills")}</div>
               {skills.map(({ item, index }) => renderCommandRow(item, index))}
             </div>
           ) : null}

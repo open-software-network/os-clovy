@@ -4,7 +4,7 @@ use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem};
 use objc2_foundation::{NSInteger, NSSize, NSString};
 
 #[cfg(target_os = "macos")]
-pub fn install_settings_symbol_on_app_menu() {
+pub fn install_settings_symbol_on_app_menu(settings_title: &str) {
     use objc2::MainThreadMarker;
 
     let Some(mtm) = MainThreadMarker::new() else {
@@ -14,9 +14,9 @@ pub fn install_settings_symbol_on_app_menu() {
     let Some(main_menu) = app.mainMenu() else {
         return;
     };
-    let title = NSString::from_str("Settings...");
+    let title = NSString::from_str(settings_title);
     let Some(settings_item) = find_menu_item(&main_menu, &title) else {
-        eprintln!("Warning: Could not find Settings... menu item");
+        eprintln!("Warning: Could not find {settings_title} menu item");
         return;
     };
 
@@ -56,4 +56,4 @@ fn find_menu_item(menu: &NSMenu, title: &NSString) -> Option<objc2::rc::Retained
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn install_settings_symbol_on_app_menu() {}
+pub fn install_settings_symbol_on_app_menu(_settings_title: &str) {}

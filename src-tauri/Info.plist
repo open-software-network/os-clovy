@@ -2,16 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- Finder localizes this to Clovy only when the base value matches June.app. -->
   <key>CFBundleDisplayName</key>
-  <string>June</string>
-  <key>LSHasLocalizedDisplayName</key>
-  <true/>
+  <string>Clovy</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Clovy records microphone audio locally so it can transcribe and generate your notes.</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>Clovy records system audio locally when you choose microphone plus system audio for a note.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Clovy captures only the app windows you ask it to operate so Clovy can understand and complete your task.</string>
+  <string>Clovy captures the app windows you ask it to operate and, when you choose, records the meeting window so notes can include visible slides and shared content.</string>
 </dict>
 </plist>

@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { useT } from "../../i18n";
 import { Dialog, DialogField } from "../ui/Dialog";
 
 type RenameSessionDialogProps = {
@@ -14,6 +15,7 @@ export function RenameSessionDialog({
   onClose,
   onRename,
 }: RenameSessionDialogProps) {
+  const t = useT();
   const [name, setName] = useState(currentName);
   const formId = useId();
   const inputId = useId();
@@ -35,12 +37,12 @@ export function RenameSessionDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="Rename session"
+      title={t("agent.rename.title")}
       initialFocusSelector="[data-rename-session-input]"
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
@@ -48,18 +50,18 @@ export function RenameSessionDialog({
             className="primary-action primary-solid"
             disabled={name.trim().length === 0}
           >
-            Rename
+            {t("common.rename")}
           </button>
         </>
       }
     >
       <form id={formId} className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Name" htmlFor={inputId}>
+        <DialogField label={t("agent.rename.nameLabel")} htmlFor={inputId}>
           <input
             id={inputId}
             data-rename-session-input=""
             className="dialog-input"
-            aria-label="Session name"
+            aria-label={t("agent.rename.nameAria")}
             autoComplete="off"
             value={name}
             maxLength={120}

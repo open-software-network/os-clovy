@@ -19,10 +19,28 @@ const rawUserArgs = process.argv.slice(2);
 const userArgs = rawUserArgs[0] === "--" ? rawUserArgs.slice(1) : rawUserArgs;
 const target = optionValue(userArgs, "--target");
 const buildPlatform = platformForTarget(target) ?? process.platform;
+const browserPrepareArgs = [
+  resolve(dirname(fileURLToPath(import.meta.url)), "prepare-agent-browser.mjs"),
+  "--release",
+];
+if (target) browserPrepareArgs.push("--target", target);
+const browserPrepare = spawnSync(process.execPath, browserPrepareArgs, { stdio: "inherit" });
+if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
 if (buildPlatform === "darwin") {
+  const localPrepare = spawnSync(
+    process.execPath,
+    [
+      resolve(dirname(fileURLToPath(import.meta.url)), "prepare-local-transcriber.mjs"),
+      ...(userArgs.includes("--debug") ? [] : ["--release"]),
+    ],
+    { stdio: "inherit" },
+  );
+  if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
+}
+if (buildPlatform === "darwin" || buildPlatform === "win32") {
   const prepareArgs = [
-    resolve(dirname(fileURLToPath(import.meta.url)), "prepare-cua-driver.mjs"),
-    "--release",
+    resolve(dirname(fileURLToPath(import.meta.url)), "prepare-computer-use.mjs"),
+    ...(userArgs.includes("--debug") ? [] : ["--release"]),
   ];
   if (target) prepareArgs.push("--target", target);
   const prepare = spawnSync(process.execPath, prepareArgs, {
@@ -31,6 +49,16 @@ if (buildPlatform === "darwin") {
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
 }
 const bundles = platformBundles[buildPlatform];
+if (buildPlatform === "win32") {
+  const prepareArgs = [resolve(dirname(fileURLToPath(import.meta.url)), "prepare-windows-mcp.mjs")];
+  for (const option of ["--target", "--profile", "--features"]) {
+    const value = optionValue(userArgs, option);
+    if (value) prepareArgs.push(option, value);
+  }
+  if (userArgs.includes("--debug")) prepareArgs.push("--debug");
+  const prepared = spawnSync(process.execPath, prepareArgs, { stdio: "inherit" });
+  if (prepared.status !== 0) process.exit(prepared.status ?? 1);
+}
 const config = platformConfigs[buildPlatform];
 const hasBundleOverride = userArgs.some(
   (arg) => arg === "--bundles" || arg.startsWith("--bundles="),

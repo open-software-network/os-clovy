@@ -1,0 +1,250 @@
+name: release
+
+# A tag vX.Y.Z (or a manual run naming one) builds the selected Clovy platforms,
+# signs the updater packages with the owner's key and publishes a GitHub
+# release with latest.json (ADR-0069). A manual run defaults to dry_run: it
+# builds and uploads the files as run artifacts and publishes nothing.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z), equal to the version in the four version files
+        required: true
+        type: string
+      dry_run:
+        description: Build and keep the files as run artifacts; publish nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Inputs reach scripts only through the environment, never inline.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  version:
+    name: Tag matches the version
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.release_platforms.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Select release platforms
+        id: release_platforms
+        env:
+          REQUESTED_PLATFORMS: ${{ vars.CLOVY_RELEASE_PLATFORMS }}
+        shell: bash
+        run: |
+          platforms="${REQUESTED_PLATFORMS:-all}"
+          case "$platforms" in
+            all|macos) ;;
+            *) echo "Invalid CLOVY_RELEASE_PLATFORMS: expected all or macos." >&2; exit 1 ;;
+          esac
+          echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag against the four version files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A dry run publishes nothing and may rehearse a released version.
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node scripts/check-release-version.mjs "$RELEASE_TAG" "${args[@]}"
+
+  macos:
+    name: macOS universal build
+    needs: version
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Pinned agent-desktop (9eb9b296) selects Rust 1.89.0 in its source.
+      # Stable's targets do not supply std for that separate toolchain.
+      - name: Setup pinned computer-use Rust targets
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.89.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      # The agent runtime is a Node SEA: it needs the official Node 24 binary.
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: release-cargo-registry-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            release-cargo-registry-${{ runner.os }}-
+
+      # Without the Apple secrets the app is signed ad hoc and not notarized;
+      # with them the script signs with the identity and notarizes the DMG.
+      - name: Build the universal app, DMG and updater package
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          CLOVY_RELEASE_OUT_DIR: ${{ runner.temp }}/release-macos
+        run: ./scripts/build-macos-release.sh
+
+      - name: Upload macOS files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clovy-release-macos
+          path: ${{ runner.temp }}/release-macos/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows NSIS build
+    needs: version
+    if: needs.version.outputs.platforms == 'all'
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Windows packaging and SQLCipher tools
+        shell: pwsh
+        run: |
+          choco install nsis 7zip strawberryperl nasm -y --no-progress
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: release-cargo-registry-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            release-cargo-registry-${{ runner.os }}-
+
+      - name: Prepare the Windows signing identity on the ephemeral runner
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./scripts/prepare-windows-release-certificate.ps1
+
+      - name: Build and verify the installer and its updater signature
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: ./scripts/build-windows.ps1
+
+      - name: Upload Windows files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clovy-release-windows
+          path: artifacts/windows-signed/*-setup.exe*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    # Only the selected platforms may succeed; failures/cancellations never publish.
+    needs: [version, macos, windows]
+    if: >-
+      ${{ always() && !cancelled() &&
+          needs.version.result == 'success' && needs.macos.result == 'success' &&
+          ((needs.version.outputs.platforms == 'macos' && needs.windows.result == 'skipped') ||
+           (needs.version.outputs.platforms == 'all' && needs.windows.result == 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Download the build files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: clovy-release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Write latest.json
+        env:
+          RELEASE_PLATFORMS: ${{ needs.version.outputs.platforms }}
+        run: |
+          node scripts/release-manifest.mjs --tag "$RELEASE_TAG" --dir release-assets \
+            --out release-assets/latest.json --repo "$GITHUB_REPOSITORY" --platforms "$RELEASE_PLATFORMS"
+          ls -l release-assets
+
+      - name: Keep the manifest as a run artifact (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clovy-release-manifest
+          path: release-assets/latest.json
+          if-no-files-found: error
+
+      - name: Create the GitHub release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Clovy $RELEASE_TAG" \
+            --generate-notes

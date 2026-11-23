@@ -51,3 +51,7 @@ proposing its public identity.
   a new pairing attempt. There is no server-side credential recovery path.
 - Credential rotation is a new pairing with a new device identity, rather than
   an in-place bearer replacement.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

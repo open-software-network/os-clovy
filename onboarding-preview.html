@@ -37,22 +37,21 @@
       // Pre-paint theme bootstrap, same as index.html (plus a ?theme=
       // override so scripted screenshots can pick a theme per URL).
       (function () {
+        document.documentElement.setAttribute("data-theme", "dark");
         try {
           var requested = new URLSearchParams(location.search).get("theme");
           if (requested === "light" || requested === "dark") {
             localStorage.setItem("os-clovy:theme", requested);
-            localStorage.setItem("os-june:theme", requested);
           }
           var stored =
             requested ||
-            localStorage.getItem("os-clovy:theme") ||
-            localStorage.getItem("os-june:theme");
+            localStorage.getItem("os-clovy:theme");
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : stored === "system" && !window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "light"
+                : "dark";
           document.documentElement.setAttribute("data-theme", resolved);
         } catch (e) {}
       })();
@@ -103,13 +102,10 @@
         // The wizard always replays in the preview.
         try {
           localStorage.removeItem("clovy.onboarding.completedVersion");
-          localStorage.removeItem("june.onboarding.completedVersion");
           if (step) {
             localStorage.setItem("clovy.onboarding.resumeStep", step);
-            localStorage.setItem("june.onboarding.resumeStep", step);
           } else {
             localStorage.removeItem("clovy.onboarding.resumeStep");
-            localStorage.removeItem("june.onboarding.resumeStep");
           }
         } catch (e) {}
 

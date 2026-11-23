@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { deleteNote, deleteNotes, getNote, listNotes } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
 import type { NoteEditablePatch } from "../lib/tauri";
@@ -19,7 +20,7 @@ export function createNoteActions(dependencies: CreateNoteActionsDependencies) {
 
   async function handleDeleteNote(noteId: string) {
     if (state.recordingStatus) {
-      setError("Stop the current recording before deleting a note.");
+      setError(t("app.recording.stopBeforeDeletingNote"));
       return;
     }
     try {
@@ -43,7 +44,7 @@ export function createNoteActions(dependencies: CreateNoteActionsDependencies) {
 
   async function handleDeleteNotes(noteIds: string[]) {
     if (state.recordingStatus) {
-      setError("Stop the current recording before deleting meetings.");
+      setError(t("app.recording.stopBeforeDeletingMeetings"));
       return;
     }
     try {

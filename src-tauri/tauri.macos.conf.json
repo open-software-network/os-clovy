@@ -1,28 +1,33 @@
 {
-  "productName": "June",
+  "productName": "Clovy",
   "build": {
     "runner": "../scripts/cargo-clovy-runner.sh",
-    "beforeBundleCommand": "bash scripts/bundle-nm-shim.sh"
+    "beforeBundleCommand": "bash src-tauri/bundle-clovy-mcp.sh",
+    "beforeBuildCommand": "pnpm run browser:prepare -- --release && pnpm run local-transcriber:prepare -- --release && pnpm run computer-use:prepare -- --build-hook && pnpm run build"
   },
   "bundle": {
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "resources": {
-      "resources/macos/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
-      "../.tauri-helper/June.app": "native/bin/June.app",
-      "../.tauri-helper/June Dictation Helper.app": "native/bin/June Dictation Helper.app",
-      "../.tauri-helper/clovy-nm-shim": "native/bin/clovy-nm-shim",
-      "../.tauri-helper/june-nm-shim": "native/bin/june-nm-shim",
-      "../.tauri-helper/June Computer Use Driver.app": "native/bin/June Computer Use Driver.app",
-      "../.tauri-agent-runtime/clovy-agent-runtime": "native/bin/clovy-agent-runtime",
-      "../.tauri-agent-runtime/clovy-agent-runtime.sha256": "native/bin/clovy-agent-runtime.sha256",
-      "../extension/dist": "native/extension",
-      "resources/agent-skills": "native/agent-skills"
+      "../.tauri-helper/Clovy Video Capture.app": "native/bin/Clovy Video Capture.app",
+      "../.tauri-helper/Clovy Audio Capture.app": "native/bin/Clovy Audio Capture.app",
+      "../.tauri-helper/Clovy Dictation Helper.app": "native/bin/Clovy Dictation Helper.app",
+      "../.tauri-helper/clovy-mcp": "native/bin/clovy-mcp",
+      "../.tauri-helper/Clovy Computer Use Driver.app": "native/bin/Clovy Computer Use Driver.app",
+      "../resources/agent-browser": null,
+      "resources/agent-skills": "native/agent-skills",
+      "../.tauri-helper/Clovy Local Transcriber.app": "native/bin/Clovy Local Transcriber.app"
     },
     "macOS": {
       "bundleName": "Clovy",
       "entitlements": "Entitlements.plist",
       "exceptionDomain": "",
       "frameworks": [],
+      "files": {
+        "Resources/native/agent-browser": "../resources/agent-browser"
+      },
       "infoPlist": "Info.plist",
       "minimumSystemVersion": "14.0"
     }

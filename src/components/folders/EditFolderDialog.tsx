@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FolderDto } from "../../lib/tauri";
+import { useT } from "../../i18n";
 import { Dialog, DialogField } from "../ui/Dialog";
 
 type EditFolderDialogProps = {
@@ -10,6 +11,7 @@ type EditFolderDialogProps = {
 };
 
 export function EditFolderDialog({ open, onClose, folder, onSave }: EditFolderDialogProps) {
+  const t = useT();
   const [name, setName] = useState(folder.name);
   const [description, setDescription] = useState(folder.description ?? "");
   const [submitting, setSubmitting] = useState(false);
@@ -41,13 +43,13 @@ export function EditFolderDialog({ open, onClose, folder, onSave }: EditFolderDi
         if (submitting) return;
         onClose();
       }}
-      title="Edit project"
-      description="Update the project’s name or description."
+      title={t("notes.folders.edit.title")}
+      description={t("notes.folders.edit.description")}
       initialFocusSelector='input[name="edit-folder-name"]'
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
@@ -55,13 +57,13 @@ export function EditFolderDialog({ open, onClose, folder, onSave }: EditFolderDi
             className="primary-action primary-solid"
             disabled={submitting || name.trim().length === 0}
           >
-            {submitting ? "Saving…" : "Save"}
+            {submitting ? t("notes.folders.edit.saving") : t("common.save")}
           </button>
         </>
       }
     >
       <form id="edit-folder-form" className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Name" htmlFor="edit-folder-name">
+        <DialogField label={t("notes.folders.field.name")} htmlFor="edit-folder-name">
           <input
             id="edit-folder-name"
             name="edit-folder-name"
@@ -72,12 +74,12 @@ export function EditFolderDialog({ open, onClose, folder, onSave }: EditFolderDi
             maxLength={120}
           />
         </DialogField>
-        <DialogField label="Description" htmlFor="edit-folder-description">
+        <DialogField label={t("notes.folders.field.description")} htmlFor="edit-folder-description">
           <textarea
             id="edit-folder-description"
             name="edit-folder-description"
             className="dialog-textarea"
-            placeholder="What belongs in this project?"
+            placeholder={t("notes.folders.field.descriptionPlaceholder")}
             value={description}
             onChange={(event) => setDescription(event.currentTarget.value)}
             rows={3}

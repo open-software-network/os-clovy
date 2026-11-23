@@ -1,5 +1,6 @@
 use crate::domain::types::{
     AppError, NoteDto, RecordingOrigin, RecordingOriginMetadata, RecordingSessionDto,
+    RecordingVideoRequest, StartMeetingRecordingRequest,
 };
 use serde::Serialize;
 use std::{
@@ -8,6 +9,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+
+mod windows_probe;
+
+use windows_probe::find_windows_mic_app;
 
 const CLEAR_AFTER_INACTIVE_POLLS: u8 = 2;
 const HEARTBEAT_EVERY_ACTIVE_POLLS: u8 = 5;
@@ -30,6 +35,8 @@ pub struct PendingMeetingStartRequest {
     note_id: String,
     requested_at_ms: u64,
     expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video: Option<RecordingVideoRequest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,6 +64,7 @@ struct MeetingStartRequest {
     note_id: String,
     requested_at_ms: u64,
     bundle_families: Vec<String>,
+    video: Option<RecordingVideoRequest>,
     phase: MeetingStartRequestPhase,
 }
 
@@ -75,7 +83,16 @@ pub struct MeetingStartRequestState {
 }
 
 impl MeetingStartRequestState {
+    #[cfg(test)]
     fn queue_at(&self, requested_at_ms: u64) -> Result<String, String> {
+        self.queue_with_video_at(requested_at_ms, None)
+    }
+
+    fn queue_with_video_at(
+        &self,
+        requested_at_ms: u64,
+        video: Option<RecordingVideoRequest>,
+    ) -> Result<String, String> {
         let mut mailbox = self
             .mailbox
             .lock()
@@ -102,6 +119,7 @@ impl MeetingStartRequestState {
                 .iter()
                 .cloned()
                 .collect(),
+            video,
             phase: MeetingStartRequestPhase::Queued,
         });
         Ok(request_id)
@@ -119,6 +137,7 @@ impl MeetingStartRequestState {
                 request_id: pending.request_id.clone(),
                 note_id: pending.note_id.clone(),
                 requested_at_ms: pending.requested_at_ms,
+                video: pending.video.clone(),
                 expired: matches!(pending.phase, MeetingStartRequestPhase::Queued)
                     && now_ms.saturating_sub(pending.requested_at_ms)
                         > MEETING_START_REQUEST_TTL_MS,
@@ -209,6 +228,31 @@ impl MeetingStartRequestState {
                 )
             })?;
         Ok(pending.bundle_families.clone())
+    }
+
+    pub fn start_video(
+        &self,
+        request: &StartMeetingRecordingRequest,
+    ) -> Result<Option<RecordingVideoRequest>, AppError> {
+        let mailbox = self.mailbox.lock().map_err(|_| {
+            AppError::new(
+                "meeting_start_unavailable",
+                "The meeting start request is unavailable.",
+            )
+        })?;
+        let pending = mailbox
+            .pending
+            .as_ref()
+            .filter(|pending| pending.request_id == request.request_id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "meeting_start_not_found",
+                    "The meeting start request was not found.",
+                )
+            })?;
+        // The HUD owns the opt-in and selected window. Renderer retries may carry
+        // stale data, so they cannot enable video or replace that retained choice.
+        Ok(pending.video.clone())
     }
 
     pub fn finished_outcome(
@@ -687,8 +731,9 @@ fn wall_clock_millis() -> Result<u64, String> {
 pub fn queue_meeting_start_request(
     app: AppHandle,
     state: State<'_, MeetingStartRequestState>,
+    video: Option<RecordingVideoRequest>,
 ) -> Result<(), String> {
-    state.queue_at(wall_clock_millis()?)?;
+    state.queue_with_video_at(wall_clock_millis()?, video)?;
     app.emit(MEETING_START_REQUEST_EVENT_NAME, ())
         .map_err(|error| format!("failed to wake the meeting-start listener: {error}"))?;
     Ok(())
@@ -834,10 +879,10 @@ const ALLOWED_MIC_APPS: &[AllowedMicApp] = &[
 pub fn setup(app: &mut tauri::App) {
     app.manage(MeetingStartRequestState::default());
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     spawn_monitor(app.handle().clone());
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
 }
 
@@ -947,7 +992,7 @@ pub(crate) fn active_allowed_external_processes(
 }
 
 fn is_allowed_microphone_app(bundle_id: &str) -> bool {
-    allowed_mic_app(bundle_id).is_some()
+    allowed_mic_app(bundle_id).is_some() || find_windows_mic_app(bundle_id).is_some()
 }
 
 fn bundle_id_matches_prefix(bundle_id: &str, prefix: &str) -> bool {
@@ -963,6 +1008,18 @@ fn app_label_from_bundle_id(bundle_id: &str) -> String {
     if let Some(app) = allowed_mic_app(bundle_id) {
         return app.label.to_string();
     }
+    if let Some(app) = find_windows_mic_app(bundle_id) {
+        return app.label.to_string();
+    }
+    // ASCII lowercasing keeps byte offsets, so the stem length slices the
+    // original spelling ("OBS64.exe" -> "OBS64").
+    if let Some(stem) = bundle_id
+        .to_ascii_lowercase()
+        .strip_suffix(".exe")
+        .filter(|stem| !stem.is_empty())
+    {
+        return bundle_id[..stem.len()].to_string();
+    }
     bundle_id
         .rsplit('.')
         .find(|part| !part.trim().is_empty())
@@ -977,7 +1034,9 @@ fn allowed_mic_app(bundle_id: &str) -> Option<&'static AllowedMicApp> {
 }
 
 fn bundle_family_from_bundle_id(bundle_id: &str) -> Option<String> {
-    allowed_mic_app(bundle_id).map(|app| app.bundle_prefix.to_ascii_lowercase())
+    allowed_mic_app(bundle_id)
+        .map(|app| app.bundle_prefix.to_ascii_lowercase())
+        .or_else(|| find_windows_mic_app(bundle_id).map(|app| app.family.to_string()))
 }
 
 fn meeting_end_bundle_families(
@@ -1002,7 +1061,7 @@ fn meeting_end_bundle_families(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn spawn_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut state = MeetingDetectionState::default();
@@ -1010,14 +1069,6 @@ fn spawn_monitor(app: AppHandle) {
 
         loop {
             std::thread::sleep(POLL_INTERVAL);
-
-            if !crate::os_accounts::cached_signed_in() {
-                if let Some(event) = state.update(false, false, false) {
-                    emit_detection_event(&app, event, &[]);
-                }
-                observe_meeting_end(&app, None);
-                continue;
-            }
 
             let active_processes = match active_input_processes() {
                 Ok(active_processes) => {
@@ -1077,7 +1128,7 @@ fn spawn_monitor(app: AppHandle) {
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn observe_meeting_end(app: &AppHandle, active_bundle_families: Option<&BTreeSet<String>>) {
     let Some(state) = app.try_state::<MeetingStartRequestState>() else {
         return;
@@ -1183,7 +1234,10 @@ fn emit_meeting_end_finish_request(app: &AppHandle, request: &PendingMeetingEndF
 #[cfg(target_os = "macos")]
 pub(crate) use macos::active_input_processes;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub(crate) use windows_probe::active_input_processes;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn active_input_processes() -> Result<Vec<MicrophoneInputProcess>, ProbeError> {
     Ok(Vec::new())
 }
@@ -1202,11 +1256,19 @@ impl ProbeError {
 
 impl std::fmt::Display for ProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} failed with OSStatus {}",
-            self.operation, self.status
-        )
+        if cfg!(target_os = "windows") {
+            write!(
+                formatter,
+                "{} failed with HRESULT {:#010x}",
+                self.operation, self.status
+            )
+        } else {
+            write!(
+                formatter,
+                "{} failed with OSStatus {}",
+                self.operation, self.status
+            )
+        }
     }
 }
 
@@ -1506,6 +1568,133 @@ mod macos {
 mod tests {
     use super::*;
 
+    fn start_request(request_id: &str) -> StartMeetingRecordingRequest {
+        StartMeetingRecordingRequest {
+            request_id: request_id.to_owned(),
+            source_mode: None,
+            video: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_start_caches_preparation_errors_before_audio_and_allows_ack() {
+        for boundary in ["bundle", "video"] {
+            let state = MeetingStartRequestState::default();
+            let request_id = state.queue_at(1_000).unwrap();
+            state.begin_start(&request_id, 1_100).unwrap();
+            let audio_started = std::cell::Cell::new(false);
+            let outcome = crate::commands::finish_meeting_start(&state, &request_id, async {
+                if boundary == "bundle" {
+                    state.start_bundle_families("stale-request")?;
+                } else {
+                    state.start_video(&start_request("stale-request"))?;
+                }
+                audio_started.set(true);
+                unreachable!("preparation failure must not start audio")
+            })
+            .await
+            .unwrap();
+            assert!(!audio_started.get());
+            let MeetingStartRecordingOutcome::Failed { error } = outcome else {
+                panic!("expected a terminal preparation failure");
+            };
+            assert_eq!(error.code, "meeting_start_not_found");
+            for _ in 0..2 {
+                let Some(MeetingStartRecordingOutcome::Failed { error }) =
+                    state.finished_outcome(&request_id).unwrap()
+                else {
+                    panic!("expected a replayable failure");
+                };
+                assert_eq!(error.code, "meeting_start_not_found");
+            }
+            assert_eq!(
+                state.begin_start(&request_id, 1_200).unwrap_err().code,
+                "meeting_start_already_finished"
+            );
+            assert!(state.acknowledge(&request_id).unwrap());
+            assert!(state.peek_at(1_200).unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_preparation_caches_interruption() {
+        let state = MeetingStartRequestState::default();
+        let request_id = state.queue_at(1_000).unwrap();
+        state.begin_start(&request_id, 1_100).unwrap();
+        let operation =
+            crate::commands::finish_meeting_start(&state, &request_id, std::future::pending());
+        assert!(tokio::time::timeout(Duration::from_millis(10), operation)
+            .await
+            .is_err());
+        let Some(MeetingStartRecordingOutcome::Failed { error }) =
+            state.finished_outcome(&request_id).unwrap()
+        else {
+            panic!("expected a cached cancellation");
+        };
+        assert_eq!(error.code, "meeting_start_interrupted");
+        assert!(state.acknowledge(&request_id).unwrap());
+    }
+
+    #[test]
+    fn meeting_video_native_choice_rejects_renderer_retarget_and_unrequested_opt_in() {
+        for retained in [Some(RecordingVideoRequest { window_id: 42 }), None] {
+            let state = MeetingStartRequestState::default();
+            let id = state.queue_with_video_at(1000, retained.clone()).unwrap();
+            let rendered = crate::domain::types::StartMeetingRecordingRequest {
+                request_id: id,
+                source_mode: None,
+                video: Some(RecordingVideoRequest { window_id: 99 }),
+            };
+            assert_eq!(state.start_video(&rendered).unwrap(), retained);
+        }
+    }
+
+    #[test]
+    fn meeting_video_request_is_retained_and_forwarded_without_retargeting() {
+        let state = MeetingStartRequestState::default();
+        let video = crate::domain::types::RecordingVideoRequest { window_id: 7331 };
+        let id = state.queue_with_video_at(1000, Some(video)).unwrap();
+        let pending = state.peek_at(1001).unwrap().unwrap();
+        assert_eq!(pending.video.as_ref().map(|v| v.window_id), Some(7331));
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap()["video"]["windowId"],
+            7331
+        );
+        state.begin_start(&id, 1001).unwrap();
+        assert_eq!(
+            state
+                .queue_with_video_at(
+                    1002,
+                    Some(crate::domain::types::RecordingVideoRequest { window_id: 42 })
+                )
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            state
+                .start_video(&start_request(&id))
+                .unwrap()
+                .map(|v| v.window_id),
+            Some(7331)
+        );
+    }
+
+    #[test]
+    fn meeting_video_opt_out_and_acknowledgement_do_not_reuse_an_old_window() {
+        let state = MeetingStartRequestState::default();
+        let id = state
+            .queue_with_video_at(
+                1000,
+                Some(crate::domain::types::RecordingVideoRequest { window_id: 7331 }),
+            )
+            .unwrap();
+        assert!(state.acknowledge(&id).unwrap());
+        let next = state.queue_with_video_at(2000, None).unwrap();
+        assert!(state.peek_at(2001).unwrap().unwrap().video.is_none());
+        assert!(state.start_video(&start_request(&next)).unwrap().is_none());
+        assert!(state.start_video(&start_request(&id)).is_err());
+    }
+
     #[test]
     fn pending_meeting_start_request_is_retained_until_matching_ack() {
         let state = MeetingStartRequestState::default();
@@ -1520,6 +1709,7 @@ mod tests {
             note_id,
             requested_at_ms: 1_000,
             expired: false,
+            video: None,
         });
 
         assert_eq!(state.peek_at(1_100).expect("peek request"), expected);
@@ -1549,6 +1739,7 @@ mod tests {
                 note_id,
                 requested_at_ms: 2_000,
                 expired: false,
+                video: None,
             })
         );
     }
@@ -1572,6 +1763,7 @@ mod tests {
                 note_id,
                 requested_at_ms: 1_000,
                 expired: true,
+                video: None,
             })
         );
         assert_eq!(
@@ -2211,6 +2403,172 @@ mod tests {
             input_process(64, "com.gather.GatherV20"),
         ])
         .is_empty());
+    }
+
+    #[test]
+    fn windows_meeting_apps_have_readable_labels() {
+        let cases = [
+            ("Zoom.exe", "Zoom"),
+            ("teams.exe", "Teams"),
+            ("ms-teams.exe", "Teams"),
+            ("msteams.exe", "Teams"),
+            ("MSTeams_8wekyb3d8bbwe", "Teams"),
+            ("slack.exe", "Slack"),
+            ("Discord.exe", "Discord"),
+            ("whatsapp.exe", "WhatsApp"),
+            ("WhatsApp.Root.exe", "WhatsApp"),
+            ("5319275A.WhatsAppDesktop_cv1g1gvanyjgm", "WhatsApp"),
+            ("Telegram.exe", "Telegram"),
+            ("Signal.exe", "Signal"),
+            ("webex.exe", "Webex"),
+            ("CiscoCollabHost.exe", "Webex"),
+            ("chrome.exe", "Chrome"),
+            ("msedge.exe", "Edge"),
+            ("firefox.exe", "Firefox"),
+            ("brave.exe", "Brave"),
+            ("opera.exe", "Opera"),
+            ("vivaldi.exe", "Vivaldi"),
+            ("Arc.exe", "Arc"),
+            ("comet.exe", "Comet"),
+        ];
+
+        for (index, (identity, label)) in cases.into_iter().enumerate() {
+            let pid = 900 + index as u32;
+            let process = input_process(pid, identity);
+            assert_eq!(process.app_label, label, "{identity}");
+            assert_eq!(allowed_pids(&[process]), vec![pid], "{identity}");
+        }
+    }
+
+    #[test]
+    fn every_activity_browser_executable_is_a_windows_meeting_app() {
+        for executable in crate::activity::filter::BROWSER_EXECUTABLES {
+            let process = input_process(1, executable);
+            assert!(is_allowed_microphone_app(executable), "{executable}");
+            assert_ne!(process.app_label, "exe", "{executable}");
+        }
+    }
+
+    #[test]
+    fn windows_teams_identities_share_one_family() {
+        let family = Some("windows:teams".to_string());
+        assert_eq!(bundle_family_from_bundle_id("Teams.exe"), family);
+        assert_eq!(bundle_family_from_bundle_id("ms-teams.exe"), family);
+        assert_eq!(
+            bundle_family_from_bundle_id("MSTeams_8wekyb3d8bbwe"),
+            family
+        );
+        assert_eq!(
+            bundle_family_from_bundle_id("chrome.exe"),
+            Some("windows:chrome".to_string())
+        );
+    }
+
+    #[test]
+    fn unlisted_windows_identities_keep_a_readable_label_and_stay_out() {
+        assert_eq!(input_process(1, "obs64.exe").app_label, "obs64");
+        assert!(allowed_pids(&[
+            input_process(2, "obs64.exe"),
+            input_process(3, "notchrome.exe"),
+            input_process(4, "chrome.exe.bak"),
+            input_process(5, "MSTeamsX_8wekyb3d8bbwe"),
+            input_process(6, "msedgewebview2.exe"),
+            input_process(7, "clovy.exe"),
+        ])
+        .is_empty());
+    }
+
+    #[test]
+    fn windows_probe_drives_detection_and_meeting_end() {
+        use windows_probe::{windows_input_processes, ProbeSnapshot, ProcessEntry};
+
+        let processes = vec![
+            ProcessEntry {
+                pid: 200,
+                parent_pid: 100,
+                exe_name: "chrome.exe".to_string(),
+            },
+            ProcessEntry {
+                pid: 210,
+                parent_pid: 200,
+                exe_name: "chrome.exe".to_string(),
+            },
+            ProcessEntry {
+                pid: 400,
+                parent_pid: 100,
+                exe_name: "clovy.exe".to_string(),
+            },
+        ];
+        let owned = BTreeSet::from([400]);
+        let in_call = windows_input_processes(&ProbeSnapshot {
+            active_capture_pids: vec![210, 400],
+            processes: processes.clone(),
+            consent: Vec::new(),
+        });
+        let after_call = windows_input_processes(&ProbeSnapshot {
+            active_capture_pids: vec![400],
+            processes,
+            consent: Vec::new(),
+        });
+
+        let mut detection = MeetingDetectionState::default();
+        let allowed = active_allowed_external_processes(&in_call, &owned);
+        assert_eq!(deduped_app_labels(&allowed), vec!["Chrome"]);
+        assert_eq!(
+            detection.update(true, !allowed.is_empty(), false),
+            Some(MeetingDetectionEvent::Detected)
+        );
+
+        let started_families =
+            meeting_end_bundle_families(&in_call, &owned).expect("unambiguous probe");
+        assert_eq!(started_families, families(&["windows:chrome"]));
+        let mut tracker = MeetingEndTracker::new("meeting-session".to_string(), started_families);
+        let ended_families =
+            meeting_end_bundle_families(&after_call, &owned).expect("unambiguous probe");
+        assert!(ended_families.is_empty());
+
+        let mut now_ms = 0;
+        assert_eq!(
+            tracker.observe(Some(&families(&["windows:chrome"])), now_ms),
+            None
+        );
+        let mut countdown = None;
+        for _ in 0..MEETING_END_ABSENT_POLLS {
+            now_ms += 1_000;
+            countdown = tracker.observe(Some(&ended_families), now_ms).or(countdown);
+        }
+        assert!(matches!(
+            countdown,
+            Some(MeetingEndTransition::StateChanged(MeetingEndStatus {
+                phase: MeetingEndPhase::Countdown,
+                ..
+            }))
+        ));
+        let mut finish = None;
+        for _ in 0..MEETING_END_COUNTDOWN_POLLS {
+            now_ms += 1_000;
+            finish = tracker.observe(Some(&ended_families), now_ms).or(finish);
+        }
+        assert!(matches!(
+            finish,
+            Some(MeetingEndTransition::FinishQueued(
+                MeetingEndStatus {
+                    phase: MeetingEndPhase::FinishQueued,
+                    ..
+                },
+                _
+            ))
+        ));
+
+        let allowed_after = active_allowed_external_processes(&after_call, &owned);
+        assert_eq!(
+            detection.update(true, !allowed_after.is_empty(), false),
+            None
+        );
+        assert_eq!(
+            detection.update(true, !allowed_after.is_empty(), false),
+            Some(MeetingDetectionEvent::Cleared)
+        );
     }
 
     #[test]

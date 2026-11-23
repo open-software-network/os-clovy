@@ -33,7 +33,6 @@ pub struct BootstrapResponse {
     pub active_recoveries: Vec<RecoverableRecordingDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_recording: Option<RecordingStatusDto>,
-    pub provider_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +41,6 @@ pub struct ListNotesResponse {
     pub items: Vec<NoteListItemDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    #[serde(skip)]
-    pub(crate) item_cursors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +129,8 @@ pub struct NoteDto {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_event: Option<NoteCalendarEventDto>,
+    #[serde(default)]
+    pub video_analysis: Option<String>,
     pub generated_content: Option<String>,
     pub edited_content: Option<String>,
     pub transcript: Option<TranscriptDto>,
@@ -165,6 +164,15 @@ pub enum NoteProcessingStage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DiscardedTranscriptSpanDto {
+    pub session_id: String,
+    pub source: RecordingSource,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NoteProcessingProgressDto {
     pub note_id: String,
     pub recording_session_id: String,
@@ -172,6 +180,8 @@ pub struct NoteProcessingProgressDto {
     pub processing_status: ProcessingStatus,
     /// The note row's `updated_at` value after this transition.
     pub revision: String,
+    #[serde(default)]
+    pub discarded_spans: Vec<DiscardedTranscriptSpanDto>,
 }
 
 /// The note-row fields returned by the single-statement `update_note` path.
@@ -398,6 +408,7 @@ pub struct DictionaryEntryDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationHistoryItemDto {
+    pub app_bundle_id: Option<String>,
     pub id: String,
     pub text: String,
     pub language: Option<String>,
@@ -437,6 +448,13 @@ pub struct StartRecordingRequest {
     pub note_id: String,
     #[serde(default)]
     pub source_mode: Option<RecordingSourceMode>,
+    /// Pinned by the host for agent requests; interactive callers may omit it.
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
+    #[serde(default)]
+    pub video: Option<RecordingVideoRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,6 +463,23 @@ pub struct StartMeetingRecordingRequest {
     pub request_id: String,
     #[serde(default)]
     pub source_mode: Option<RecordingSourceMode>,
+    #[serde(default)]
+    pub video: Option<RecordingVideoRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingVideoRequest {
+    pub window_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingWindowDto {
+    pub window_id: u32,
+    pub app_name: String,
+    pub bundle_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +517,10 @@ impl Default for RecordingOriginMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub session_id: String,
 }
 
@@ -501,6 +540,10 @@ pub struct FinishRecordingResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryProcessingRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub note_id: String,
     pub step: Option<String>,
     #[serde(default)]
@@ -510,6 +553,10 @@ pub struct RetryProcessingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoverRecordingRequest {
+    #[serde(default)]
+    pub expected_profile: Option<String>,
+    #[serde(default)]
+    pub agent_request_id: Option<String>,
     pub session_id: String,
     pub action: String,
 }
@@ -896,52 +943,6 @@ pub struct SuggestAgentSessionTitleResponse {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitIssueReportRequest {
-    /// Which kind of report this is ("bug" | "feedback" | "feature"), used for
-    /// triage on the server. Optional so older callers keep deserializing.
-    #[serde(default)]
-    pub category: Option<String>,
-    pub description: String,
-    #[serde(default)]
-    pub agent_diagnosis: Option<String>,
-    #[serde(default)]
-    pub attachment_names: Vec<String>,
-    /// Original local paths from the report picker or workspace paths created
-    /// for DOM-dropped files; their bytes are sent with the report.
-    #[serde(default)]
-    pub attachment_paths: Vec<String>,
-    #[serde(default)]
-    #[serde(alias = "sessionId")]
-    pub stored_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitIssueReportResponse {
-    pub received: bool,
-    /// Names of attachments whose bytes were omitted locally, by a
-    /// compatibility fallback, or by Clovy API. The report still carries the
-    /// names so the team knows which files were intended.
-    #[serde(default)]
-    pub skipped_attachment_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplainAgentApprovalRequest {
-    pub description: String,
-    #[serde(default)]
-    pub command: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExplainAgentApprovalResponse {
-    pub explanation: String,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProcessingStatus {
@@ -1096,159 +1097,6 @@ pub enum SourceState {
     Invalid,
     Recoverable,
     Failed,
-}
-
-// ---- Private sharing (JUN-308) -------------------------------------------
-// Wire DTOs for the clovy-api /v1/shares endpoints plus the local key-store
-// commands. Ciphertext, IVs, envelopes, and keys cross the IPC boundary as
-// base64url strings; the Tauri layer only moves ciphertext and metadata,
-// never plaintext or unwrapped keys (crypto happens in the webview).
-
-/// One invite as submitted by the owner: the recipient email plus the content
-/// key wrapped under that recipient's invite key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInvitePayload {
-    pub email: String,
-    pub envelope_b64: String,
-    pub envelope_iv_b64: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareCreateRequest {
-    /// "note" | "session".
-    pub kind: String,
-    pub ciphertext_b64: String,
-    pub iv_b64: String,
-    pub invites: Vec<ShareInvitePayload>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareCreatedInviteDto {
-    pub invite_id: String,
-    pub email: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareCreatedDto {
-    pub share_id: String,
-    pub invites: Vec<ShareCreatedInviteDto>,
-}
-
-/// `POST /v1/shares/{id}/invites` returns only the new invites, without a
-/// `shareId` (the caller already knows it). Distinct from `ShareCreatedDto`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInvitesAddedDto {
-    pub invites: Vec<ShareCreatedInviteDto>,
-}
-
-/// `GET /v1/shares` returns share summaries (no invite list); the detail
-/// endpoint carries invites. Keeping them separate stops list parsing from
-/// depending on a field the summary response never sends.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareSummaryDto {
-    pub share_id: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInviteDto {
-    pub invite_id: String,
-    pub email: String,
-    /// "pending" | "accepted" | "revoked".
-    pub state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_access_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareDto {
-    pub share_id: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub invites: Vec<ShareInviteDto>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareAddInvitesRequest {
-    pub share_id: String,
-    pub invites: Vec<ShareInvitePayload>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareGetRequest {
-    pub share_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareDeleteRequest {
-    pub share_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareRevokeInviteRequest {
-    pub share_id: String,
-    pub invite_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareKeySaveRequest {
-    pub share_id: String,
-    /// "note" | "session".
-    pub item_kind: String,
-    pub item_id: String,
-    pub content_key_b64: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareKeyGetRequest {
-    pub item_kind: String,
-    pub item_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareKeyDto {
-    pub share_id: String,
-    pub content_key_b64: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInviteKeySaveRequest {
-    pub invite_id: String,
-    pub share_id: String,
-    pub invite_key_b64: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInviteKeysGetRequest {
-    pub share_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShareInviteKeyDto {
-    pub invite_id: String,
-    pub invite_key_b64: String,
 }
 
 #[cfg(test)]

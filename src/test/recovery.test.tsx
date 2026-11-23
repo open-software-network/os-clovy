@@ -40,26 +40,6 @@ describe("NoteRecoveryPrompt", () => {
     expect(onDiscard).toHaveBeenCalledWith("session-1");
   });
 
-  it("marks a funding-blocked recovery prompt as the wrapped layout variant", () => {
-    const recoverBlockedReason =
-      "Add credits before recovering this recording. Your saved audio will stay available.";
-
-    render(
-      <NoteRecoveryPrompt
-        recovery={recovery}
-        onRecover={vi.fn()}
-        onDiscard={vi.fn()}
-        recoverBlockedReason={recoverBlockedReason}
-      />,
-    );
-
-    const prompt = screen.getByLabelText("Recoverable recording");
-    expect(prompt).toHaveClass("note-recovery-prompt", "note-recovery-prompt-blocked");
-    expect(prompt).not.toHaveClass("note-recovery-prompt-single-line");
-    expect(screen.getByRole("button", { name: "Recover" })).toBeDisabled();
-    expect(screen.getByText(recoverBlockedReason)).toBeInTheDocument();
-  });
-
   it("centers only while the unblocked body occupies one rendered line", () => {
     let lineTops = [10];
     let resizeCallback: ResizeObserverCallback | undefined;

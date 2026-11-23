@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef } from "react";
+import { recordingToStatus } from "./app-helpers";
 import { invalidateNoteTabs } from "./tabs/tabs";
 import {
   finishRecording,
@@ -8,12 +9,15 @@ import {
   pauseRecording,
   resolveAgentRecorderRequest,
   resumeRecording,
+  recoverRecording,
+  retryProcessing,
+  validateAgentRecorderRequest,
 } from "../lib/tauri";
 import { playRecordingSound } from "../lib/recording-sounds";
 import { AGENT_RECORDER_REQUEST_EVENT } from "../lib/events";
 import { errorCode, messageFromError } from "../lib/errors";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
-import type { RecordingSourceMode } from "../lib/tauri";
+import type { RecordingSourceMode, RecordingStatusDto } from "../lib/tauri";
 import { RECORD_NOTICES_DEMO_SESSION_ID } from "./processing-demo-ids";
 import type { AgentRecorderRequestPayload } from "./app-shell";
 import type { UseRecordingControlsDependencies } from "./use-recording-controls-types";
@@ -53,8 +57,11 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
       ok: boolean;
       noteId?: string;
       noteTitle?: string;
+      sessionId?: string;
+      status?: RecordingStatusDto;
       errorCode?: string;
       errorMessage?: string;
+      errorDetails?: unknown;
     }) => {
       void resolveAgentRecorderRequest({ requestId, ...result }).catch(async (err) => {
         console.warn("Failed to resolve agent recorder request", err);
@@ -72,21 +79,9 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
             }
           }
         }
-        // Lease expired: the proxy already told the agent this request
-        // failed. Leaving a recording running that the agent believes never
-        // started diverges tool state from app state, so stop a successful
-        // late start. The note (and any audio it captured) is kept: it is
-        // real user data and the recorder was visibly running.
-        if (result.ok && payload.action === "start") {
-          const active = recordingStatusRef.current;
-          if (active && recordingNoteIdRef.current === result.noteId) {
-            try {
-              await handleFinishRecording(active.sessionId, { rethrow: true });
-            } catch (rollbackErr) {
-              console.warn("Failed to stop expired agent recording", rollbackErr);
-            }
-          }
-        }
+        // Native admission already checked this request at the hardware boundary.
+        // A successful start belongs to the visible recorder once published;
+        // ending the chat or losing a late ACK does not stop that meeting.
       });
     };
 
@@ -100,11 +95,79 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
     }
 
     try {
+      const targetProfile = typeof payload.profile === "string" ? payload.profile : undefined;
+      const targetNoteId = typeof payload.noteId === "string" ? payload.noteId : undefined;
+      const targetSessionId = typeof payload.sessionId === "string" ? payload.sessionId : undefined;
+      if (targetProfile) await validateAgentRecorderRequest(requestId);
+      if (payload.action === "recover" || payload.action === "retry") {
+        if (!targetSessionId || !targetNoteId || !targetProfile)
+          throw new Error("The saved recording target is missing.");
+        if (
+          payload.action === "recover" &&
+          payload.recoveryAction !== "validate" &&
+          payload.recoveryAction !== "discard"
+        )
+          throw new Error("Recovery action must be validate or discard.");
+        const note =
+          payload.action === "recover"
+            ? await recoverRecording(
+                targetSessionId,
+                payload.recoveryAction as "validate" | "discard",
+                targetProfile,
+                requestId,
+              )
+            : await retryProcessing(targetNoteId, targetSessionId, targetProfile, requestId);
+        if (note.id !== targetNoteId)
+          throw new Error("The processing response does not match the authorized note.");
+        if (getCurrentDataPartitionName() === targetProfile)
+          dispatch({ type: "noteProcessingUpdated", note });
+        resolve({ ok: true, noteId: note.id, noteTitle: note.title, sessionId: targetSessionId });
+        return;
+      }
+      if (payload.action === "pause" || payload.action === "resume") {
+        const active = recordingStatusRef.current;
+        if (
+          !active ||
+          !targetSessionId ||
+          active.sessionId !== targetSessionId ||
+          active.noteId !== targetNoteId
+        ) {
+          resolve({
+            ok: false,
+            errorCode: "recording_target_mismatch",
+            errorMessage: "The authorized recording is no longer active.",
+          });
+          return;
+        }
+        const status =
+          payload.action === "pause"
+            ? await pauseRecording(targetSessionId, targetProfile, requestId)
+            : await resumeRecording(targetSessionId, targetProfile, requestId);
+        if (status.sessionId !== targetSessionId || status.noteId !== targetNoteId)
+          throw new Error("The recorder response has a different target.");
+        recordingStatusRef.current = status;
+        dispatch({ type: "recordingStatusChanged", status });
+        resolve({ ok: true, noteId: targetNoteId, sessionId: targetSessionId, status });
+        return;
+      }
       if (payload.action === "start") {
         const requestedSourceMode: RecordingSourceMode =
           payload.sourceMode === "microphonePlusSystem" ? "microphonePlusSystem" : "microphoneOnly";
-        const note = await handleStartAgentRecording(requestedSourceMode);
-        resolve({ ok: true, noteId: note.id, noteTitle: note.title });
+        const note =
+          targetProfile && targetNoteId
+            ? await handleStartAgentRecording(requestedSourceMode, {
+                noteId: targetNoteId,
+                profile: targetProfile,
+                requestId,
+              })
+            : await handleStartAgentRecording(requestedSourceMode);
+        const status = recordingStatusRef.current;
+        resolve({
+          ok: true,
+          noteId: note.id,
+          noteTitle: note.title,
+          ...(targetProfile ? { sessionId: status?.sessionId, status } : {}),
+        });
         return;
       }
       if (payload.action === "stop") {
@@ -121,20 +184,52 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
           });
           return;
         }
-        await handleFinishRecording(activeRecording.sessionId, { rethrow: true });
-        resolve({ ok: true, noteId, noteTitle });
+        if (
+          (targetSessionId && activeRecording.sessionId !== targetSessionId) ||
+          (targetNoteId && noteId !== targetNoteId)
+        ) {
+          resolve({
+            ok: false,
+            errorCode: "recording_target_mismatch",
+            errorMessage: "The authorized recording is no longer active.",
+          });
+          return;
+        }
+        const finished = await handleFinishRecording(activeRecording.sessionId, {
+          rethrow: true,
+          expectedProfile: targetProfile,
+          agentRequestId: targetProfile ? requestId : undefined,
+        });
+        if (
+          !finished ||
+          finished.recording.id !== activeRecording.sessionId ||
+          finished.note.id !== noteId
+        )
+          throw new Error(
+            "The recording finalization did not confirm its authorized session and note.",
+          );
+        const finalStatus = recordingToStatus(finished.recording);
+        resolve({
+          ok: true,
+          noteId,
+          noteTitle,
+          ...(targetSessionId ? { sessionId: targetSessionId, status: finalStatus } : {}),
+        });
         return;
       }
       resolve({
         ok: false,
         errorCode: "invalid_action",
-        errorMessage: "Recorder action must be start or stop.",
+        errorMessage: "Unknown recorder action.",
       });
     } catch (err) {
       resolve({
         ok: false,
-        errorCode: "agent_recorder_failed",
+        errorCode: errorCode(err) ?? "agent_recorder_failed",
         errorMessage: messageFromError(err),
+        ...(err && typeof err === "object" && "details" in err
+          ? { errorDetails: err.details }
+          : {}),
       });
     }
   };
@@ -154,7 +249,10 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
     };
   }, []);
 
-  async function handleFinishRecording(sessionId: string, options: { rethrow?: boolean } = {}) {
+  async function handleFinishRecording(
+    sessionId: string,
+    options: { rethrow?: boolean; expectedProfile?: string; agentRequestId?: string } = {},
+  ) {
     // The dev __recordNoticesDemo session has no backend recording — stopping it
     // just tears the demo down (clears the synthetic status and pins) instead of
     // calling finishRecording, which would fail with "recording not found".
@@ -218,13 +316,16 @@ export function useRecordingControls(dependencies: UseRecordingControlsDependenc
       });
     }
     try {
-      const result = await finishRecording(sessionId);
+      const result = options.expectedProfile
+        ? await finishRecording(sessionId, options.expectedProfile, options.agentRequestId)
+        : await finishRecording(sessionId);
       // The result belongs to the partition where recording started. Once that
       // partition's temporary recording view has been retired, do not let the
       // finish response upsert the old note into the newly selected data partition.
       if (!wasCrossPartitionRecording) {
         dispatch({ type: "noteProcessingUpdated", note: result.note });
       }
+      return result;
     } catch (err) {
       if (
         wasCrossPartitionRecording ||

@@ -264,6 +264,21 @@ async fn assigning_session_to_folder_requires_both_to_match_the_active_profile()
 }
 
 #[tokio::test]
+async fn assigning_a_missing_session_is_rejected_even_in_default_partition() {
+    let repos = repos().await;
+    let folder = repos
+        .create_folder("default", "Project", None)
+        .await
+        .unwrap();
+    let error = repos
+        .assign_session_to_folder("default", "missing-session", &folder.id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "session_folder_profile_mismatch");
+    assert!(repos.list_session_folders().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn deleting_folder_drops_its_session_assignments() {
     let repos = repos().await;
     create_agent_session(&repos, "agent-session-1").await;

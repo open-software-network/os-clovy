@@ -112,19 +112,12 @@ async fn send_request<T: DeserializeOwned>(
     })
 }
 
-/// Extract Google's `error.message` field only; never echo the raw body.
+/// Extract Google's error message only; never echo the raw body.
 fn api_error_message(body: &str) -> String {
-    let message = serde_json::from_str::<serde_json::Value>(body)
+    serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|value| {
-            value
-                .get("error")?
-                .get("message")?
-                .as_str()
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "request failed".to_string());
-    message.chars().take(API_ERROR_MESSAGE_MAX_LEN).collect()
+        .and_then(|value| crate::http_client::json_error_message(&value, API_ERROR_MESSAGE_MAX_LEN))
+        .unwrap_or_else(|| "request failed".to_string())
 }
 
 fn gmail_get(access_token: &str, path: &str, query: &[(&str, String)]) -> reqwest::RequestBuilder {
@@ -208,8 +201,6 @@ struct HeaderWire {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BodyWire {
-    #[serde(default)]
-    size: i64,
     #[serde(default)]
     data: Option<String>,
 }
@@ -349,16 +340,6 @@ pub struct ThreadMessage {
     pub body_text: Option<String>,
     pub label_ids: Vec<String>,
     pub unread: bool,
-}
-
-/// Attachment metadata only. There is deliberately NO attachment content
-/// fetch in v1 so routines can never exfiltrate attachment bytes.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AttachmentMeta {
-    pub filename: String,
-    pub mime_type: String,
-    pub size: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -522,21 +503,6 @@ pub async fn get_message(
     Ok(email_summary_from_message(wire))
 }
 
-/// users.threads.get format=metadata: per-message summaries, no bodies.
-pub async fn get_thread(
-    access_token: &str,
-    thread_id: &str,
-) -> Result<ThreadDetail, GoogleApiError> {
-    let query = metadata_headers_query();
-    let wire: ThreadWire = send_request(gmail_get(
-        access_token,
-        &format!("/threads/{thread_id}"),
-        &query,
-    ))
-    .await?;
-    Ok(thread_detail_from_wire(wire, false))
-}
-
 /// users.threads.get format=full: summaries plus extracted plain-text
 /// bodies. Full bodies enter agent context only through this explicit call.
 pub async fn read_thread(
@@ -551,26 +517,6 @@ pub async fn read_thread(
     ))
     .await?;
     Ok(thread_detail_from_wire(wire, true))
-}
-
-/// Attachment metadata (filename, MIME type, size) from a message's payload
-/// parts. No content fetch exists in v1 by design.
-pub async fn get_attachment_metadata(
-    access_token: &str,
-    message_id: &str,
-) -> Result<Vec<AttachmentMeta>, GoogleApiError> {
-    let query = vec![("format", "full".to_string())];
-    let wire: MessageWire = send_request(gmail_get(
-        access_token,
-        &format!("/messages/{message_id}"),
-        &query,
-    ))
-    .await?;
-    Ok(wire
-        .payload
-        .as_ref()
-        .map(attachments_from_payload)
-        .unwrap_or_default())
 }
 
 /// users.drafts.create with an RFC 2822 raw message.
@@ -611,21 +557,6 @@ pub async fn send_email(
             .post(format!("{GMAIL_BASE}/messages/send"))
             .bearer_auth(access_token)
             .json(&body),
-    )
-    .await?;
-    Ok(MessageRef {
-        id: wire.id,
-        thread_id: wire.thread_id,
-    })
-}
-
-/// users.drafts.send: send an existing draft by id.
-pub async fn send_draft(access_token: &str, draft_id: &str) -> Result<MessageRef, GoogleApiError> {
-    let wire: MessageRefWire = send_request(
-        http_client()
-            .post(format!("{GMAIL_BASE}/drafts/send"))
-            .bearer_auth(access_token)
-            .json(&serde_json::json!({ "id": draft_id })),
     )
     .await?;
     Ok(MessageRef {
@@ -833,28 +764,6 @@ fn strip_html_tags(html: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'");
     decoded.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn attachments_from_payload(payload: &PayloadWire) -> Vec<AttachmentMeta> {
-    let mut attachments = Vec::new();
-    collect_attachments(payload, &mut attachments);
-    attachments
-}
-
-fn collect_attachments(payload: &PayloadWire, into: &mut Vec<AttachmentMeta>) {
-    if let Some(filename) = payload.filename.as_deref().filter(|name| !name.is_empty()) {
-        into.push(AttachmentMeta {
-            filename: filename.to_string(),
-            mime_type: payload
-                .mime_type
-                .clone()
-                .unwrap_or_else(|| "application/octet-stream".to_string()),
-            size: payload.body.as_ref().map(|body| body.size).unwrap_or(0),
-        });
-    }
-    for part in &payload.parts {
-        collect_attachments(part, into);
-    }
 }
 
 // --- MIME builder ----------------------------------------------------------------
@@ -1615,47 +1524,6 @@ mod tests {
         let wire: ThreadWire = serde_json::from_str(&fixture).expect("parse thread");
         let detail = thread_detail_from_wire(wire, false);
         assert!(detail.messages[0].body_text.is_none());
-    }
-
-    #[test]
-    fn attachment_metadata_walks_nested_parts() {
-        let fixture = r#"{
-          "id": "m9",
-          "threadId": "t9",
-          "snippet": "",
-          "payload": {
-            "mimeType": "multipart/mixed",
-            "filename": "",
-            "parts": [
-              {"mimeType": "text/plain", "filename": "", "body": {"size": 10}},
-              {"mimeType": "application/pdf", "filename": "report.pdf", "body": {"size": 82344, "attachmentId": "att-1"}},
-              {
-                "mimeType": "multipart/alternative",
-                "filename": "",
-                "parts": [
-                  {"mimeType": "image/png", "filename": "chart.png", "body": {"size": 4096, "attachmentId": "att-2"}}
-                ]
-              }
-            ]
-          }
-        }"#;
-        let wire: MessageWire = serde_json::from_str(fixture).expect("parse message");
-        let attachments = attachments_from_payload(wire.payload.as_ref().expect("payload"));
-        assert_eq!(
-            attachments,
-            vec![
-                AttachmentMeta {
-                    filename: "report.pdf".to_string(),
-                    mime_type: "application/pdf".to_string(),
-                    size: 82344,
-                },
-                AttachmentMeta {
-                    filename: "chart.png".to_string(),
-                    mime_type: "image/png".to_string(),
-                    size: 4096,
-                },
-            ]
-        );
     }
 
     #[test]

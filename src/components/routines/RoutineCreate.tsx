@@ -16,12 +16,12 @@ import {
   type ScheduleDraft,
 } from "../../lib/routine-schedule";
 import {
-  connectorsApplyRuntime,
   connectorsConnect,
   connectorsList,
   type ConnectorAccount,
   type RoutineTrustMode,
 } from "../../lib/tauri";
+import { useT } from "../../i18n";
 import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { InlineNotice } from "../ui/InlineNotice";
 import { GrowingTextarea } from "./GrowingTextarea";
@@ -57,6 +57,7 @@ type RoutineCreateProps = {
 };
 
 export function RoutineCreate({ template, creating, error, onBack, onCreate }: RoutineCreateProps) {
+  const t = useT();
   const { policy } = useConnectorPolicy();
   const [name, setName] = useState(template?.name ?? "");
   const [draft, setDraft] = useState<ScheduleDraft>(() =>
@@ -134,12 +135,11 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
     setConnectError(null);
     try {
       await connectorsConnect({ scopes: requiredScopes });
-      await connectorsApplyRuntime();
       setAccounts(await connectorsList());
     } catch (err) {
       setConnectError(
         isConnectorNotConfiguredError(err)
-          ? "Google connector isn't configured in this build."
+          ? t("routines.create.notConfigured")
           : messageFromError(err),
       );
     } finally {
@@ -163,15 +163,18 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
   }
 
   return (
-    <section className="routine-detail" aria-label="New routine">
+    <section className="routine-detail" aria-label={t("routines.newRoutine")}>
       <BreadcrumbBar
-        backLabel="Back to routines"
+        backLabel={t("routines.backToRoutines")}
         onBack={onBack}
-        items={[{ label: "Routines", onClick: onBack }, { label: name.trim() || "New routine" }]}
+        items={[
+          { label: t("routines.title"), onClick: onBack },
+          { label: name.trim() || t("routines.newRoutine") },
+        ]}
         actions={
           <div className="routine-detail-actions">
             <button type="button" className="btn btn-ghost" onClick={onBack}>
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -179,7 +182,7 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
               disabled={!prompt.trim() || creating || blocked}
               onClick={submit}
             >
-              {creating ? "Creating…" : "Create"}
+              {creating ? t("routines.create.creating") : t("common.create")}
             </button>
           </div>
         }
@@ -189,8 +192,8 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
         <input
           className="routine-detail-name"
           value={name}
-          placeholder="Routine name"
-          aria-label="Routine name"
+          placeholder={t("routines.routineName")}
+          aria-label={t("routines.routineName")}
           onChange={(event) => setName(event.currentTarget.value)}
         />
 
@@ -198,18 +201,18 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
 
         {template?.toolSummary ? (
           <p className="routines-tool-summary">
-            {template.toolSummary}. Trust: {TRUST_MODE_META[trustMode].label.toLowerCase()}.
+            {t("routines.trust.toolSummary", {
+              summary: template.toolSummary,
+              trust: TRUST_MODE_META[trustMode].label.toLowerCase(),
+            })}
           </p>
         ) : null}
 
         {requiredScopes && !scopeGateSatisfied ? (
           <InlineNotice
             tone="info"
-            aria-label="Google account required"
-            body={
-              connectError ??
-              "This routine needs a connected Google account with the listed access before it can be created."
-            }
+            aria-label={t("routines.googleAccountRequired")}
+            body={connectError ?? t("routines.create.needsAccount")}
             actions={
               <button
                 type="button"
@@ -219,7 +222,9 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
                 onClick={() => void connectForTemplate()}
               >
                 <IconGoogle size={13} aria-hidden />
-                {connectBusy ? "Waiting for browser…" : "Connect Google account"}
+                {connectBusy
+                  ? t("routines.create.waitingForBrowser")
+                  : t("routines.create.connectGoogle")}
               </button>
             }
           />
@@ -228,7 +233,7 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
         <div className="routine-detail-body">
           <section className="settings-group" aria-labelledby="routine-schedule">
             <h2 id="routine-schedule" className="settings-group-heading">
-              When
+              {t("routines.section.when")}
             </h2>
             <div className="settings-card">
               <TriggerPicker
@@ -248,20 +253,20 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
 
           <section className="settings-group" aria-labelledby="routine-instructions">
             <h2 id="routine-instructions" className="settings-group-heading">
-              Instructions
+              {t("routines.section.instructions")}
             </h2>
             <GrowingTextarea
               className="routine-detail-instructions"
               value={prompt}
-              aria-label="Instructions"
-              placeholder="Summarize my unread notes and list anything that needs a reply…"
+              aria-label={t("routines.section.instructions")}
+              placeholder={t("routines.create.instructionsPlaceholder")}
               onChange={(event) => setPrompt(event.currentTarget.value)}
             />
           </section>
 
           <section className="settings-group" aria-labelledby="routine-access">
             <h2 id="routine-access" className="settings-group-heading">
-              Access
+              {t("routines.section.access")}
             </h2>
             <div className="settings-card">
               <RoutineModePicker unrestricted={unrestricted} onChange={setUnrestricted} />
@@ -270,7 +275,7 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
 
           <section className="settings-group" aria-labelledby="routine-trust">
             <h2 id="routine-trust" className="settings-group-heading">
-              Actions
+              {t("routines.section.actions")}
             </h2>
             <div className="settings-card">
               <TrustModePicker

@@ -3,6 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { t } from "../i18n/translate";
 import { RECORDING_INACTIVITY_RESPONSE_MS } from "./recording-inactivity";
 import { sendAppNotification } from "./tauri";
 
@@ -34,8 +35,8 @@ export async function notifyRecordingStillMeetingPrompt(sessionId: string) {
   if (!(await canNotify())) return false;
   try {
     await deliver({
-      title: "Still in a meeting?",
-      body: `Clovy will pause the recording in ${RESPONSE_SECONDS} seconds if you do not answer.`,
+      title: t("lib.recordingNotify.stillInMeetingTitle"),
+      body: t("lib.recordingNotify.stillInMeetingBody", { count: RESPONSE_SECONDS }),
       group: `clovy-recording-${sessionId}`,
     });
     return true;
@@ -48,8 +49,8 @@ export async function notifyRecordingAutoPaused(sessionId: string) {
   if (!(await canNotify())) return false;
   try {
     await deliver({
-      title: "Clovy paused recording",
-      body: "No meeting audio was detected. Open Clovy to resume or finish.",
+      title: t("lib.recordingNotify.autoPausedTitle"),
+      body: t("lib.recordingNotify.autoPausedBody"),
       group: `clovy-recording-${sessionId}`,
     });
     return true;

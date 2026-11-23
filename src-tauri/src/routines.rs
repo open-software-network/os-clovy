@@ -7,9 +7,7 @@
 //! duplicate while the original claim is live.
 
 use crate::{
-    agent_runtime::{
-        AgentItemPayload, AgentRepository, AgentRuntimeHost, AgentSafetyMode, MessagePayload,
-    },
+    agent_sessions::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload},
     browser_broker::{BrowserBroker, RoutineBrowserGrant},
     commands::repositories,
     db::repositories::RoutineBrowserGrantRecord,
@@ -24,6 +22,13 @@ use sqlx_sqlite::{Sqlite, SqlitePool};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
+
+type BoundRoutineTurn<'a> = Option<(
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a crate::domain::turn_authority::TurnAuthority,
+)>;
 
 const CLAIM_STALE_AFTER_MINUTES: i64 = 10;
 const SCHEDULER_TICK_SECONDS: u64 = 30;
@@ -150,9 +155,6 @@ fn utc_timezone() -> String {
 fn auto_model() -> String {
     "auto".into()
 }
-fn now() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 
 fn app_error(error: sqlx::Error) -> AppError {
     AppError::new("routine_storage_failed", error.to_string())
@@ -169,25 +171,23 @@ fn validate_state(state: &str) -> Result<(), AppError> {
     }
 }
 
-fn resolve_routine_model(stored_model: &str, selected_model: &str) -> String {
-    let stored_model = stored_model.trim();
-    if stored_model.is_empty()
-        || stored_model == "auto"
-        || stored_model == crate::providers::AUTO_GENERATION_MODEL
-    {
-        // A Routine's stored Auto value resolves against the saved remote
-        // selection so unattended work stays on Clovy's metered model route.
-        // `open-software/auto` is itself supported; the proxy adds its
-        // cost-quality preference before calling the model API.
-        let selected_model = selected_model.trim();
-        if selected_model.is_empty() || selected_model == "auto" {
-            crate::providers::AUTO_GENERATION_MODEL.to_string()
-        } else {
-            selected_model.to_string()
-        }
-    } else {
-        stored_model.to_string()
+fn resolve_routine_model(
+    stored_model: &str,
+    installed: &[crate::llm::cli::CliKind],
+) -> Result<String, AppError> {
+    crate::llm::registry::resolve_unattended_cli(stored_model, |kind| installed.contains(&kind))
+        .map(crate::chat_engine::engine_model_id)
+}
+
+async fn guard_routine_turn(
+    transaction: &mut Transaction<'_, Sqlite>,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<(), AppError> {
+    if let Some((profile, session, run, authority)) = turn {
+        crate::db::repositories::guard_bound_turn(transaction, profile, session, run, authority)
+            .await?;
     }
+    Ok(())
 }
 
 /// Create a durable Routine. The first next run is derived before insertion so
@@ -196,6 +196,19 @@ pub async fn create(
     pool: &SqlitePool,
     request: CreateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
+    create_for_turn(pool, request, None).await
+}
+
+pub(crate) async fn create_for_turn(
+    pool: &SqlitePool,
+    request: CreateAgentRoutineRequest,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let name = request
         .name
         .as_deref()
@@ -215,9 +228,10 @@ pub async fn create(
     let enabled = request.enabled.unwrap_or(state == "scheduled");
     let safety_mode = request.safety_mode.unwrap_or(AgentSafetyMode::Sandboxed);
     let timezone = nonempty(request.timezone, "UTC");
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
+    let next = next_run_after(schedule, &timezone, Utc::now())?;
     let next_run_at = if enabled && state == "scheduled" {
-        next_run_after(schedule, &timezone, Utc::now())?.map(format_time)
+        next.map(format_time)
     } else {
         None
     };
@@ -232,8 +246,10 @@ pub async fn create(
         .bind(timezone).bind(request.repeat.unwrap_or_else(|| "forever".into()))
         .bind(request.deliver.unwrap_or_else(|| "local".into())).bind(nonempty(request.model, "auto"))
         .bind(safety_mode.as_db()).bind(&state).bind(enabled).bind(&timestamp).bind(&timestamp)
-        .bind(next_run_at).bind(metadata_json(metadata)).execute(pool).await.map_err(app_error)?;
-    get(pool, &id).await
+        .bind(next_run_at).bind(metadata_json(metadata)).execute(&mut *transaction).await.map_err(app_error)?;
+    let result = get_in_transaction(&mut transaction, &id).await?;
+    transaction.commit().await.map_err(app_error)?;
+    Ok(result)
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<AgentRoutineDto>, AppError> {
@@ -278,6 +294,14 @@ pub async fn update(
     pool: &SqlitePool,
     request: UpdateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
+    update_for_turn(pool, request, None).await
+}
+
+pub(crate) async fn update_for_turn(
+    pool: &SqlitePool,
+    request: UpdateAgentRoutineRequest,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
     // Routine edits derive state and metadata from the stored row. Serialize
     // that read with terminal claim release so a stale edit cannot overwrite
     // finite-repeat progress or re-enable a just-completed routine.
@@ -285,6 +309,7 @@ pub async fn update(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let current = get_in_transaction(&mut transaction, &request.routine_id).await?;
     let routine_id = request.routine_id;
     let state = request.state.unwrap_or(current.state);
@@ -304,8 +329,23 @@ pub async fn update(
             "A routine schedule is required.",
         ));
     }
+    let next = next_run_after(&schedule, &timezone, Utc::now())?;
+    if request
+        .prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+        || request
+            .name
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(AppError::new(
+            "invalid_arguments",
+            "Routine name and instructions must not be empty.",
+        ));
+    }
     let next_run_at = if enabled && state == "scheduled" {
-        next_run_after(&schedule, &timezone, Utc::now())?.map(format_time)
+        next.map(format_time)
     } else {
         None
     };
@@ -316,7 +356,7 @@ pub async fn update(
         .bind(request.name.unwrap_or(current.name).trim()).bind(request.prompt.unwrap_or(current.prompt).trim())
         .bind(&schedule).bind(timezone).bind(request.repeat.unwrap_or(current.repeat))
         .bind(request.deliver.unwrap_or(current.deliver)).bind(request.model.unwrap_or(current.model))
-        .bind(request.safety_mode.unwrap_or(current.safety_mode).as_db()).bind(&state).bind(enabled).bind(now())
+        .bind(request.safety_mode.unwrap_or(current.safety_mode).as_db()).bind(&state).bind(enabled).bind(crate::db::repositories::timestamp())
         .bind(next_run_at).bind(metadata_json(metadata)).bind(tool_catalog_updated)
         .bind(&routine_id)
         .execute(&mut *transaction).await.map_err(app_error)?;
@@ -325,22 +365,46 @@ pub async fn update(
 }
 
 pub async fn pause(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
-    // Pausing stops future scheduling but does not cancel a claimed run. Keep
-    // its claim association until terminal projection records status and
-    // repeat progress, then releases the claim transactionally.
-    let changed = query("UPDATE routines SET state = 'paused', enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?")
-        .bind(now()).bind(id).execute(pool).await.map_err(app_error)?;
-    if changed.rows_affected() == 0 {
-        return Err(AppError::new("routine_not_found", "Routine was not found."));
-    }
-    get(pool, id).await
+    pause_for_turn(pool, id, None).await
 }
 
-pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
+pub(crate) async fn pause_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
+    // Pausing stops future scheduling but does not cancel a claimed run. Keep
+    // its claim association until terminal projection records status and
+    // repeat progress, then releases the claim transactionally.
+    let changed = query("UPDATE routines SET state = 'paused', enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?")
+        .bind(crate::db::repositories::timestamp()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
+    if changed.rows_affected() == 0 {
+        return Err(AppError::new("routine_not_found", "Routine was not found."));
+    }
+    let result = get_in_transaction(&mut transaction, id).await?;
+    transaction.commit().await.map_err(app_error)?;
+    Ok(result)
+}
+
+pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
+    resume_for_turn(pool, id, None).await
+}
+
+pub(crate) async fn resume_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<AgentRoutineDto, AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let current = get_in_transaction(&mut transaction, id).await?;
     if requires_legacy_execution_review(&current.metadata) {
         return Err(AppError::new(
@@ -350,20 +414,34 @@ pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppE
     }
     let next = next_run_after(&current.schedule, &current.timezone, Utc::now())?.map(format_time);
     query("UPDATE routines SET state = 'scheduled', enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?")
-        .bind(next).bind(now()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
+        .bind(next).bind(crate::db::repositories::timestamp()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
     transaction.commit().await.map_err(app_error)?;
     get(pool, id).await
 }
 
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
+    delete_for_turn(pool, id, None).await
+}
+
+pub(crate) async fn delete_for_turn(
+    pool: &SqlitePool,
+    id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<(), AppError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let deleted = query("DELETE FROM routines WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(app_error)?;
     if deleted.rows_affected() == 0 {
         Err(AppError::new("routine_not_found", "Routine was not found."))
     } else {
+        transaction.commit().await.map_err(app_error)?;
         Ok(())
     }
 }
@@ -380,6 +458,37 @@ pub async fn list_runs(
             .fetch_all(pool).await.map_err(app_error)?
     };
     Ok(rows.into_iter().map(run_from_row).collect())
+}
+
+/// Bounded execution history with a deterministic total order across ties.
+pub async fn list_runs_page(
+    pool: &SqlitePool,
+    routine_id: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AgentRoutineRunDto>, AppError> {
+    let rows = query("SELECT id, routine_id, agent_session_id, agent_run_id, trigger_kind, status, scheduled_for, started_at, completed_at, model, safety_mode, error_code, error_message, created_at, updated_at FROM routine_runs WHERE (? IS NULL OR routine_id = ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+        .bind(routine_id).bind(routine_id).bind(limit.clamp(1, 101)).bind(offset.max(0)).fetch_all(pool).await.map_err(app_error)?;
+    Ok(rows.into_iter().map(run_from_row).collect())
+}
+
+/// A failed claim is never represented as a successful run. Eligibility is
+/// re-read because a scheduler may win between approval and manual dispatch.
+pub async fn trigger_blocked_error(pool: &SqlitePool, id: &str) -> Result<AppError, AppError> {
+    let routine = get(pool, id).await?;
+    let active: i64 = query_scalar("SELECT EXISTS (SELECT 1 FROM routines WHERE id = ? AND claim_token IS NOT NULL) OR EXISTS (SELECT 1 FROM routine_runs WHERE routine_id = ? AND status IN ('queued','running','waiting_for_user'))")
+        .bind(id).bind(id).fetch_one(pool).await.map_err(app_error)?;
+    Ok(if active != 0 {
+        AppError::new("routine_busy", "This routine already has an active run.")
+    } else {
+        AppError::new(
+            "routine_blocked",
+            format!(
+                "This routine cannot start in state {} (enabled: {}).",
+                routine.state, routine.enabled
+            ),
+        )
+    })
 }
 
 /// Atomically claim an immediate or due execution. It deliberately does not
@@ -408,6 +517,34 @@ async fn claim_with_connector_guard(
     require_due: bool,
     connector: Option<ConnectorClaimGuard<'_>>,
 ) -> Result<Option<Claim>, AppError> {
+    let env = crate::llm::shell_env::login_env().await;
+    claim_with_connector_guard_for_turn(
+        pool,
+        routine_id,
+        trigger_kind,
+        require_due,
+        connector,
+        None,
+        &env,
+    )
+    .await
+}
+
+async fn claim_with_connector_guard_for_turn(
+    pool: &SqlitePool,
+    routine_id: &str,
+    trigger_kind: &str,
+    require_due: bool,
+    connector: Option<ConnectorClaimGuard<'_>>,
+    turn: BoundRoutineTurn<'_>,
+    env: &crate::llm::shell_env::LoginEnv,
+) -> Result<Option<Claim>, AppError> {
+    // Resolve executable presence before acquiring the SQLite writer. No CLI
+    // process or synchronous login-shell resolution occurs inside the claim.
+    let installed: Vec<_> = crate::llm::registry::UNATTENDED_CLIS
+        .into_iter()
+        .filter(|kind| env.which(kind.id()).is_some())
+        .collect();
     // Serialize the eligibility read with the claim write. A deferred
     // transaction can fail with SQLITE_BUSY_SNAPSHOT when a scheduler,
     // connector, and manual trigger race after reading the same free row.
@@ -415,6 +552,7 @@ async fn claim_with_connector_guard(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
+    guard_routine_turn(&mut transaction, turn).await?;
     let trigger_id = connector.as_ref().map(|guard| guard.trigger_id);
     let trigger_guard_kind = connector.as_ref().map(|guard| guard.kind);
     let trigger_account_id = connector.as_ref().map(|guard| guard.account_id);
@@ -436,9 +574,9 @@ async fn claim_with_connector_guard(
     }
     let token = Uuid::new_v4().to_string();
     let run_id = Uuid::new_v4().to_string();
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let stored_model: String = routine.get("model");
-    let model = resolve_routine_model(&stored_model, &crate::providers::remote_generation_model());
+    let model = resolve_routine_model(&stored_model, &installed)?;
     let safety_mode = AgentSafetyMode::from(routine.get::<String, _>("safety_mode").as_str());
     let metadata = serde_json::from_str::<Value>(&routine.get::<String, _>("metadata_json"))
         .unwrap_or_else(|_| json!({}));
@@ -471,16 +609,98 @@ async fn claim_with_connector_guard(
     }))
 }
 
+#[cfg(test)]
+mod bound_claim_tests {
+    use super::*;
+    use crate::{approval_broker::testing::TestBroker, llm::cli::CliKind};
+    #[tokio::test]
+    async fn manual_claim_rechecks_stopped_caller_before_admission() {
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Claude, true).await;
+        let routine = create(
+            broker.pool(),
+            serde_json::from_value(json!({"prompt":"Keep", "schedule":"every 1d"})).unwrap(),
+        )
+        .await
+        .unwrap();
+        query("UPDATE agent_runs SET status='cancelled' WHERE id=?")
+            .bind(&binding.run_id)
+            .execute(broker.pool())
+            .await
+            .unwrap();
+        let env = crate::llm::shell_env::LoginEnv::from_vars(Default::default());
+        let result = claim_with_connector_guard_for_turn(
+            broker.pool(),
+            &routine.id,
+            "manual",
+            false,
+            None,
+            Some((
+                "default",
+                &binding.session_id,
+                &binding.run_id,
+                &binding.authority,
+            )),
+            &env,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "turn_expired");
+        assert!(list_runs(broker.pool(), Some(&routine.id))
+            .await
+            .unwrap()
+            .is_empty());
+        // The refused admission leaves the claim available to the scheduler.
+        let (_directory, env) = super::selection_tests::environment(&[CliKind::Claude]);
+        assert!(claim_with_connector_guard_for_turn(
+            broker.pool(),
+            &routine.id,
+            "schedule",
+            false,
+            None,
+            None,
+            &env
+        )
+        .await
+        .unwrap()
+        .is_some());
+    }
+}
+
 /// Claim every due routine. The caller should then call `start_claim` for each
 /// result; keeping the operations separate makes scheduler tests deterministic
 /// and allows bounded concurrent dispatch at the app integration layer.
 pub async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
+    let env = crate::llm::shell_env::login_env().await;
+    claim_due_with_env(pool, &env).await
+}
+
+async fn claim_due_with_env(
+    pool: &SqlitePool,
+    env: &crate::llm::shell_env::LoginEnv,
+) -> Result<Vec<Claim>, AppError> {
     let ids: Vec<String> = query("SELECT id FROM routines WHERE state = 'scheduled' AND enabled = 1 AND claim_token IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC, id ASC")
-        .bind(now()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
+        .bind(crate::db::repositories::timestamp()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
     let mut claims = Vec::new();
     for id in ids {
-        if let Some(claim) = claim(pool, &id, "schedule", true).await? {
-            claims.push(claim);
+        match claim_with_connector_guard_for_turn(pool, &id, "schedule", true, None, None, env)
+            .await
+        {
+            Ok(Some(claim)) => claims.push(claim),
+            Ok(None) => {}
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "routine_engine_unavailable"
+                        | "routine_engine_not_allowed"
+                        | "llm_cli_not_installed"
+                ) =>
+            {
+                // A refusal belongs to this routine. Keep earlier committed
+                // claims dispatchable and continue the remaining due work.
+                tracing::warn!(routine_id = %id, error_code = %error.code, error = %error.message,
+                    "routine engine selection refused");
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(claims)
@@ -499,7 +719,7 @@ async fn scheduler_tick(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
 /// remains claimed; an unstarted claim only becomes eligible again after a
 /// bounded lease expiry.
 pub async fn reconcile(pool: &SqlitePool) -> Result<(), AppError> {
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
@@ -586,11 +806,11 @@ fn advance_repeat(repeat: &str, metadata: &mut Value) -> bool {
 /// single-flight lease forever. This is deliberately separate from `reconcile`
 /// because calling it during normal scheduler ticks would interrupt live work.
 pub async fn reconcile_after_restart(pool: &SqlitePool) -> Result<(), AppError> {
-    crate::agent_runtime::AgentRepository::new(pool.clone())
+    crate::agent_sessions::AgentRepository::new(pool.clone())
         .reconcile_non_routine_runs_after_restart()
         .await
         .map_err(app_error)?;
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     // The agent run is the source of truth at a process boundary. Mirroring
     // the active state first closes either crash window between the two normal
     // persistence writes: a stored waiting run stays resumable, while a stored
@@ -631,7 +851,7 @@ pub async fn mark_agent_run_waiting(pool: &SqlitePool, agent_run_id: &str) -> Re
          SET status = 'waiting_for_user', updated_at = ?
          WHERE agent_run_id = ? AND status = 'running'",
     )
-    .bind(now())
+    .bind(crate::db::repositories::timestamp())
     .bind(agent_run_id)
     .execute(pool)
     .await
@@ -645,7 +865,7 @@ pub async fn mark_agent_run_resumed(pool: &SqlitePool, agent_run_id: &str) -> Re
          SET status = 'running', updated_at = ?
          WHERE agent_run_id = ? AND status = 'waiting_for_user'",
     )
-    .bind(now())
+    .bind(crate::db::repositories::timestamp())
     .bind(agent_run_id)
     .execute(pool)
     .await
@@ -673,7 +893,7 @@ pub async fn mark_agent_run_terminal(
         return Ok(());
     }
 
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     // Project the terminal run and release its routine claim under one write
     // reservation. A concurrent routine edit therefore lands wholly before or
     // after both updates and cannot erase the matching claim between them.
@@ -722,9 +942,8 @@ pub fn start_scheduler(app: &AppHandle) {
         loop {
             match scheduler_tick(&pool).await {
                 Ok(claims) => {
-                    let host = app.state::<AgentRuntimeHost>();
                     for claim in claims {
-                        if let Err(error) = start_claim(&app, &host, &pool, claim).await {
+                        if let Err(error) = start_claim(&app, &pool, claim).await {
                             tracing::warn!(error_code = %error.code, "routine scheduled dispatch failed");
                         }
                     }
@@ -743,7 +962,6 @@ pub fn start_scheduler(app: &AppHandle) {
 /// approval-required tool in this set.
 pub async fn start_claim(
     app: &AppHandle,
-    host: &AgentRuntimeHost,
     pool: &SqlitePool,
     claim: Claim,
 ) -> Result<AgentRoutineRunDto, AppError> {
@@ -753,40 +971,34 @@ pub async fn start_claim(
     tokio::fs::create_dir_all(&workspace)
         .await
         .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
-    let timestamp = now();
+    let timestamp = crate::db::repositories::timestamp();
     let mut created_agent_run_id = None;
+    let cli =
+        crate::chat_engine::cli_for_model(&claim.model).unwrap_or(crate::llm::cli::CliKind::Claude);
     let started = async {
-        query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
-            .bind(&session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(&timestamp).bind(&timestamp).execute(pool).await.map_err(app_error)?;
-        let run = repository
-            .create_run(&session_id, &claim.model, Some("medium"))
-            .await
-            .map_err(app_error)?;
-        created_agent_run_id = Some(run.id.clone());
-        repository.append_item(&session_id, Some(&run.id), 0, &AgentItemPayload::UserMessage(MessagePayload { role: "user".into(), content: claim.prompt.clone(), attachments: vec![] }), Some(&format!("routine:{}", claim.routine_run_id))).await.map_err(app_error)?;
-        attach_run_mapping(pool, &claim.routine_run_id, &claim.token, &session_id, &run.id, &timestamp).await?;
-        host.ensure_started(app, repository.clone()).await?;
-        let workspace = workspace.to_string_lossy();
-        let request = UnattendedRunRequest {
-            run_id: &run.id,
-            routine_id: &claim.routine_id,
-            model: &claim.model,
-            safety_mode: claim.safety_mode,
-            workspace: workspace.as_ref(),
-            prompt: &claim.prompt,
-            enabled_toolsets: &claim.enabled_toolsets,
-        };
-        let params = unattended_run_params(app, &repository, &request).await?;
-        repository
-            .set_run_config(
-                &run.id,
-                &crate::agent_runtime::api::resumable_run_config(&params),
-            )
-            .await
-            .map_err(app_error)?;
-        host.request("run.start", &session_id, &run.id, params).await?;
-        Ok::<_, AppError>(run.id)
-    }.await;
+        let run_id = persist_claim_run(
+            pool,
+            &repository,
+            &claim,
+            &session_id,
+            &workspace,
+            &timestamp,
+            &mut created_agent_run_id,
+        )
+        .await?;
+        start_cli_claim(
+            app,
+            &repository,
+            &claim,
+            cli,
+            &session_id,
+            &run_id,
+            &workspace,
+        )
+        .await?;
+        Ok::<_, AppError>(run_id)
+    }
+    .await;
     if let Err(error) = started {
         if let Some(run_id) = created_agent_run_id.as_deref() {
             if let Err(persist_error) = repository
@@ -803,10 +1015,7 @@ pub async fn start_claim(
             }
         }
         let next_run_at = next_run_after_dispatch_failure(&claim, Utc::now());
-        let _ = query("UPDATE routine_runs SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?")
-            .bind(now()).bind(&error.code).bind(&error.message).bind(now()).bind(&claim.routine_run_id).execute(pool).await;
-        let _ = query("UPDATE routines SET claim_token = NULL, claimed_at = NULL, next_run_at = COALESCE(?, next_run_at), last_run_at = ?, last_status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND claim_token = ?")
-            .bind(next_run_at).bind(now()).bind(&error.message).bind(now()).bind(&claim.routine_id).bind(&claim.token).execute(pool).await;
+        record_dispatch_failure(pool, &claim, &error, next_run_at).await;
         return Err(error);
     }
     list_runs(pool, Some(&claim.routine_id))
@@ -814,6 +1023,20 @@ pub async fn start_claim(
         .into_iter()
         .find(|run| run.id == claim.routine_run_id)
         .ok_or_else(|| AppError::new("routine_run_missing", "Routine run was not persisted."))
+}
+
+async fn record_dispatch_failure(
+    pool: &SqlitePool,
+    claim: &Claim,
+    error: &AppError,
+    next_run_at: Option<String>,
+) {
+    // A failed preparation may arrive after the event path already projected
+    // Stop. Preserve that winner in both the run history and routine summary.
+    let _ = query("UPDATE routine_runs SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ? AND status IN ('queued','running','waiting_for_user') AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE agent_runs.id = routine_runs.agent_run_id AND agent_runs.status IN ('completed','cancelled','interrupted'))")
+        .bind(crate::db::repositories::timestamp()).bind(&error.code).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_run_id).execute(pool).await;
+    let _ = query("UPDATE routines SET claim_token = NULL, claimed_at = NULL, next_run_at = COALESCE(?, next_run_at), last_run_at = ?, last_status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND claim_token = ? AND EXISTS (SELECT 1 FROM routine_runs rr WHERE rr.id = ? AND rr.routine_id = routines.id AND rr.status = 'failed')")
+        .bind(next_run_at).bind(crate::db::repositories::timestamp()).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_id).bind(&claim.token).bind(&claim.routine_run_id).execute(pool).await;
 }
 
 fn next_run_after_dispatch_failure(claim: &Claim, after: DateTime<Utc>) -> Option<String> {
@@ -829,13 +1052,24 @@ fn next_run_after_dispatch_failure(claim: &Claim, after: DateTime<Utc>) -> Optio
 
 pub async fn trigger_and_start(
     app: &AppHandle,
-    host: &AgentRuntimeHost,
     pool: &SqlitePool,
     routine_id: &str,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
+    trigger_and_start_for_turn(app, pool, routine_id, None).await
+}
+
+pub(crate) async fn trigger_and_start_for_turn(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    routine_id: &str,
+    turn: BoundRoutineTurn<'_>,
+) -> Result<Option<AgentRoutineRunDto>, AppError> {
     reconcile(pool).await?;
-    match claim(pool, routine_id, "manual", false).await? {
-        Some(claim) => start_claim(app, host, pool, claim).await.map(Some),
+    let env = crate::llm::shell_env::login_env().await;
+    match claim_with_connector_guard_for_turn(pool, routine_id, "manual", false, None, turn, &env)
+        .await?
+    {
+        Some(claim) => start_claim(app, pool, claim).await.map(Some),
         None => Ok(None),
     }
 }
@@ -851,7 +1085,6 @@ pub async fn trigger_from_connector(
     account_id: &str,
 ) -> Result<bool, AppError> {
     let pool = repositories(app).await?.pool;
-    let host = app.state::<AgentRuntimeHost>();
     reconcile(&pool).await?;
     let guard = ConnectorClaimGuard {
         trigger_id,
@@ -859,9 +1092,112 @@ pub async fn trigger_from_connector(
         account_id,
     };
     match claim_with_connector_guard(&pool, routine_id, kind, false, Some(guard)).await? {
-        Some(claim) => start_claim(app, &host, &pool, claim).await.map(|_| true),
+        Some(claim) => start_claim(app, &pool, claim).await.map(|_| true),
         None => Ok(false),
     }
+}
+
+/// The routine's session, its agent run, the routine prompt as the user
+/// message, and the claim mapping: the same for both engines. The run id is
+/// written to `created` as soon as the run exists, so a later failure can
+/// terminalize it.
+async fn persist_claim_run(
+    pool: &SqlitePool,
+    repository: &AgentRepository,
+    claim: &Claim,
+    session_id: &str,
+    workspace: &std::path::Path,
+    timestamp: &str,
+    created: &mut Option<String>,
+) -> Result<String, AppError> {
+    query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
+        .bind(session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(timestamp).bind(timestamp).execute(pool).await.map_err(app_error)?;
+    let run = repository
+        .create_run(session_id, &claim.model, Some("medium"))
+        .await
+        .map_err(app_error)?;
+    *created = Some(run.id.clone());
+    repository
+        .append_item(
+            session_id,
+            Some(&run.id),
+            0,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: claim.prompt.clone(),
+                attachments: vec![],
+            }),
+            Some(&format!("routine:{}", claim.routine_run_id)),
+        )
+        .await
+        .map_err(app_error)?;
+    attach_run_mapping(
+        pool,
+        &claim.routine_run_id,
+        &claim.token,
+        session_id,
+        &run.id,
+        timestamp,
+    )
+    .await?;
+    Ok(run.id)
+}
+
+/// What a routine's CLI turn receives: the routine prompt, framed so the CLI
+/// knows nobody is there and which tools it has.
+fn routine_cli_prompt(claim: &Claim) -> String {
+    format!(
+        "This is the Clovy routine \"{name}\", running unattended: nobody can answer questions or approve actions. You can read files, search and fetch the web, and use the Clovy MCP tools; you cannot run commands or change files. Do the task and give the result as your final answer.\n\n{prompt}",
+        name = claim.routine_name,
+        prompt = crate::chat_engine::with_note_reference_context(&claim.prompt),
+    )
+}
+
+/// Runs a claimed routine on a CLI engine through the chat engine path
+/// (`crate::chat_engine::start_cli_turn`) under the unattended policy. Its
+/// events are persisted like a chat turn's, which projects the routine run's
+/// end (`mark_agent_run_terminal`).
+async fn start_cli_claim(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    claim: &Claim,
+    kind: crate::llm::cli::CliKind,
+    session_id: &str,
+    run_id: &str,
+    workspace: &std::path::Path,
+) -> Result<(), AppError> {
+    repository
+        .set_run_config(
+            run_id,
+            &serde_json::json!({"workspace": workspace.to_string_lossy(), "surface": "routine"}),
+        )
+        .await?;
+    let engines = app.state::<crate::chat_engine::ChatEngineHost>();
+    let ticket = engines.register(run_id)?;
+    let started = crate::chat_engine::start_cli_turn(
+        app,
+        repository.clone(),
+        crate::chat_engine::CliTurnRequest {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            previous_run_id: None,
+            kind,
+            workspace: workspace.to_path_buf(),
+            input: routine_cli_prompt(claim),
+            images: Vec::new(),
+            safety_mode: claim.safety_mode,
+            attended: false,
+            surface: "routine".into(),
+            routine_tools: Some(
+                crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
+                    &claim.enabled_toolsets,
+                ),
+            ),
+        },
+        ticket,
+    )
+    .await;
+    crate::chat_engine::finish_cli_dispatch(app, repository, session_id, run_id, started).await
 }
 
 /// Attach a created agent session/run to the already-durable claim. Keeping
@@ -922,10 +1258,9 @@ pub async fn resume_agent_routine(
 #[tauri::command]
 pub async fn trigger_agent_routine(
     app: AppHandle,
-    host: State<'_, AgentRuntimeHost>,
     routine_id: String,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
-    trigger_and_start(&app, &host, &repositories(&app).await?.pool, &routine_id).await
+    trigger_and_start(&app, &repositories(&app).await?.pool, &routine_id).await
 }
 #[tauri::command]
 pub async fn delete_agent_routine(app: AppHandle, routine_id: String) -> Result<(), AppError> {
@@ -1005,6 +1340,9 @@ pub(crate) async fn routine_browser_access_set(
                 ..previous.clone()
             };
             broker.set_routine_grant(broker_grant(&disabled));
+            // Revoke live control before awaiting database persistence. A
+            // failed save may restore the opt-in, never the ended handles.
+            broker.revoke_routine_sessions(job_id).await;
             if let Err(error) = repos.set_routine_browser_grant(&disabled).await {
                 broker.set_routine_grant(broker_grant(&previous));
                 return Err(error);
@@ -1021,8 +1359,6 @@ pub(crate) async fn routine_browser_access_set(
 fn broker_grant(grant: &RoutineBrowserGrantRecord) -> RoutineBrowserGrant {
     RoutineBrowserGrant {
         job_id: grant.job_id.clone(),
-        server_name: grant.server_name.clone(),
-        token: grant.token.clone(),
         enabled: grant.enabled,
     }
 }
@@ -1154,215 +1490,6 @@ fn routine_workspace(app: &AppHandle, session_id: &str) -> Result<PathBuf, AppEr
         .join(session_id))
 }
 
-struct UnattendedRunRequest<'a> {
-    run_id: &'a str,
-    routine_id: &'a str,
-    model: &'a str,
-    safety_mode: AgentSafetyMode,
-    workspace: &'a str,
-    prompt: &'a str,
-    enabled_toolsets: &'a [String],
-}
-
-const UNATTENDED_RUN_INSTRUCTIONS: &str = "You are Clovy executing an unattended routine. Complete the requested work without asking questions. Never claim a tool succeeded unless its result confirms success. If a tool needs approval, pause and wait for the user instead of choosing for them.";
-
-async fn unattended_run_params(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    request: &UnattendedRunRequest<'_>,
-) -> Result<Value, AppError> {
-    let skills = if request
-        .enabled_toolsets
-        .iter()
-        .any(|toolset| toolset == "skills")
-    {
-        enabled_skill_ids(&crate::agent_runtime::api::agent_skill_catalog(app, repository).await?)
-    } else {
-        Vec::new()
-    };
-    repository
-        .set_run_enabled_skills(request.run_id, &skills)
-        .await
-        .map_err(app_error)?;
-    let tools = unattended_tools(
-        app,
-        repository,
-        request.safety_mode,
-        std::path::Path::new(request.workspace),
-        request.routine_id,
-        request.enabled_toolsets,
-    )
-    .await;
-    let mcp_descriptors = tools
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|descriptor| {
-            descriptor
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("mcp:"))
-        })
-        .filter_map(|descriptor| serde_json::from_value(descriptor.clone()).ok())
-        .collect::<Vec<crate::agent_mcp::RuntimeToolDescriptorJson>>();
-    crate::agent_mcp::snapshot_run_policies(&repository.pool, request.run_id, &mcp_descriptors)
-        .await
-        .map_err(|error| AppError::new("agent_mcp_policy_snapshot_failed", error.to_string()))?;
-    let instructions =
-        crate::agent_runtime::persona::instructions_for_app(app, UNATTENDED_RUN_INSTRUCTIONS);
-    Ok(
-        json!({ "model": request.model, "reasoningEffort": "medium", "instructions": instructions, "workspace": request.workspace, "safetyMode": request.safety_mode.as_db(), "input": request.prompt, "history": [], "tools": tools, "skills": skills.iter().map(|name| json!({ "name": name, "description": "Enabled Clovy skill", "source": "managed" })).collect::<Vec<_>>(), "contextWindow": 128000, "maxOutputTokens": 8192 }),
-    )
-}
-
-fn enabled_skill_ids(catalog: &[Value]) -> Vec<String> {
-    catalog
-        .iter()
-        .filter(|skill| skill.get("enabled").and_then(Value::as_bool) == Some(true))
-        .filter_map(|skill| skill.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect()
-}
-
-/// Reconstructs the unattended contract only for prerelease interrupted runs
-/// that predate persisted run configuration. New runs always resume from their
-/// exact immutable `run_config_json` snapshot.
-pub async fn reconstruct_unattended_resume_params(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    run_id: &str,
-    session_id: &str,
-    model: &str,
-    safety_mode: AgentSafetyMode,
-    workspace: &str,
-) -> Result<Option<Value>, AppError> {
-    let row = query(
-        "SELECT routines.id, routines.prompt, routines.metadata_json,
-                routines.tool_catalog_version
-         FROM routine_runs
-         JOIN routines ON routines.id = routine_runs.routine_id
-         WHERE routine_runs.agent_session_id = ? AND routine_runs.agent_run_id = ?",
-    )
-    .bind(session_id)
-    .bind(run_id)
-    .fetch_optional(&repository.pool)
-    .await
-    .map_err(app_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let metadata = serde_json::from_str::<Value>(&row.get::<String, _>("metadata_json"))
-        .unwrap_or_else(|_| json!({}));
-    let enabled_toolsets =
-        enabled_toolsets_from_metadata(&metadata, row.get::<i64, _>("tool_catalog_version") == 0);
-    let routine_id: String = row.get("id");
-    let prompt: String = row.get("prompt");
-    let request = UnattendedRunRequest {
-        run_id,
-        routine_id: &routine_id,
-        model,
-        safety_mode,
-        workspace,
-        prompt: &prompt,
-        enabled_toolsets: &enabled_toolsets,
-    };
-    Ok(Some(crate::agent_runtime::api::resumable_run_config(
-        &unattended_run_params(app, repository, &request).await?,
-    )))
-}
-async fn unattended_tools(
-    app: &AppHandle,
-    repository: &AgentRepository,
-    safety_mode: AgentSafetyMode,
-    workspace: &std::path::Path,
-    routine_id: &str,
-    enabled_toolsets: &[String],
-) -> Value {
-    let (autonomous_tools, trust_mode) = routine_trust(&repository.pool, routine_id).await;
-    let mut tools = base_unattended_tools();
-    if let Some(descriptors) = tools.as_array_mut() {
-        descriptors.retain(|descriptor| {
-            descriptor
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| routine_base_tool_allowed(name, enabled_toolsets))
-        });
-    }
-    let subsystem = crate::agent_mcp::AgentMcpSubsystem::new(
-        crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone()),
-        crate::agent_mcp::KeychainMcpSecretStore,
-    );
-    match subsystem
-        .refresh_registry_for_workspace_with_managed_linear(
-            app,
-            safety_mode == AgentSafetyMode::Sandboxed,
-            Some(workspace),
-        )
-        .await
-    {
-        Ok(descriptors) => {
-            let mcp_repository = crate::agent_mcp::AgentMcpRepository::new(repository.pool.clone());
-            for descriptor in descriptors {
-                let Some(server_id) = descriptor
-                    .id
-                    .strip_prefix("mcp:")
-                    .and_then(|value| value.split('/').next())
-                else {
-                    continue;
-                };
-                let server_name = if server_id == crate::agent_mcp::MANAGED_LINEAR_SERVER_ID {
-                    crate::agent_mcp::MANAGED_LINEAR_SERVER_NAME.to_string()
-                } else {
-                    let Ok(server) = mcp_repository.get(server_id).await else {
-                        continue;
-                    };
-                    server.name
-                };
-                if routine_mcp_server_enabled(
-                    server_id,
-                    &server_name,
-                    descriptor.requires_approval == Some(true),
-                    enabled_toolsets,
-                ) {
-                    if let Ok(value) = serde_json::to_value(descriptor) {
-                        tools
-                            .as_array_mut()
-                            .expect("routine tool catalog is an array")
-                            .push(value);
-                    }
-                }
-            }
-        }
-        Err(error) => tracing::warn!(
-            error_code = "routine_mcp_discovery_failed",
-            error = %error,
-            "MCP discovery was unavailable for this routine run"
-        ),
-    }
-    match crate::agent_runtime::native_connectors::descriptors(app).await {
-        Ok(descriptors) => tools
-            .as_array_mut()
-            .expect("routine tool catalog is an array")
-            .extend(descriptors.into_iter().filter(|descriptor| {
-                descriptor
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| {
-                        crate::agent_runtime::native_connectors::routine_tool_allowed(
-                            name,
-                            enabled_toolsets,
-                            &autonomous_tools,
-                            trust_mode.as_deref(),
-                        )
-                    })
-            })),
-        Err(error) => tracing::warn!(
-            error_code = %error.code,
-            "native connector tools were unavailable for this routine run"
-        ),
-    }
-    tools
-}
-
 fn enabled_toolsets_from_metadata(metadata: &Value, legacy_catalog: bool) -> Vec<String> {
     let has_explicit_catalog = matches!(metadata.get("enabledToolsets"), Some(Value::Array(_)));
     let imported_catalog =
@@ -1417,10 +1544,20 @@ async fn routine_trust(pool: &SqlitePool, routine_id: &str) -> (Vec<String>, Opt
 fn routine_base_tool_allowed(name: &str, enabled_toolsets: &[String]) -> bool {
     let has = |toolset: &str| enabled_toolsets.iter().any(|value| value == toolset);
     match name {
-        "search_june" => has("context_engine") || has("memory") || has("session_search"),
+        name if matches!(
+            name,
+            "search_june" | "get_dictation" | "list_notes" | "list_note_transcripts"
+        ) || crate::mcp_server::tools::is_read_tool(name)
+            || crate::mcp_server::tools::is_conversation_read_tool(name) =>
+        {
+            has("context_engine") || has("memory") || has("session_search")
+        }
+        "get_obsidian_vault" | "approve_action" => true,
         "web_search" | "web_fetch" => has("web"),
         "list_files" | "read_file" | "preview_file" | "search_files" => has("file"),
         "list_skills" | "load_skill" => has("skills"),
+        "search_memories" => has("memory") || has("context_engine"),
+        "list_routines" | "list_routine_runs" => has("routines"),
         _ => false,
     }
 }
@@ -1470,7 +1607,7 @@ pub async fn routine_tool_allowed_for_session(
     let (autonomous_tools, trust_mode) = routine_trust(pool, &routine_id).await;
     Ok(Some(
         routine_base_tool_allowed(name, &enabled_toolsets)
-            || crate::agent_runtime::native_connectors::routine_tool_allowed(
+            || crate::connectors::agent_tools::routine_tool_allowed(
                 name,
                 &enabled_toolsets,
                 &autonomous_tools,
@@ -1512,20 +1649,6 @@ pub async fn routine_mcp_server_allowed_for_session(
     )))
 }
 
-fn base_unattended_tools() -> Value {
-    json!([
-        { "name": "search_june", "description": "Search Clovy notes, transcripts, and dictations.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "web_search", "description": "Search the public web.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "web_fetch", "description": "Fetch a public web page.", "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false } },
-        { "name": "list_files", "description": "List files in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": [], "additionalProperties": false } },
-        { "name": "read_file", "description": "Read a UTF-8 text file in the routine workspace.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "preview_file", "description": "Read file metadata and a bounded text preview.", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } },
-        { "name": "search_files", "description": "Search text files in the routine workspace.", "parameters": { "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"], "additionalProperties": false } },
-        { "name": "list_skills", "description": "List enabled Clovy skills for this routine.", "parameters": { "type": "object", "properties": {}, "required": [], "additionalProperties": false } },
-        { "name": "load_skill", "description": "Load instructions for one enabled Clovy skill.", "parameters": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false } }
-    ])
-}
-
 /// Supports the legacy routine schedule forms Clovy surfaced: one-shot RFC3339,
 /// `every 30m|2h|1d`, macros, and standard five-field cron. Cron fields are
 /// evaluated in the routine's IANA timezone, including daylight-saving
@@ -1535,6 +1658,12 @@ fn next_run_after(
     timezone: &str,
     after: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, AppError> {
+    let timezone = timezone.parse::<Tz>().map_err(|_| {
+        AppError::new(
+            "routine_timezone_invalid",
+            "Routine timezone must be a valid IANA timezone.",
+        )
+    })?;
     let normalized = schedule.trim().to_ascii_lowercase();
     let source = match normalized.as_str() {
         "@hourly" => "0 * * * *".to_string(),
@@ -1556,12 +1685,6 @@ fn next_run_after(
             "Routine schedules must be RFC 3339, every <n>m/h/d, or five-field cron.",
         ));
     }
-    let timezone = timezone.parse::<Tz>().map_err(|_| {
-        AppError::new(
-            "routine_timezone_invalid",
-            "Routine timezone must be a valid IANA timezone.",
-        )
-    })?;
     let mut candidate = after + Duration::minutes(1);
     candidate = candidate
         .with_second(0)
@@ -1643,6 +1766,23 @@ mod tests {
     use super::*;
     use sqlx_sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::time::Duration as StdDuration;
+
+    async fn claim(
+        pool: &SqlitePool,
+        id: &str,
+        trigger: &str,
+        due: bool,
+    ) -> Result<Option<Claim>, AppError> {
+        let (_directory, env) =
+            super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
+        super::claim_with_connector_guard_for_turn(pool, id, trigger, due, None, None, &env).await
+    }
+
+    async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
+        let (_directory, env) =
+            super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
+        super::claim_due_with_env(pool, &env).await
+    }
 
     async fn initialize_pool(pool: &SqlitePool) {
         // The routine migration only needs these parent keys for FK coverage.
@@ -1742,7 +1882,7 @@ mod tests {
             &claimed.token,
             session_id,
             agent_run_id,
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -1778,20 +1918,31 @@ mod tests {
     }
 
     #[test]
-    fn automatic_routine_model_resolves_to_the_selected_remote_model() {
-        for stored_model in ["", "auto", crate::providers::AUTO_GENERATION_MODEL] {
+    fn routines_without_installed_eligible_engines_fail_before_claiming() {
+        for model in ["", "auto", "open-software/auto"] {
             assert_eq!(
-                resolve_routine_model(stored_model, "kimi-k2-6"),
-                "kimi-k2-6"
+                resolve_routine_model(model, &[]).unwrap_err().code,
+                "routine_engine_unavailable"
             );
         }
         assert_eq!(
-            resolve_routine_model("explicit-model", "kimi-k2-6"),
-            "explicit-model"
+            resolve_routine_model("explicit-model", &[])
+                .unwrap_err()
+                .code,
+            "routine_engine_not_allowed"
         );
         assert_eq!(
-            resolve_routine_model("auto", crate::providers::AUTO_GENERATION_MODEL),
-            crate::providers::AUTO_GENERATION_MODEL
+            resolve_routine_model(
+                "__clovy_cli_engine__:claude",
+                &[crate::llm::cli::CliKind::Codex]
+            )
+            .unwrap_err()
+            .code,
+            "llm_cli_not_installed"
+        );
+        assert_eq!(
+            resolve_routine_model("auto", &[crate::llm::cli::CliKind::Codex]).unwrap(),
+            "__clovy_cli_engine__:codex"
         );
     }
 
@@ -1875,7 +2026,7 @@ mod tests {
             &claimed.token,
             "session-linear",
             "run-linear",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2230,43 +2381,20 @@ mod tests {
     }
 
     #[test]
-    fn unattended_skill_catalog_keeps_only_enabled_skills() {
-        let catalog = vec![
-            json!({ "id": "notion-meeting-notes-sync", "enabled": true }),
-            json!({ "id": "disabled-skill", "enabled": false }),
-            json!({ "id": "missing-enabled-flag" }),
-            json!({ "enabled": true }),
-        ];
-
-        assert_eq!(
-            enabled_skill_ids(&catalog),
-            vec!["notion-meeting-notes-sync"]
-        );
-    }
-
-    #[test]
     fn sandboxed_routines_can_load_skill_instructions_without_machine_tools() {
         let toolsets = crate::connectors::policy::SANDBOXED_ROUTINE_BASE_TOOLSETS
             .iter()
-            .map(|toolset| (*toolset).to_string())
+            .map(|name| name.to_string())
             .collect::<Vec<_>>();
-        let tools = base_unattended_tools();
-        let names = tools
-            .as_array()
-            .expect("routine tool catalog")
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .filter(|name| routine_base_tool_allowed(name, &toolsets))
-            .collect::<Vec<_>>();
-
-        assert!(names.contains(&"list_skills"));
-        assert!(names.contains(&"load_skill"));
-        assert!(!names.contains(&"write_file"));
-        assert!(!names.contains(&"run_shell"));
+        assert!(routine_base_tool_allowed("list_skills", &toolsets));
+        assert!(routine_base_tool_allowed("load_skill", &toolsets));
+        assert!(!routine_base_tool_allowed("write_file", &toolsets));
+        assert!(!routine_base_tool_allowed("run_shell", &toolsets));
     }
 
     #[tokio::test]
-    async fn claimed_run_snapshots_the_resolved_remote_model_and_safety_mode() {
+    async fn claimed_run_snapshots_the_resolved_cli_model_and_safety_mode() {
+        let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let pool = pool().await;
         let mut request = create_request("every 1h");
         request.model = "auto".into();
@@ -2276,18 +2404,21 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claim.model, crate::providers::remote_generation_model());
+        assert_eq!(
+            claim.model,
+            crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
+        );
         assert_eq!(claim.safety_mode, AgentSafetyMode::Unrestricted);
         let run = list_runs(&pool, Some("routine-1"))
             .await
             .unwrap()
             .pop()
             .unwrap();
-        assert_eq!(run.model, crate::providers::remote_generation_model());
+        assert_eq!(
+            run.model,
+            crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
+        );
         assert_eq!(run.safety_mode, AgentSafetyMode::Unrestricted);
-        let tools = base_unattended_tools().to_string();
-        assert!(!tools.contains("computer_use"));
-        assert!(!tools.contains("request_clarification"));
     }
 
     #[tokio::test]
@@ -2312,7 +2443,7 @@ mod tests {
             &claim.token,
             "session-1",
             "run-1",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2353,7 +2484,7 @@ mod tests {
             &claimed.token,
             "session-terminal",
             "run-terminal",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2410,7 +2541,7 @@ mod tests {
                 &claimed.token,
                 &session_id,
                 &agent_run_id,
-                &now(),
+                &crate::db::repositories::timestamp(),
             )
             .await
             .unwrap();
@@ -2574,7 +2705,7 @@ mod tests {
             &claimed.token,
             "session-atomic",
             "run-atomic",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2628,7 +2759,7 @@ mod tests {
             &claimed.token,
             "session-retry",
             "run-retry",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2698,7 +2829,7 @@ mod tests {
             &claim.token,
             "session-restart",
             "run-restart",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2737,7 +2868,7 @@ mod tests {
             &claimed_run.token,
             "session-waiting",
             "run-waiting",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2797,7 +2928,7 @@ mod tests {
             &claimed_run.token,
             "session-partial-wait",
             "run-partial-wait",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2836,7 +2967,7 @@ mod tests {
             &claimed_run.token,
             "session-partial-resume",
             "run-partial-resume",
-            &now(),
+            &crate::db::repositories::timestamp(),
         )
         .await
         .unwrap();
@@ -2853,5 +2984,552 @@ mod tests {
             "interrupted"
         );
         assert!(get(&pool, "routine-1").await.unwrap().next_run_at.is_some());
+    }
+
+    #[test]
+    fn automatic_routines_resolve_only_installed_eligible_engines() {
+        use crate::llm::cli::CliKind;
+        for stored_model in ["", "auto", crate::providers::LEGACY_AUTO_GENERATION_MODEL] {
+            assert_eq!(
+                resolve_routine_model(stored_model, &[CliKind::Claude]).unwrap(),
+                "__clovy_cli_engine__:claude"
+            );
+        }
+        assert_eq!(
+            resolve_routine_model("explicit-model", &[CliKind::Codex])
+                .unwrap_err()
+                .code,
+            "routine_engine_not_allowed"
+        );
+        assert_eq!(
+            resolve_routine_model("auto", &[CliKind::Agy])
+                .unwrap_err()
+                .code,
+            "routine_engine_unavailable"
+        );
+    }
+
+    /// Persists like the app does (routine projection included).
+    #[cfg(unix)]
+    struct RoutineSink {
+        repository: AgentRepository,
+    }
+
+    #[cfg(unix)]
+    impl crate::chat_engine::FrameSink for RoutineSink {
+        async fn publish(&self, frame: crate::agent_sessions::protocol::RpcFrame) {
+            crate::agent_sessions::events::persist_runtime_event(&self.repository, &frame)
+                .await
+                .expect("event persists");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn routine_on_a_cli_engine_runs_unattended_and_records_its_result() {
+        use crate::llm::cli::CliKind;
+        use std::os::unix::fs::PermissionsExt;
+
+        for (toolsets, expected_tools) in [
+            (vec![], ""),
+            (vec!["file"], "Read,Grep,Glob"),
+            (vec!["web"], "WebSearch,WebFetch"),
+            (vec!["file", "web"], "Read,Grep,Glob,WebSearch,WebFetch"),
+        ] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            crate::db::migrations::run_migrations(&pool).await.unwrap();
+            let mut request = create_request("every 1h");
+            request.model = crate::chat_engine::engine_model_id(CliKind::Claude);
+            request.enabled_toolsets = Some(toolsets.into_iter().map(str::to_string).collect());
+            create(&pool, request).await.unwrap();
+            let claimed = claim(&pool, "routine-1", "manual", false)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(claimed.model, "__clovy_cli_engine__:claude");
+
+            let repository = AgentRepository::new(pool.clone());
+            let workspace = tempfile::tempdir().unwrap();
+            let session_id = Uuid::new_v4().to_string();
+            let mut created = None;
+            let run_id = persist_claim_run(
+                &pool,
+                &repository,
+                &claimed,
+                &session_id,
+                workspace.path(),
+                &crate::db::repositories::timestamp(),
+                &mut created,
+            )
+            .await
+            .unwrap();
+            assert_eq!(created.as_deref(), Some(run_id.as_str()));
+
+            let bin = tempfile::tempdir().unwrap();
+            let log = bin.path().join("args");
+            let program = bin.path().join("claude");
+            std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{log}'\ncat > '{log}.stdin'\necho '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-1\"}}'\necho '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"Three notes mention the launch.\"}}]}}}}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Three notes mention the launch.\"}}'\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let context = crate::chat_engine::turn::TurnContext {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                data_partition: "default".into(),
+                previous_run_id: None,
+                kind: CliKind::Claude,
+                program,
+                env: std::collections::BTreeMap::from([(
+                    "PATH".to_string(),
+                    "/usr/bin:/bin".to_string(),
+                )]),
+                agy: None,
+                workspace: workspace.path().to_path_buf(),
+                input: routine_cli_prompt(&claimed),
+                mcp: None,
+                turns: None,
+                safety_mode: claimed.safety_mode,
+                attended: false,
+                surface: "routine".into(),
+                routine_tools: Some(
+                    crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
+                        &claimed.enabled_toolsets,
+                    ),
+                ),
+                images: Vec::new(),
+            };
+            let sink = RoutineSink {
+                repository: repository.clone(),
+            };
+            let (_cancel, receiver) = tokio::sync::watch::channel(false);
+            crate::chat_engine::turn::execute_turn(&repository, &sink, context, receiver).await;
+
+            let args = std::fs::read_to_string(&log).unwrap();
+            assert!(args.lines().any(|line| line == "--tools"), "{args}");
+            let args_list = args.lines().collect::<Vec<_>>();
+            let tools_at = args_list
+                .iter()
+                .position(|value| *value == "--tools")
+                .unwrap();
+            assert_eq!(args_list[tools_at + 1], expected_tools);
+            let allowed_at = args_list
+                .iter()
+                .position(|value| *value == "--allowedTools")
+                .unwrap();
+            let expected_allowed = if expected_tools.is_empty() {
+                "mcp__clovy__*".to_string()
+            } else {
+                format!("{expected_tools},mcp__clovy__*")
+            };
+            assert_eq!(args_list[allowed_at + 1], expected_allowed);
+            assert!(
+                args.lines().any(|line| line == "--strict-mcp-config"),
+                "{args}"
+            );
+            let stdin = std::fs::read_to_string(format!("{}.stdin", log.display())).unwrap();
+            assert!(stdin.contains("running unattended"), "{stdin}");
+            assert!(stdin.ends_with("Summarize notes"), "{stdin}");
+
+            // The routine history records the CLI's result like a Clovy run's.
+            let runs = list_runs(&pool, Some("routine-1")).await.unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].status, "completed");
+            assert_eq!(runs[0].agent_run_id.as_deref(), Some(run_id.as_str()));
+            let answer = repository
+                .items(&session_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|item| match item.payload {
+                    AgentItemPayload::AssistantMessage(message) => Some(message.content),
+                    _ => None,
+                });
+            assert_eq!(answer.as_deref(), Some("Three notes mention the launch."));
+            let routine =
+                query("SELECT last_status, claim_token FROM routines WHERE id = 'routine-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(routine.get::<Option<String>, _>("claim_token"), None);
+            assert_eq!(
+                routine.get::<Option<String>, _>("last_status").as_deref(),
+                Some("ok")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "routine_dispatch_failure_tests.rs"]
+mod dispatch_failure_tests;
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::llm::{cli::CliKind, registry::ProviderRef, shell_env::LoginEnv};
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    pub(super) fn environment(installed: &[CliKind]) -> (tempfile::TempDir, LoginEnv) {
+        let directory = tempfile::tempdir().unwrap();
+        for kind in installed {
+            let path = directory.path().join(if cfg!(windows) {
+                format!("{}.exe", kind.id())
+            } else {
+                kind.id().to_string()
+            });
+            std::fs::write(&path, "#!/bin/sh\nexit 91\n").unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = LoginEnv::from_vars(BTreeMap::from([
+            ("PATH".into(), directory.path().display().to_string()),
+            ("PATHEXT".into(), ".EXE".into()),
+        ]));
+        (directory, env)
+    }
+    async fn fixture(model: &str) -> SqlitePool {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY)",
+            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY)",
+            "CREATE TABLE connector_triggers(id TEXT,job_id TEXT,kind TEXT,account_id TEXT)",
+        ] {
+            query(sql).execute(&pool).await.unwrap();
+        }
+        for sql in include_str!("../migrations/026_routines.sql")
+            .split(';')
+            .filter(|sql| !sql.trim().is_empty())
+        {
+            query(sql).execute(&pool).await.unwrap();
+        }
+        query("INSERT INTO routines(id,name,prompt,schedule,model,created_at,updated_at,metadata_json,tool_catalog_version) VALUES ('selection','Synthetic','Keep notes','every 1h',?,'now','now','{}',1)")
+            .bind(model).execute(&pool).await.unwrap();
+        pool
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::providers::replace_current_settings_for_tests(
+                crate::providers::default_settings_for_tests(),
+            );
+        }
+    }
+    #[tokio::test]
+    async fn selection41_routine_claim_uses_only_installed_eligible_cli_independently_of_chat_and_notes(
+    ) {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = Restore;
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Agy };
+        settings.llm_usage.notes = ProviderRef::Cli { id: CliKind::Codex };
+        settings.llm_cli_default_applied = true;
+        crate::providers::replace_current_settings_for_tests(settings);
+        for only in [CliKind::Claude, CliKind::Codex] {
+            let (_directory, env) = environment(&[only]);
+            let pool = fixture("auto").await;
+            let claimed = claim_with_connector_guard_for_turn(
+                &pool,
+                "selection",
+                "manual",
+                false,
+                None,
+                None,
+                &env,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(claimed.model, crate::chat_engine::engine_model_id(only));
+            assert_eq!(
+                query("SELECT model FROM routine_runs")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .get::<String, _>("model"),
+                claimed.model
+            );
+            assert_eq!(
+                crate::llm::provider_for(crate::llm::registry::LlmUsage::Chat),
+                ProviderRef::Cli { id: CliKind::Agy }
+            );
+            assert_eq!(
+                crate::llm::provider_for(crate::llm::registry::LlmUsage::Notes),
+                ProviderRef::Cli { id: CliKind::Codex }
+            );
+        }
+    }
+    #[tokio::test]
+    async fn selection41_refused_engine_leaves_no_claim_run_or_effect() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = Restore;
+        for (model, installed, code) in [
+            ("auto", vec![], "routine_engine_unavailable"),
+            ("auto", vec![CliKind::Agy], "routine_engine_unavailable"),
+            (
+                "__clovy_cli_engine__:agy",
+                vec![CliKind::Agy, CliKind::Codex],
+                "routine_engine_not_allowed",
+            ),
+            (
+                "__clovy_cli_engine__:claude",
+                vec![CliKind::Codex],
+                "llm_cli_not_installed",
+            ),
+            (
+                "__clovy_cli_engine__:codex",
+                vec![CliKind::Claude],
+                "llm_cli_not_installed",
+            ),
+            (
+                "__clovy_cli_engine__:pi",
+                vec![CliKind::Pi, CliKind::Claude],
+                "routine_engine_not_allowed",
+            ),
+            (
+                "explicit-remote-model",
+                vec![CliKind::Codex],
+                "routine_engine_not_allowed",
+            ),
+        ] {
+            let (_directory, env) = environment(&installed);
+            let pool = fixture(model).await;
+            let error = claim_with_connector_guard_for_turn(
+                &pool,
+                "selection",
+                "manual",
+                false,
+                None,
+                None,
+                &env,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            let row = query("SELECT claim_token,model FROM routines")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(row.get::<Option<String>, _>("claim_token"), None);
+            assert_eq!(row.get::<String, _>("model"), model);
+            for table in ["routine_runs", "agent_sessions", "agent_runs"] {
+                assert_eq!(
+                    query(&format!("SELECT COUNT(*) AS n FROM {table}"))
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                        .get::<i64, _>("n"),
+                    0
+                );
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SelectionDiagnostics(std::sync::Arc<std::sync::Mutex<Vec<BTreeMap<String, String>>>>);
+    impl tracing::Subscriber for SelectionDiagnostics {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0
+                        .insert(field.name().to_string(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    async fn assert_batch_continues_after_refusal(model: &str, code: &str) {
+        use tracing::instrument::WithSubscriber;
+        let (_directory, env) = environment(&[CliKind::Codex]);
+        let pool = fixture("auto").await;
+        query("DELETE FROM routines").execute(&pool).await.unwrap();
+        for (id, model) in [
+            ("A", "auto"),
+            ("B", model),
+            ("C", "__clovy_cli_engine__:codex"),
+        ] {
+            query("INSERT INTO routines(id,name,prompt,schedule,model,next_run_at,created_at,updated_at,metadata_json,tool_catalog_version) VALUES (?,?,'Keep notes','every 1h',?,'2000-01-01T00:00:00Z','now','now','{}',1)")
+                .bind(id).bind(id).bind(model).execute(&pool).await.unwrap();
+        }
+        let diagnostics = SelectionDiagnostics::default();
+        let result = claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics.clone())
+            .await;
+        // A is already committed even on the old failing path; dropping its
+        // returned batch would strand this exact durable claim.
+        let first = query("SELECT claim_token FROM routines WHERE id='A'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(first.get::<Option<String>, _>("claim_token").is_some());
+        let claims = result.expect("B's selection refusal must not discard A or prevent C");
+        let delivered = claims
+            .into_iter()
+            .map(|claim| {
+                (
+                    claim.routine_id,
+                    claim.routine_run_id,
+                    claim.token,
+                    claim.model,
+                )
+            })
+            .collect::<Vec<_>>();
+        let rows = query(
+            "SELECT routine_id,id,claim_token,model,status FROM routine_runs ORDER BY routine_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let persisted = rows
+            .iter()
+            .map(|row| {
+                assert_eq!(row.get::<String, _>("status"), "queued");
+                (
+                    row.get::<String, _>("routine_id"),
+                    row.get::<String, _>("id"),
+                    row.get::<String, _>("claim_token"),
+                    row.get::<String, _>("model"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delivered, persisted);
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|claim| claim.0.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        for (id, _, token, resolved) in &delivered {
+            assert_eq!(resolved, "__clovy_cli_engine__:codex");
+            assert!(!token.is_empty());
+            let saved: String = query("SELECT claim_token FROM routines WHERE id=?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("claim_token");
+            assert_eq!(&saved, token);
+        }
+        let refused = query("SELECT model,claim_token FROM routines WHERE id='B'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(refused.get::<String, _>("model"), model);
+        assert_eq!(refused.get::<Option<String>, _>("claim_token"), None);
+        {
+            let events = diagnostics.0.lock().unwrap();
+            let event = events
+                .iter()
+                .find(|fields| fields.get("routine_id").is_some_and(|id| id == "B"))
+                .expect("refusal must emit an identified diagnostic");
+            assert_eq!(event.get("error_code").map(String::as_str), Some(code));
+            assert!(event.get("error").is_some_and(|cause| !cause.is_empty()));
+        }
+        assert!(claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            query("SELECT COUNT(*) AS n FROM routine_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<i64, _>("n"),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_missing_explicit_engine_does_not_strand_confirmed_or_later_claims() {
+        assert_batch_continues_after_refusal(
+            "__clovy_cli_engine__:claude",
+            "llm_cli_not_installed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_ineligible_engine_does_not_strand_confirmed_or_later_claims() {
+        assert_batch_continues_after_refusal(
+            "__clovy_cli_engine__:agy",
+            "routine_engine_not_allowed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_storage_failure_is_not_an_engine_refusal() {
+        use tracing::instrument::WithSubscriber;
+        let (_directory, env) = environment(&[CliKind::Codex]);
+        let pool = fixture("auto").await;
+        query("UPDATE routines SET next_run_at='2000-01-01T00:00:00Z'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        query("CREATE TRIGGER reject_claim BEFORE UPDATE OF claim_token ON routines BEGIN SELECT RAISE(ABORT, 'synthetic storage failure'); END")
+            .execute(&pool).await.unwrap();
+        let diagnostics = SelectionDiagnostics::default();
+        let error = claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "routine_storage_failed");
+        assert!(error.message.contains("synthetic storage failure"));
+        assert!(diagnostics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| !event.contains_key("routine_id")));
+        assert_eq!(
+            query("SELECT COUNT(*) AS n FROM routine_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<i64, _>("n"),
+            0
+        );
+        assert_eq!(
+            query("SELECT claim_token FROM routines")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<Option<String>, _>("claim_token"),
+            None
+        );
     }
 }

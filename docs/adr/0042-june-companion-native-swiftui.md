@@ -52,3 +52,7 @@ the system browser.
 - Native SF Symbols are allowed for this application because the repository's
   central icon packages are web-only. User-facing copy and weight rules still
   apply.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

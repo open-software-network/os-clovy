@@ -13,7 +13,7 @@ import { ProviderLogo } from "../components/settings/ProviderLogo";
 
 describe("ProviderLogo", () => {
   it("uses the standalone Clovy glyph for Auto regardless of its routing provider", () => {
-    render(<ProviderLogo provider="venice" id="open-software/auto" name="Auto" />);
+    render(<ProviderLogo provider="openrouter" id="open-software/auto" name="Auto" />);
 
     const clovyMark = screen.getByRole("img", { name: "Clovy" });
     expect(clovyMark).toBeInTheDocument();
@@ -22,15 +22,22 @@ describe("ProviderLogo", () => {
     expect(clovyMark).toHaveAttribute("width", "14");
     expect(clovyMark).toHaveAttribute("height", "14");
     expect(screen.queryByLabelText("OpenSoftware")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Venice")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("OpenRouter")).not.toBeInTheDocument();
+  });
+
+  it("does not classify whisper-large-v3-turbo from provider groq as fal", () => {
+    render(
+      <ProviderLogo provider="groq" id="whisper-large-v3-turbo" name="Whisper Large V3 Turbo" />,
+    );
+
+    expect(screen.queryByLabelText("Fal")).not.toBeInTheDocument();
   });
 
   it("does not classify broad Anthropic family words as Claude", () => {
-    render(<ProviderLogo provider="venice" id="poetry-haiku" name="Haiku" />);
+    render(<ProviderLogo provider="openrouter" id="poetry-haiku" name="Haiku" />);
 
     expect(screen.queryByLabelText("Claude")).not.toBeInTheDocument();
   });
-
   it("classifies xAI providers as Grok", () => {
     render(<ProviderLogo provider="xai" id="grok-4" name="Grok 4" />);
 

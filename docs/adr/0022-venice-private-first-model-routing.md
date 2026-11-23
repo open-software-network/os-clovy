@@ -44,3 +44,18 @@ Route-authenticated settlement is a follow-up if precise per-route billing is
 needed. Operational rollback is to point June API's service-managed text base
 URL back to the direct Venice endpoint or remove the `preferred` header while
 the routing service is corrected.
+
+## Addendum - 2026-10-08 (Venice retired; remote text on OpenRouter)
+
+The owner retired Venice as a provider (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`). Service-managed remote text
+(chat, note generation, dictation cleanup) now runs on OpenRouter through Clovy
+API. The Venice private-first routing above, the `X-Confidential-Compute`
+header, and the Venice BYOK exception no longer apply. OpenRouter does not
+inherit Venice's zero-retention or TEE route, so Clovy no longer presents these
+calls as zero-retention or TEE-backed: clients show only the privacy
+properties the catalog actually reports and drop the retired claims. Clovy API
+itself still runs in its TEE; that is a separate guarantee. A user's own
+OpenRouter key travels as `x-openrouter-api-key` on text routes only, and
+Clovy Auto never uses it. Stored notes and transcripts keep the provider they
+recorded.

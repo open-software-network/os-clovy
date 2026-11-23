@@ -5,14 +5,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot "artifacts\windows-unsigned" }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot "artifacts\windows-signed" }
 elseif (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory = Join-Path $repoRoot $OutputDirectory }
 $callerLocation = Get-Location
-$hadPrebuilt = Test-Path Env:CLOVY_AGENT_RUNTIME_PREBUILT
-$previousPrebuilt = $env:CLOVY_AGENT_RUNTIME_PREBUILT
-$hadRuntimeTarget = Test-Path Env:CLOVY_AGENT_RUNTIME_TARGET
-$previousRuntimeTarget = $env:CLOVY_AGENT_RUNTIME_TARGET
 $previousPath = $env:PATH
+$hadSignTool = Test-Path Env:WINDOWS_SIGNTOOL_PATH
+$previousSignTool = $env:WINDOWS_SIGNTOOL_PATH
 $mutexPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]"\/").ToUpperInvariant()
 $mutexBytes = [System.Text.Encoding]::UTF8.GetBytes($mutexPath)
 $mutexHasher = [System.Security.Cryptography.SHA256]::Create()
@@ -36,6 +34,11 @@ try {
     [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64
   ) { throw "Native x64 Windows is required." }
   foreach ($tool in @("node", "pnpm", "rustc", "cargo")) { Require-Command $tool }
+  foreach ($tool in @("perl", "nasm")) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+      throw "SQLCipher requires Strawberry Perl and NASM on PATH; missing tool: $tool."
+    }
+  }
   $nodeVersionOutput = & node --version
   $nodeVersionExit = $LASTEXITCODE
   $nodeVersion = "$nodeVersionOutput".Trim()
@@ -56,9 +59,20 @@ try {
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "$targetLibDirectory" -PathType Container)) {
     throw "The $targetTriple Rust target is required."
   }
-  if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-    throw "Unsigned Windows builds require WINDOWS_CERTIFICATE_PASSWORD to be unset."
+  if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
+    throw "WINDOWS_CERTIFICATE_THUMBPRINT is required: Computer use authenticates the signed helper, engine and Clovy host by publisher."
   }
+  if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNTOOL_PATH)) {
+    $signCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($signCommand) { $env:WINDOWS_SIGNTOOL_PATH = $signCommand.Source }
+    else {
+      $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+      $signTools = @(Get-ChildItem -LiteralPath $sdkRoot -Filter signtool.exe -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "x64" } | Sort-Object FullName -Descending)
+      if ($signTools.Count -eq 0) { throw "The Windows SDK SignTool is required for the nested Computer use executables." }
+      $env:WINDOWS_SIGNTOOL_PATH = $signTools[0].FullName
+    }
+  }
+  if (-not (Test-Path -LiteralPath $env:WINDOWS_SIGNTOOL_PATH -PathType Leaf)) { throw "WINDOWS_SIGNTOOL_PATH is not a usable executable." }
   $makensisCommand = Get-Command makensis.exe -ErrorAction SilentlyContinue
   $makensisCandidates = @()
   if (${env:ProgramFiles(x86)}) { $makensisCandidates += Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe" }
@@ -76,54 +90,62 @@ try {
 
   Set-Location -LiteralPath $repoRoot
   New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-  Get-ChildItem -LiteralPath $OutputDirectory -File -Filter "*-setup.exe" | Remove-Item -Force
+  Get-ChildItem -LiteralPath $OutputDirectory -File -Filter "*-setup.exe*" | Remove-Item -Force
   $cargoMetadataOutput = & cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1
   if ($LASTEXITCODE -ne 0) { throw "Could not resolve Cargo's target directory." }
   $cargoTargetDirectory = ("$cargoMetadataOutput" | ConvertFrom-Json).target_directory
   if ([string]::IsNullOrWhiteSpace($cargoTargetDirectory)) { throw "Cargo metadata did not report a target directory." }
-  & pnpm agent-runtime:build
-  if ($LASTEXITCODE -ne 0) { throw "Agent runtime TypeScript build failed." }
-  Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT -ErrorAction SilentlyContinue
-  & node scripts/build-agent-runtime.mjs --target windows
-  if ($LASTEXITCODE -ne 0) { throw "Windows agent runtime SEA build failed." }
-
   $releaseDirectory = Join-Path $cargoTargetDirectory "$targetTriple\release"
   $nsisDirectory = Join-Path $releaseDirectory "bundle\nsis"
   if (Test-Path -LiteralPath $nsisDirectory -PathType Container) {
-    Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe" | Remove-Item -Force
+    Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe*" | Remove-Item -Force
   }
-  $appExecutable = Join-Path $releaseDirectory "os-june.exe"
+  $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
-  $env:CLOVY_AGENT_RUNTIME_PREBUILT = "1"
-  $env:CLOVY_AGENT_RUNTIME_TARGET = "windows"
-  & node scripts/tauri-build.mjs --target $targetTriple --no-sign
-  if ($LASTEXITCODE -ne 0) { throw "Unsigned Tauri release build failed." }
-  if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $previousPrebuilt } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT }
-  if ($hadRuntimeTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $previousRuntimeTarget } else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET }
+  # Cargo validates bundled browser resources while preparing the helper.
+  & node scripts/prepare-agent-browser.mjs --release --target $targetTriple
+  if ($LASTEXITCODE -ne 0) { throw "Browser preparation failed." }
+  # Sign every nested executable before Tauri signs the host and installer.
+  # A current-user certificate keeps the helper and host on one publisher.
+  & node scripts/prepare-computer-use.mjs --release --target $targetTriple
+  if ($LASTEXITCODE -ne 0) { throw "Computer use helper/engine preparation failed." }
+  $hasUpdaterKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+  $tauriArgs = @("--target", $targetTriple)
+  if ($hasUpdaterKey) {
+    $tauriArgs += @("--config", "src-tauri/tauri.windows.conf.json", "--config", "src-tauri/tauri.release.conf.json")
+  }
+  & node scripts/tauri-build.mjs @tauriArgs
+  if ($LASTEXITCODE -ne 0) { throw "Signed Tauri release build failed." }
 
   $installers = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected exactly one release NSIS installer; found $($installers.Count)." }
   if ($installers[0].Length -le 0) { throw "Release NSIS installer is empty." }
 
+  if ($hasUpdaterKey) {
+    & pnpm tauri signer sign $installers[0].FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Signing the installer with the updater key failed." }
+  }
+
   $stagedPath = Join-Path $OutputDirectory $installers[0].Name
   Copy-Item -LiteralPath $installers[0].FullName -Destination $stagedPath -Force
+  if ($hasUpdaterKey) {
+    Copy-Item -LiteralPath "$($installers[0].FullName).sig" -Destination "$stagedPath.sig" -Force
+  }
   try {
     & (Join-Path $PSScriptRoot "verify-windows-artifacts.ps1") -InstallerPath $stagedPath -SevenZipPath $sevenZipPath
     if ($LASTEXITCODE -ne 0) { throw "Staged installer verification failed." }
   }
   catch {
-    Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagedPath, "$stagedPath.sig" -Force -ErrorAction SilentlyContinue
     throw
   }
-  Write-Host "Unsigned Windows installer: $stagedPath"
+  Write-Host "Windows installer: $stagedPath"
 }
 finally {
   try {
     $env:PATH = $previousPath
-    if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $previousPrebuilt }
-    else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT -ErrorAction SilentlyContinue }
-    if ($hadRuntimeTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $previousRuntimeTarget }
-    else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET -ErrorAction SilentlyContinue }
+    if ($hadSignTool) { $env:WINDOWS_SIGNTOOL_PATH = $previousSignTool }
+    else { Remove-Item Env:WINDOWS_SIGNTOOL_PATH -ErrorAction SilentlyContinue }
     Set-Location -LiteralPath $callerLocation
   }
   finally {

@@ -67,3 +67,7 @@ after an outcome-unknown response, or retention expires.
 Persisting only final responses, relying on an in-memory lock, and replaying
 all ambiguous failures were rejected because each leaves a crash window for a
 duplicate side effect.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

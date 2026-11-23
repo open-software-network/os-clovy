@@ -1,4 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
+import { t as translate, useT } from "../../i18n";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import {
   listMemories,
   memorySettings,
@@ -44,6 +46,7 @@ export function ProjectSettingsDialog({
   onManageMemory,
   onRequestDelete,
 }: ProjectSettingsDialogProps) {
+  const t = useT();
   const [name, setName] = useState(folder.name);
   const [description, setDescription] = useState(folder.description ?? "");
   const [instructions, setInstructions] = useState(folder.instructions ?? "");
@@ -53,6 +56,21 @@ export function ProjectSettingsDialog({
   const [memoryCount, setMemoryCount] = useState<number>();
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   const [memoryError, setMemoryError] = useState<string>();
+  useClovyDataChanged("memories", async (_change, isCurrent) => {
+    if (!open) return;
+    try {
+      const [nextMemories, settings] = await Promise.all([
+        listMemories(folder.id, false),
+        memorySettings(),
+      ]);
+      if (!isCurrent()) return;
+      setMemoryCount(nextMemories.length);
+      setMemoryEnabled(settings.enabled);
+      setMemoryError(undefined);
+    } catch (caught) {
+      if (isCurrent()) setMemoryError(messageFromCaught(caught));
+    }
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -92,7 +110,9 @@ export function ProjectSettingsDialog({
     const trimmedName = name.trim();
     if (!trimmedName || saving) return;
     if (instructions.length > INSTRUCTIONS_MAX_CHARS) {
-      setError(`Instructions cannot exceed ${INSTRUCTIONS_MAX_CHARS} characters.`);
+      setError(
+        t("notes.projectSettings.instructionsTooLong", { max: String(INSTRUCTIONS_MAX_CHARS) }),
+      );
       return;
     }
     setSaving(true);
@@ -133,7 +153,7 @@ export function ProjectSettingsDialog({
     <Dialog
       open={open}
       onClose={handleClose}
-      title="Project settings"
+      title={t("notes.projectSettings.title")}
       width={520}
       className="project-settings-dialog"
       initialFocusSelector='input[name="project-name"]'
@@ -148,7 +168,7 @@ export function ProjectSettingsDialog({
               onRequestDelete();
             }}
           >
-            Delete project
+            {t("notes.projectSettings.delete")}
           </button>
           <div className="dialog-footer-group">
             <button
@@ -157,7 +177,7 @@ export function ProjectSettingsDialog({
               onClick={handleClose}
               disabled={saving}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="submit"
@@ -165,14 +185,14 @@ export function ProjectSettingsDialog({
               className="primary-action primary-solid"
               disabled={saving || name.trim().length === 0 || overLimit}
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? t("notes.folders.edit.saving") : t("common.save")}
             </button>
           </div>
         </>
       }
     >
       <form id="project-settings-form" className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Name" htmlFor="project-name">
+        <DialogField label={t("notes.folders.field.name")} htmlFor="project-name">
           <input
             id="project-name"
             name="project-name"
@@ -184,12 +204,12 @@ export function ProjectSettingsDialog({
           />
         </DialogField>
 
-        <DialogField label="Description" htmlFor="project-description">
+        <DialogField label={t("notes.folders.field.description")} htmlFor="project-description">
           <textarea
             id="project-description"
             name="project-description"
             className="dialog-textarea"
-            placeholder="What belongs in this project?"
+            placeholder={t("notes.folders.field.descriptionPlaceholder")}
             value={description}
             onChange={(event) => setDescription(event.currentTarget.value)}
             rows={2}
@@ -198,17 +218,17 @@ export function ProjectSettingsDialog({
         </DialogField>
 
         <DialogField
-          label="Instructions"
+          label={t("notes.projectSettings.instructions")}
           htmlFor="project-instructions"
-          hint="Clovy follows these in every session started in this project."
+          hint={t("notes.projectSettings.instructionsHint")}
         >
           <textarea
             id="project-instructions"
             name="project-instructions"
             className="dialog-textarea"
-            placeholder="e.g. Keep answers short. Reference the meeting notes in this project."
+            placeholder={t("notes.projectSettings.instructionsPlaceholder")}
             value={instructions}
-            aria-label="Project instructions"
+            aria-label={t("notes.projectSettings.instructionsLabel")}
             aria-invalid={overLimit || undefined}
             rows={4}
             onChange={(event) => {
@@ -218,7 +238,10 @@ export function ProjectSettingsDialog({
           />
           {instructions.length >= INSTRUCTIONS_COUNT_FROM ? (
             <p className="dialog-field-count" data-over-limit={overLimit || undefined}>
-              {instructions.length} / {INSTRUCTIONS_MAX_CHARS} characters
+              {t("notes.projectSettings.charCount", {
+                count: String(instructions.length),
+                max: String(INSTRUCTIONS_MAX_CHARS),
+              })}
             </p>
           ) : null}
         </DialogField>
@@ -233,19 +256,19 @@ export function ProjectSettingsDialog({
           <div className="settings-row project-settings-memory-toggle">
             <div className="settings-row-info">
               <h3 id="project-memory-heading" className="settings-row-title">
-                Memory
+                {t("notes.projectSettings.memory")}
               </h3>
               <p className="settings-row-description">
                 {memoryEnabled
-                  ? "Clovy can save and use memories in this project."
-                  : "Memory is turned off in Settings > Memory."}
+                  ? t("notes.projectSettings.memoryOn")
+                  : t("notes.projectSettings.memoryOff")}
               </p>
             </div>
             <div className="settings-row-control">
               <Switch
                 checked={!folder.memoryDisabled}
                 disabled={!memoryEnabled}
-                aria-label="Remember things in this project"
+                aria-label={t("notes.projectSettings.rememberLabel")}
                 onCheckedChange={(remember) => void toggleProjectMemory(remember)}
               />
             </div>
@@ -260,7 +283,7 @@ export function ProjectSettingsDialog({
                 onManageMemory(folder.id);
               }}
             >
-              Manage memories
+              {t("notes.projectSettings.manageMemories")}
             </button>
           </div>
           {memoryError ? (
@@ -275,9 +298,8 @@ export function ProjectSettingsDialog({
 }
 
 function memoryCountLabel(count: number | undefined) {
-  if (count === undefined) return "Loading memories…";
-  if (count === 0) return "No memories saved yet";
-  return `${count} ${count === 1 ? "memory" : "memories"} saved`;
+  if (count === undefined) return translate("notes.projectSettings.loadingMemories");
+  return translate("notes.projectSettings.memoryCount", { count });
 }
 
 function messageFromCaught(caught: unknown) {

@@ -10,6 +10,7 @@ type SwitchProps = {
   disabled?: boolean;
   "aria-label"?: string;
   "aria-labelledby"?: string;
+  "aria-describedby"?: string;
 };
 
 export function Switch({
@@ -18,6 +19,7 @@ export function Switch({
   disabled,
   "aria-label": ariaLabel,
   "aria-labelledby": ariaLabelledby,
+  "aria-describedby": ariaDescribedby,
 }: SwitchProps) {
   return (
     <button
@@ -26,6 +28,7 @@ export function Switch({
       aria-checked={checked}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledby}
+      aria-describedby={ariaDescribedby}
       data-state={checked ? "checked" : "unchecked"}
       disabled={disabled}
       onClick={() => onCheckedChange(!checked)}

@@ -2,16 +2,16 @@
 
 ## Supported versions
 
-Security fixes target `main` and the latest shipped Clovy desktop and Clovy API
-release. Older releases may receive fixes when the impact warrants it.
+Security fixes target `main`. There are no published releases; build from the
+latest `main`.
 
 ## Reporting a vulnerability
 
 Please do not file public issues for suspected vulnerabilities.
 
 Use GitHub private vulnerability reporting when it is enabled for this
-repository. If it is not available, email `security@opensoftware.co` or contact
-a repository maintainer privately.
+repository. If it is not available, contact the repository maintainer
+privately.
 
 Include the affected component, reproduction steps, impact, and any relevant
 logs or proof of concept. We will acknowledge the report, keep the discussion
@@ -21,12 +21,10 @@ private while we investigate, and coordinate disclosure timing with you.
 
 In scope:
 
-- Clovy desktop app authentication, local storage, updater, permissions, and
-  signed release flow.
-- Clovy API authentication, model proxying, billing authorization, request
-  validation, logging, and deployment configuration.
-- GitHub Actions, release automation, container publishing, and signing
-  material handling.
+- Clovy desktop app local storage, permissions, and credential handling.
+- Direct provider credential isolation, request validation, bounded media
+  downloads, and CLI/MCP turn authorization.
+- GitHub Actions workflows.
 
 Out of scope:
 

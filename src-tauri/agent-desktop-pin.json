@@ -1,0 +1,17 @@
+{
+  "source": "https://github.com/vercel-labs/agent-desktop.git",
+  "sourceCommit": "9eb9b296192fcb70bda25e918cd6dd66abfa3d0d",
+  "version": "1.0.2",
+  "protocolVersion": "2.5",
+  "cargoLockSha256": "3be8a5fdfc899e326249e61c96ca9756bc3d4078540e316f0e011aba6d9c40d7",
+  "license": "Apache-2.0",
+  "licenseSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "recentSourceReview": "Owner-selected exact post-tag commit: Windows UIA COM shutdown 0768da43, CR LF insertion d77f910d, and physical overlay coordinates 9b1a4346; source comparison and native acceptance limits recorded in agent-desktop/source-review.md. Dependency cooldown unchanged, zero exclusions.",
+  "bundleName": "Clovy Computer Use Driver.app",
+  "bundleIdentifier": "dev.guilhermexp.clovy.computer-use-driver",
+  "executable": "clovy-computer-use-driver",
+  "minimumMacOSVersion": "14.0",
+  "patchSha256": "541a7e23b12ec9d0671912d76955e30e08a3412080673cb4b6d2f964d4a2ce03",
+  "ownedRuntimeSourceSha256": "48342df75f2784ea7d32ce32b2f33bdc71f2c1865eaaf7eb084ea739e9b9740a",
+  "sourceReviewSha256": "0d1da63f8c3f06de8e8393891989e8c0550f0bb094825eef7c64ebb2207a4cd6"
+}

@@ -13,7 +13,10 @@ export type UseRecordingControlsDependencies = {
   crossPartitionRecordingNoteIdRef: React.MutableRefObject<string | undefined>;
   dispatch: React.Dispatch<NotesAction>;
   finishingSessionsRef: React.MutableRefObject<Set<string>>;
-  handleStartAgentRecording: (requestedSourceMode: RecordingSourceMode) => Promise<NoteDto>;
+  handleStartAgentRecording: (
+    requestedSourceMode: RecordingSourceMode,
+    target?: { noteId: string; profile: string; requestId?: string },
+  ) => Promise<NoteDto>;
   recordNoticesDemoRef: React.MutableRefObject<RecordNoticesDemoApi | null>;
   recordingNoteIdRef: React.MutableRefObject<string | undefined>;
   recordingStatusRef: React.MutableRefObject<RecordingStatusDto | undefined>;

@@ -49,6 +49,24 @@ function Find-SignTool {
 }
 
 $target = Resolve-RequiredFile $TargetPath "TargetPath"
+$thumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
+  # Keep prepared helper/engine bytes stable: their signed SHA-256 values are
+  # compiled into their caller before the bundler signs the outer executable.
+  $existing = Get-AuthenticodeSignature -FilePath $target
+  if ($existing.Status -eq "Valid" -and $existing.SignerCertificate.Thumbprint -eq $thumbprint) {
+    Write-Host "[windows-sign] Existing publisher signature verified; preserving $target"
+    exit 0
+  }
+  $signtool = Find-SignTool
+  $timestampUrl = $env:WINDOWS_SIGNING_TIMESTAMP_URL
+  if ([string]::IsNullOrWhiteSpace($timestampUrl)) { $timestampUrl = "http://timestamp.digicert.com" }
+  & $signtool sign /sha1 $thumbprint /fd SHA256 /td SHA256 /tr $timestampUrl /d "Clovy" $target
+  if ($LASTEXITCODE -ne 0) { Fail "signtool certificate-store signing failed." }
+  $signature = Get-AuthenticodeSignature -FilePath $target
+  if ($signature.Status -ne "Valid") { Fail "Certificate-store signature verification failed." }
+  exit 0
+}
 $certificatePathValue = $env:WINDOWS_CERTIFICATE_PATH
 $certificatePassword = $env:WINDOWS_CERTIFICATE_PASSWORD
 if ([string]::IsNullOrWhiteSpace($certificatePathValue) -and [string]::IsNullOrWhiteSpace($certificatePassword)) {

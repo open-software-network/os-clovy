@@ -1,44 +1,22 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { markAgentNewSessionPending } from "../components/agent/session-persistence";
-import type { AgentSessionsListHandle } from "../components/agent/AgentSessionsList";
 import type { NotesListHandle } from "../components/notes-list/NotesList";
 import type { SettingsTab } from "../components/settings/AppSettings";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import { defaultNav, makeTabId, type Tab, type TabNav } from "./tabs/tabs";
 import type { LiveTranscriptEventDto } from "../lib/tauri";
-import { isMacLikePlatform, isWindowsPlatform } from "../lib/platform";
-import type { AgentSessionStatusDetail } from "../lib/agent-events";
 import { useCurrentDataPartitionName } from "../lib/data-partition";
-import type { SessionPartitionMap } from "../lib/session-partition-filter";
 import type { RecordingInactivityTracker } from "../lib/recording-inactivity";
 import {
   createRecordingTelemetryStore,
   type RecordingTelemetryStore,
 } from "../lib/recording-telemetry-store";
-import { getAgentHudEnabled } from "../lib/agent-hud-settings";
 import type { NoteDto } from "../lib/tauri";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
 import type { RecordingSourceMode, RecordingSourceReadinessDto } from "../lib/tauri";
-import { useAccountStatus } from "../lib/account-status";
-import { shouldReplayOnboarding } from "../lib/onboarding";
-import type { ClovyUpdate } from "../lib/updater";
 import { createInitialState, notesReducer } from "./state/app-state";
-import {
-  INITIAL_UPDATE_STATUS_DISPLAY,
-  updateStatusDisplayReducer,
-  type UpdateInstallProgress,
-  type UpdatePromptPayload,
-} from "./update-decision";
 import { SIDEBAR_DEFAULT_WIDTH, type RecordingInactivityPrompt } from "./app-shell";
 
 export function useAppState() {
-  const replayOnboarding = shouldReplayOnboarding();
   const currentDataPartitionName = useCurrentDataPartitionName();
-  const initialView: SidebarView = isMacLikePlatform()
-    ? "home"
-    : isWindowsPlatform()
-      ? "agent"
-      : "notes";
   const [dataPartitionRefreshRevision, setDataPartitionRefreshRevision] = useState(0);
   const [state, dispatch] = useReducer(notesReducer, undefined, createInitialState);
   const [error, setError] = useState<string | null>(null);
@@ -47,111 +25,38 @@ export function useAppState() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [sidebarTransition, setSidebarTransition] = useState<"none" | "smooth">("none");
   const [bootstrapped, setBootstrapped] = useState(false);
-  // macOS opens the persistent Home conversation. Windows retains the fresh
-  // agent launch, while Linux keeps Notes until it becomes a supported target.
-  const [activeView, setActiveView] = useState<SidebarView>(() => {
-    if (initialView === "agent") markAgentNewSessionPending();
-    return initialView;
-  });
-  const activeViewRef = useRef<SidebarView>(activeView);
+  const [activeView, setActiveView] = useState<SidebarView>("today");
+  const activeViewRef = useRef(activeView);
   activeViewRef.current = activeView;
-  // Browser-style tabs. Each tab is a saved navigation snapshot; the active tab
-  // mirrors live navigation (so a single tab behaves exactly like before),
-  // while switching or opening a tab restores its snapshot. The first tab
-  // matches the launch view.
-  const [tabs, setTabs] = useState<Tab[]>(() => [
-    {
-      id: makeTabId(),
-      nav:
-        initialView === "home"
-          ? { view: "home" }
-          : initialView === "agent"
-            ? defaultNav()
-            : { view: "notes" },
-    },
-  ]);
-  const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0]!.id);
+  const [activeTabId, setActiveTabId] = useState(makeTabId);
+  const [tabs, setTabs] = useState<Tab[]>(() => [{ id: activeTabId, nav: defaultNav() }]);
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   // Set while restoring a tab's snapshot into live state: the capture effect
   // skips writes until live navigation settles onto the target (note loads are
   // async), so a half-applied snapshot never overwrites the tab it came from.
   const restoreTargetRef = useRef<TabNav | null>(null);
-  // Reactive copy of the known agent sessions for the "view all" list and
-  // project (folder) surfaces; the menu-bar refs below stay the source for
-  // native menu state.
-  const [agentSessions, setAgentSessions] = useState<AgentSessionDto[]>([]);
-  const [activeAgentSessionId, setActiveAgentSessionId] = useState<string>();
-  const activeAgentSessionIdRef = useRef(activeAgentSessionId);
-  activeAgentSessionIdRef.current = activeAgentSessionId;
-  const [activeAgentSessionSeed, setActiveAgentSessionSeed] = useState<AgentSessionDto>();
-  const setActiveAgentSession = useCallback((session: AgentSessionDto | undefined) => {
-    setActiveAgentSessionId(session?.id);
-    setActiveAgentSessionSeed(session);
-  }, []);
-  const [agentWorkingSessionIds, setAgentWorkingSessionIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const [agentWaitingSessionIds, setAgentWaitingSessionIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  // Stored session id -> project (folder) ids. Project assignments are tracked
-  // separately from note state.
-  const [sessionFolders, setSessionFolders] = useState<Record<string, string[]>>({});
-  // Stored session id -> completed_at ISO. Clovy-owned. See JUN-203.
-  const [completedSessions, setCompletedSessions] = useState<Record<string, string>>({});
-  // In-flight completion writes per stored session id, so rapid toggles for one
-  // session persist in the order the user made them (see
-  // handleToggleSessionCompleted).
-  const sessionCompletionWritesRef = useRef(new Map<string, Promise<unknown>>());
-  // Stored session ids the user has toggled locally. The initial load is a
-  // snapshot of the pre-toggle database, so those ids must survive it, while
-  // every other row it carries still applies (see the boot effect).
-  const sessionCompletionTouchedRef = useRef(new Set<string>());
-  // Mirrors `completedSessions` for the menu-bar publisher, which is a stable
-  // callback and so cannot close over the state directly.
-  const completedSessionsRef = useRef<Record<string, string>>({});
-  // `null` means the mapping has never loaded. An empty object is meaningful:
-  // it confirms every unmapped stored session belongs to Default. Keeping
-  // those states distinct lets failed reads retain a known-good map while the
-  // first failure exposes no sessions at all.
-  const sessionPartitionsRef = useRef<SessionPartitionMap | null>(null);
-  const [moveDialogSessionIds, setMoveDialogSessionIds] = useState<string[] | null>(null);
-  // Where an open agent session was drilled into from — a project or the
-  // Routines run history — drives the breadcrumb above the agent workspace,
-  // mirroring notes-from-folder.
-  const [agentOrigin, setAgentOrigin] = useState<
-    { kind: "project"; folderId: string } | { kind: "routines" }
-  >();
-  // Set when "New session" is started from a project: the next brand-new
-  // session AgentWorkspace selects gets filed into that project.
-  const pendingSessionProjectRef = useRef<{
-    folderId: string;
-    knownSessionIds: Set<string>;
-    partition: string;
-  } | null>(null);
-  const agentMenuBarSessionsRef = useRef<AgentSessionDto[]>([]);
-  const agentMenuBarWorkingSessionIdsRef = useRef<Set<string>>(new Set());
-  const agentMenuBarWaitingSessionIdsRef = useRef<Set<string>>(new Set());
-  const agentMenuBarLastStatusRef = useRef<AgentSessionStatusDetail>();
-  const agentHudEnabledRef = useRef(getAgentHudEnabled());
+  const folderChangesRef = useRef({
+    notes: new Map<string, number>(),
+    deletedProjects: new Map<string, number>(),
+  });
   const mainPanelBodyRef = useRef<HTMLDivElement | null>(null);
   const noteDetailScrollRef = useRef<HTMLDivElement | null>(null);
   const notesListRef = useRef<NotesListHandle | null>(null);
-  const agentSessionsListRef = useRef<AgentSessionsListHandle | null>(null);
   // Where the back affordance in settings returns to — captured when settings
   // is opened so "back" lands the user where they were, not on Notes.
-  const [settingsReturnView, setSettingsReturnView] = useState<SidebarView>("notes");
+  const [settingsReturnView, setSettingsReturnView] = useState<SidebarView>("today");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   // When the Memory tab is opened from a project ("Manage memories"), the
   // manager pre-filters to that project. Cleared on any normal tab navigation.
   const [memoryFolderFilter, setMemoryFolderFilter] = useState<string | undefined>();
-  const openSettings = useCallback(() => {
+  const openSettings = useCallback((tab?: SettingsTab) => {
     const returnView = activeViewRef.current;
     if (returnView !== "settings") {
       setSettingsReturnView(returnView);
     }
     setMemoryFolderFilter(undefined);
+    if (tab) setSettingsTab(tab);
     setActiveView("settings");
   }, []);
   // Deep-link into Settings > Memory filtered to a project (from the project
@@ -190,22 +95,6 @@ export function useAppState() {
   const [accessibilityBannerDismissed, setAccessibilityBannerDismissed] = useState(false);
   const [systemAudioRefreshRequest, setSystemAudioRefreshRequest] = useState(0);
   const [microphoneStatus, setMicrophoneStatus] = useState<string>();
-  const [readyUpdate, setReadyUpdate] = useState<UpdatePromptPayload<ClovyUpdate> | null>(null);
-  const [updateStatusDisplay, dispatchUpdateStatusDisplay] = useReducer(
-    updateStatusDisplayReducer,
-    INITIAL_UPDATE_STATUS_DISPLAY,
-  );
-  const updateStatus = updateStatusDisplay.status;
-  const updateStatusLeaving = updateStatusDisplay.leaving;
-  const setUpdateStatus = useCallback((status: string | null, failed = false) => {
-    dispatchUpdateStatusDisplay({ type: "show", status, failed });
-  }, []);
-  const [preparingUpdate, setPreparingUpdate] = useState(false);
-  // Render-only flag for a visible manual check. checkingUpdateRef separately
-  // guards every check mode, including silent launch and periodic checks.
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [relaunchingUpdate, setRelaunchingUpdate] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<UpdateInstallProgress | null>(null);
   // `ready` only says this device is capable of system capture; the platform
   // grant/status is established by a microphone-plus-system probe.
   const systemSourceReadiness = sourceReadiness?.sources.find(
@@ -221,13 +110,6 @@ export function useAppState() {
     recordingState === "validating";
   const sourceMode: RecordingSourceMode =
     userWantsSystemAudio && systemGranted ? "microphonePlusSystem" : "microphoneOnly";
-  const {
-    account,
-    error: accountError,
-    loading: accountLoading,
-    refresh: refreshAccount,
-    setAccount,
-  } = useAccountStatus({ forceLogoutOnMount: replayOnboarding });
   // The note the active recording session belongs to. recordingStatus carries
   // no noteId, so without this the finish flow could only guess from the
   // currently selected note — wrong whenever the user browsed away while
@@ -300,40 +182,10 @@ export function useAppState() {
     tabsRef,
     activeTabIdRef,
     restoreTargetRef,
-    agentSessions,
-    setAgentSessions,
-    activeAgentSessionId,
-    setActiveAgentSessionId,
-    activeAgentSessionIdRef,
-    activeAgentSessionSeed,
-    setActiveAgentSessionSeed,
-    setActiveAgentSession,
-    agentWorkingSessionIds,
-    setAgentWorkingSessionIds,
-    agentWaitingSessionIds,
-    setAgentWaitingSessionIds,
-    sessionFolders,
-    setSessionFolders,
-    completedSessions,
-    setCompletedSessions,
-    sessionCompletionWritesRef,
-    sessionCompletionTouchedRef,
-    completedSessionsRef,
-    sessionPartitionsRef,
-    moveDialogSessionIds,
-    setMoveDialogSessionIds,
-    agentOrigin,
-    setAgentOrigin,
-    pendingSessionProjectRef,
-    agentMenuBarSessionsRef,
-    agentMenuBarWorkingSessionIdsRef,
-    agentMenuBarWaitingSessionIdsRef,
-    agentMenuBarLastStatusRef,
-    agentHudEnabledRef,
+    folderChangesRef,
     mainPanelBodyRef,
     noteDetailScrollRef,
     notesListRef,
-    agentSessionsListRef,
     settingsReturnView,
     setSettingsReturnView,
     settingsTab,
@@ -363,29 +215,9 @@ export function useAppState() {
     setSystemAudioRefreshRequest,
     microphoneStatus,
     setMicrophoneStatus,
-    readyUpdate,
-    setReadyUpdate,
-    updateStatusDisplay,
-    dispatchUpdateStatusDisplay,
-    updateStatus,
-    updateStatusLeaving,
-    setUpdateStatus,
-    preparingUpdate,
-    setPreparingUpdate,
-    checkingUpdate,
-    setCheckingUpdate,
-    relaunchingUpdate,
-    setRelaunchingUpdate,
-    updateProgress,
-    setUpdateProgress,
     systemGranted,
     captureActive,
     sourceMode,
-    account,
-    accountError,
-    accountLoading,
-    refreshAccount,
-    setAccount,
     recordingNoteIdRef,
     crossPartitionRecordingNoteIdRef,
     calendarContextNotePartitionsRef,

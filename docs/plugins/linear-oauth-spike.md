@@ -11,8 +11,8 @@
 
 Local token custody works. Linear's authorization-code flow supports PKCE with
 an optional client secret, a loopback redirect, rotating refresh tokens, and a
-revoke endpoint. No confidential exchange, backend credential, or Clovy API
-involvement is needed, so the Linear connector extends the ADR-0016 local-mode
+revoke endpoint. No confidential exchange, hosted credential store, or intermediary
+is needed, so the Linear connector extends the ADR-0016 local-mode
 pattern as-is and **no new ADR is required for v1**. The plan's ADR threshold
 (confidential token exchange, app credential, or webhook relay) is not
 triggered.

@@ -1,0 +1,54 @@
+.local-transcription-settings {
+  padding: var(--sp-4);
+  display: grid;
+  gap: var(--sp-3);
+}
+.local-transcription-engines {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+.local-transcription-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: var(--sp-3);
+  cursor: pointer;
+}
+.local-transcription-choice[data-selected="true"] {
+  border-color: var(--ring);
+  background: var(--surface-subtle);
+}
+.local-transcription-choice[data-disabled="true"] {
+  cursor: default;
+}
+.local-transcription-choice > span {
+  display: grid;
+  gap: var(--sp-1);
+}
+.local-transcription-choice input {
+  accent-color: var(--primary);
+  margin-top: var(--sp-1);
+}
+.local-transcription-name {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+.local-transcription-download {
+  display: grid;
+  gap: var(--sp-2);
+}
+.local-transcription-download progress {
+  width: 100%;
+  accent-color: var(--primary);
+}
+@media (max-width: 560px) {
+  .local-transcription-engines {
+    grid-template-columns: 1fr;
+  }
+}

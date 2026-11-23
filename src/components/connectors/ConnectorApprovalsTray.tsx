@@ -3,6 +3,7 @@ import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useT } from "../../i18n";
 import { actionToolLabel, providerFromServer } from "../../lib/connectors";
 import { useConnectorPolicy } from "../../lib/connector-policy";
 import { useScrollFade } from "../../lib/use-scroll-fade";
@@ -26,6 +27,7 @@ import { ConnectorProviderIcon } from "./ConnectorProviderIcon";
  * it touches and a redacted preview (redaction happens in Rust).
  */
 export function ConnectorApprovalsTray() {
+  const t = useT();
   const { policy } = useConnectorPolicy();
   const [pending, setPending] = useState<PendingConnectorApproval[]>([]);
   const [busy, setBusy] = useState(false);
@@ -167,7 +169,7 @@ export function ConnectorApprovalsTray() {
   return (
     <aside
       className="connector-approvals"
-      aria-label="Connector approvals"
+      aria-label={t("settingsPanels.approvals.label")}
       // A status role fits a passive, self-updating queue better than a live
       // region alert.
       role="status"
@@ -192,7 +194,7 @@ export function ConnectorApprovalsTray() {
               </span>
             )}
           </span>
-          Approvals needed
+          {t("settingsPanels.approvals.needed")}
           {collapsed ? <span className="status-pill">{pending.length}</span> : null}
         </button>
         <span className="connector-approvals-header-actions">
@@ -204,7 +206,7 @@ export function ConnectorApprovalsTray() {
                 disabled={busy}
                 onClick={() => void respondAll(false)}
               >
-                Deny all
+                {t("settingsPanels.approvals.denyAll")}
               </button>
               <button
                 type="button"
@@ -212,14 +214,18 @@ export function ConnectorApprovalsTray() {
                 disabled={busy}
                 onClick={() => void respondAll(true)}
               >
-                Approve all
+                {t("settingsPanels.approvals.approveAll")}
               </button>
             </span>
           ) : null}
           <button
             type="button"
             className="connector-approvals-chevron-button"
-            aria-label={collapsed ? "Expand approvals" : "Collapse approvals"}
+            aria-label={
+              collapsed
+                ? t("settingsPanels.approvals.expand")
+                : t("settingsPanels.approvals.collapse")
+            }
             aria-expanded={!collapsed}
             onClick={() => setCollapsed((current) => !current)}
           >
@@ -273,7 +279,7 @@ export function ConnectorApprovalsTray() {
                     type="button"
                     className="connector-approvals-info"
                     aria-expanded={expanded}
-                    title={expanded ? undefined : "Show the full request"}
+                    title={expanded ? undefined : t("settingsPanels.approvals.showFull")}
                     onClick={() =>
                       setExpandedIds((current) => {
                         const next = new Set(current);
@@ -292,8 +298,8 @@ export function ConnectorApprovalsTray() {
                   <button
                     type="button"
                     className="connector-approvals-item-deny"
-                    aria-label={`Deny ${summary}`}
-                    title="Deny"
+                    aria-label={t("settingsPanels.approvals.denyItem", { summary })}
+                    title={t("settingsPanels.approvals.deny")}
                     disabled={busy}
                     onClick={() => void respondOne(item.approvalId, false)}
                   >
@@ -302,8 +308,8 @@ export function ConnectorApprovalsTray() {
                   <button
                     type="button"
                     className="connector-approvals-item-approve"
-                    aria-label={`Approve ${summary}`}
-                    title="Approve"
+                    aria-label={t("settingsPanels.approvals.approveItem", { summary })}
+                    title={t("settingsPanels.approvals.approve")}
                     disabled={busy}
                     onClick={() => void respondOne(item.approvalId, true)}
                   >

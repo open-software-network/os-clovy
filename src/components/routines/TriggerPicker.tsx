@@ -3,13 +3,16 @@ import type { ScheduleDraft } from "../../lib/routine-schedule";
 import { Checkbox } from "../ui/Checkbox";
 import { InlineNotice } from "../ui/InlineNotice";
 import { Select } from "../ui/Select";
+import { type TFunction, useT } from "../../i18n";
 import { SchedulePicker } from "./SchedulePicker";
 
-const SOURCE_OPTIONS = [
-  { value: "schedule", label: "On a schedule" },
-  { value: "email_received", label: TRIGGER_META.email_received.label },
-  { value: "event_upcoming", label: TRIGGER_META.event_upcoming.label },
-];
+function sourceOptions(t: TFunction) {
+  return [
+    { value: "schedule", label: t("routines.trigger.onSchedule") },
+    { value: "email_received", label: TRIGGER_META.email_received.label },
+    { value: "event_upcoming", label: TRIGGER_META.event_upcoming.label },
+  ];
+}
 
 /**
  * The routine editor's "When" control: a schedule (the existing picker), or a
@@ -36,6 +39,7 @@ export function TriggerPicker({
   onTriggerChange: (trigger: TriggerDraft) => void;
   onScheduleChange: (draft: ScheduleDraft) => void;
 }) {
+  const t = useT();
   function switchSource(source: string) {
     if (source === trigger.source) return;
     if (source === "schedule") onTriggerChange({ source: "schedule" });
@@ -54,9 +58,9 @@ export function TriggerPicker({
       <div className="schedule-picker-controls">
         <Select
           value={trigger.source}
-          options={SOURCE_OPTIONS}
-          placeholder="When"
-          ariaLabel="Trigger type"
+          options={sourceOptions(t)}
+          placeholder={t("routines.trigger.placeholder")}
+          ariaLabel={t("routines.trigger.typeLabel")}
           onChange={switchSource}
         />
         {trigger.source === "event_upcoming" ? (
@@ -65,7 +69,7 @@ export function TriggerPicker({
               type="number"
               min={5}
               value={trigger.leadMinutes}
-              aria-label="Minutes before the meeting"
+              aria-label={t("routines.trigger.leadLabel")}
               onChange={(event) => {
                 const leadMinutes = Math.max(
                   5,
@@ -74,7 +78,7 @@ export function TriggerPicker({
                 onTriggerChange({ ...trigger, leadMinutes });
               }}
             />
-            <span className="trigger-picker-unit">minutes before</span>
+            <span className="trigger-picker-unit">{t("routines.trigger.minutesBefore")}</span>
           </>
         ) : null}
       </div>
@@ -94,20 +98,24 @@ export function TriggerPicker({
               onTriggerChange({ ...trigger, externalOnly: event.currentTarget.checked })
             }
           />
-          Only meetings with external guests
+          {t("routines.trigger.externalOnly")}
         </label>
       ) : null}
 
       {trigger.source !== "schedule" && !hasAccount ? (
         <InlineNotice
           tone="warning"
-          body="Event triggers need a connected Google account. Connect one in Settings under Plugins."
-          aria-label="Google account required"
+          body={t("routines.trigger.needsAccount")}
+          aria-label={t("routines.googleAccountRequired")}
         />
       ) : null}
 
       {trigger.source !== "schedule" && hasAccount && scopeWarning ? (
-        <InlineNotice tone="warning" body={scopeWarning} aria-label="More Google access needed" />
+        <InlineNotice
+          tone="warning"
+          body={scopeWarning}
+          aria-label={t("routines.trigger.moreAccess")}
+        />
       ) : null}
     </div>
   );

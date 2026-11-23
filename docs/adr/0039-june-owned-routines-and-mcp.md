@@ -105,3 +105,11 @@ requires an explicit reconnect in Settings.
 This keeps browser handoff, secret custody, retry policy, and server-session
 lifecycle in the trusted Rust host. The model and TypeScript agent runtime see
 only tool schemas, approval state, and sanitized tool results.
+
+## Addendum (2026-10-15)
+
+Superseded in part by
+[ADR-0062](0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md):
+Claude Code or Codex is now the default engine of new agent work and of Auto routines; this
+harness stays as the legacy Clovy engine until its tools reach the Clovy MCP
+server.

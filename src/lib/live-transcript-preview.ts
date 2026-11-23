@@ -1,4 +1,4 @@
-import type { LiveTranscriptEventDto, TranscriptDto } from "./tauri";
+import type { DiscardedTranscriptSpanDto, LiveTranscriptEventDto, TranscriptDto } from "./tauri";
 
 const LIVE_TRANSCRIPT_COHERENCE_GAP_MS = 500;
 const LIVE_TRANSCRIPT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -57,10 +57,11 @@ export function coalesceLiveTranscriptEventsForDisplay(events: LiveTranscriptEve
 export function reconcileLiveTranscriptEvents(
   events: LiveTranscriptEventDto[],
   persisted: TranscriptDto[],
+  discarded: DiscardedTranscriptSpanDto[] = [],
 ) {
   return preserveReferenceWhenUnchanged(
     events,
-    events.filter((event) => !hasAuthoritativeOverlap(event, persisted)),
+    events.filter((event) => !hasAuthoritativeCoverage(event, persisted, discarded)),
   );
 }
 
@@ -82,7 +83,7 @@ export function clearTerminalLiveTranscriptEvents(
       (event) =>
         event.noteId !== noteId ||
         protectedSessions.has(event.sessionId) ||
-        !hasAuthoritativeOverlap(event, persisted),
+        !hasAuthoritativeCoverage(event, persisted, []),
     ),
   );
 }
@@ -153,24 +154,34 @@ function preserveReferenceWhenUnchanged(
   return filtered.length === current.length ? current : filtered;
 }
 
-function hasAuthoritativeOverlap(event: LiveTranscriptEventDto, persisted: TranscriptDto[]) {
-  return persisted.some(
-    (turn) =>
-      turn.status === "succeeded" &&
-      turn.text.trim().length > 0 &&
-      turn.recordingSessionId === event.sessionId &&
-      turn.source === event.source &&
-      rangesOverlap(event.startMs, event.endMs, turn.startMs, turn.endMs),
-  );
-}
-
-function rangesOverlap(leftStart: number, leftEnd: number, rightStart?: number, rightEnd?: number) {
-  return (
-    rightStart !== undefined &&
-    rightEnd !== undefined &&
-    leftStart < rightEnd &&
-    rightStart < leftEnd
-  );
+function hasAuthoritativeCoverage(
+  event: LiveTranscriptEventDto,
+  persisted: TranscriptDto[],
+  discarded: DiscardedTranscriptSpanDto[],
+) {
+  const spans = [
+    ...discarded.filter(
+      (span) => span.sessionId === event.sessionId && span.source === event.source,
+    ),
+    ...persisted
+      .filter(
+        (turn) =>
+          turn.status === "succeeded" &&
+          turn.text.trim().length > 0 &&
+          turn.recordingSessionId === event.sessionId &&
+          turn.source === event.source &&
+          typeof turn.startMs === "number" &&
+          typeof turn.endMs === "number",
+      )
+      .map((turn) => ({ startMs: turn.startMs as number, endMs: turn.endMs as number })),
+  ].sort((a, b) => a.startMs - b.startMs);
+  let covered = event.startMs;
+  for (const span of spans) {
+    if (span.startMs > covered) break;
+    covered = Math.max(covered, span.endMs);
+    if (covered >= event.endMs) return true;
+  }
+  return false;
 }
 
 function isSameLiveSegment(left: LiveTranscriptEventDto, right: LiveTranscriptEventDto) {

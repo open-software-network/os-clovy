@@ -1,4 +1,5 @@
-import type { LocalGenerationSettingsDto, VeniceModelDto } from "./tauri";
+import { t } from "../i18n/translate";
+import type { LocalGenerationSettingsDto, ProviderModelDto } from "./tauri";
 
 // Bring-your-own local text generation. The model catalog is derived
 // client-side from provider settings, so the user's configured local endpoint
@@ -19,13 +20,28 @@ export function localGenerationOptionId(modelId: string) {
  * in a synthetic option id, or null when the id is not a synthetic local
  * option (or is malformed). The tagged id stays intact in session settings to
  * retain upstream provenance; Clovy's on-device integration uses this inverse
- * only when it needs to display or forward the raw local id. */
+ * only when it needs to display or forward the raw local id. A chat engine
+ * option also names its endpoint (`<model>@<endpoint id>`, both encoded); see
+ * {@link localGenerationEndpointId}. */
 export function rawLocalGenerationModelId(optionId: string): string | null {
   if (!optionId.startsWith(LOCAL_GENERATION_OPTION_ID_PREFIX)) return null;
+  const [encodedModel] = optionId.slice(LOCAL_GENERATION_OPTION_ID_PREFIX.length).split("@");
   try {
-    const decoded = decodeURIComponent(
-      optionId.slice(LOCAL_GENERATION_OPTION_ID_PREFIX.length),
-    ).trim();
+    const decoded = decodeURIComponent(encodedModel ?? "").trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The registered endpoint a chat engine option names, or null for the older
+ * form that only carries a model id (routed by model). */
+export function localGenerationEndpointId(optionId: string): string | null {
+  if (!optionId.startsWith(LOCAL_GENERATION_OPTION_ID_PREFIX)) return null;
+  const separator = optionId.indexOf("@", LOCAL_GENERATION_OPTION_ID_PREFIX.length);
+  if (separator < 0) return null;
+  try {
+    const decoded = decodeURIComponent(optionId.slice(separator + 1)).trim();
     return decoded || null;
   } catch {
     return null;
@@ -36,7 +52,7 @@ export function rawLocalGenerationModelId(optionId: string): string | null {
  * the configured endpoint. Keep the original choice visible; sends fail closed
  * in Clovy's on-device provider proxy until the user reconfigures or selects
  * another model. */
-export function unavailableLocalGenerationOption(optionId: string): VeniceModelDto | null {
+export function unavailableLocalGenerationOption(optionId: string): ProviderModelDto | null {
   const modelId = rawLocalGenerationModelId(optionId);
   if (!modelId) return null;
   return {
@@ -44,7 +60,7 @@ export function unavailableLocalGenerationOption(optionId: string): VeniceModelD
     id: optionId,
     name: `Local: ${modelId}`,
     modelType: "text",
-    description: "This local model is no longer configured.",
+    description: t("lib.localGeneration.unavailableDescription"),
     pricing: { display: "Local" },
     traits: ["local"],
     capabilities: [],
@@ -85,13 +101,13 @@ export function isLoopbackUrl(url: string): boolean {
  * endpoint; a remote endpoint is marked "external" since prompts leave the
  * device. */
 export function withLocalGenerationOption(
-  models: VeniceModelDto[],
+  models: ProviderModelDto[],
   localGeneration: LocalGenerationSettingsDto,
-): VeniceModelDto[] {
+): ProviderModelDto[] {
   const modelId = localGeneration.modelId.trim();
   if (!modelId) return models;
   const loopback = isLoopbackUrl(localGeneration.baseUrl);
-  const localModel: VeniceModelDto = {
+  const localModel: ProviderModelDto = {
     provider: "local",
     id: localGenerationOptionId(modelId),
     name: `Local: ${modelId}`,

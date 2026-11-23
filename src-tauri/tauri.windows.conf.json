@@ -1,14 +1,14 @@
 {
-  "productName": "June",
+  "productName": "Clovy",
   "bundle": {
-    "publisher": "Open Software Network",
+    "publisher": "guilhermexp",
     "targets": ["nsis"],
     "resources": {
-      "../.tauri-agent-runtime/clovy-agent-runtime.exe": "native/bin/clovy-agent-runtime.exe",
-      "../.tauri-agent-runtime/clovy-agent-runtime.exe.sha256": "native/bin/clovy-agent-runtime.exe.sha256",
-      "../extension/dist": "native/extension",
+      "../resources/agent-browser": "native/agent-browser",
       "resources/agent-skills": "native/agent-skills",
-      "native/bin/june-dictation-helper.exe": "native/bin/june-dictation-helper.exe"
+      "native/bin/clovy-dictation-helper.exe": "native/bin/clovy-dictation-helper.exe",
+      "../.tauri-helper/mcp-windows": "native/bin",
+      "../.tauri-helper/computer-use": "native/bin/computer-use"
     },
     "windows": {
       "digestAlgorithm": "sha256",
@@ -20,8 +20,10 @@
           "-NoProfile",
           "-ExecutionPolicy",
           "Bypass",
-          "-Command",
-          "$script = if (Test-Path 'scripts/windows-sign.ps1') { 'scripts/windows-sign.ps1' } elseif (Test-Path '../scripts/windows-sign.ps1') { '../scripts/windows-sign.ps1' } else { throw 'scripts/windows-sign.ps1 not found.' }; & $script $args[0]",
+          "-NonInteractive",
+          "-File",
+          "../scripts/windows-sign.ps1",
+          "-TargetPath",
           "%1"
         ]
       },

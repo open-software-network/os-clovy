@@ -3,14 +3,15 @@ import {
   defaultNav,
   invalidateNoteTabs,
   navEquals,
+  normalizeTabNav,
   reorderTabs,
   type Tab,
   type TabNav,
 } from "../app/tabs/tabs";
 
 describe("tab navigation snapshots", () => {
-  it("a fresh tab lands on the agent hero (a new chat)", () => {
-    expect(defaultNav()).toEqual({ view: "agent" });
+  it("a fresh tab opens Today", () => {
+    expect(defaultNav()).toEqual({ view: "today" });
   });
 
   it("treats different views as different", () => {
@@ -52,44 +53,8 @@ describe("tab navigation snapshots", () => {
     ).toBe(true);
   });
 
-  it("distinguishes agent tabs by session and origin", () => {
-    const base: TabNav = { view: "agent", agentSessionId: "s1" };
-    expect(navEquals(base, { view: "agent", agentSessionId: "s2" })).toBe(false);
-    // The title is fallback display metadata, not tab identity.
-    expect(
-      navEquals(
-        { view: "agent", agentSessionId: "s1", agentSessionTitle: "First" },
-        { view: "agent", agentSessionId: "s1", agentSessionTitle: "Second" },
-      ),
-    ).toBe(true);
-    expect(
-      navEquals(
-        {
-          view: "agent",
-          agentSessionId: "s1",
-          agentOrigin: { kind: "routines" },
-        },
-        {
-          view: "agent",
-          agentSessionId: "s1",
-          agentOrigin: { kind: "project", folderId: "f1" },
-        },
-      ),
-    ).toBe(false);
-    expect(
-      navEquals(
-        {
-          view: "agent",
-          agentSessionId: "s1",
-          agentOrigin: { kind: "project", folderId: "f1" },
-        },
-        {
-          view: "agent",
-          agentSessionId: "s1",
-          agentOrigin: { kind: "project", folderId: "f1" },
-        },
-      ),
-    ).toBe(true);
+  it.each(["home", "agent", "agent-sessions"] as const)("normalizes legacy %s tabs", (view) => {
+    expect(normalizeTabNav({ view, agentSessionId: "saved-session" })).toEqual({ view: "today" });
   });
 
   it("distinguishes projects by folder id", () => {
@@ -105,7 +70,7 @@ describe("invalidateNoteTabs", () => {
     const tabs: Tab[] = [
       { id: "old", nav: { view: "meetings", noteId: "note-a", originFolderId: "folder-a" } },
       { id: "current", nav: { view: "meetings", noteId: "note-b" } },
-      { id: "agent", nav: { view: "agent", agentSessionId: "session-a" } },
+      { id: "routines", nav: { view: "routines" } },
     ];
 
     expect(invalidateNoteTabs(tabs, new Set(["note-a"]))).toEqual([

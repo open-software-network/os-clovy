@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { CLOVY_BODY_PATH, CLOVY_EYES_PATH } from "../brand/ClovyLogo";
 import type { OnboardingMood } from "../../lib/onboarding";
+import { type MessageKey, t, useT } from "../../i18n";
 
 const CHARACTER_VIEWBOX = "-18 -18 293 300";
 const CALM_EYES_PATH =
@@ -18,34 +19,49 @@ const STRATEGIC_EYEBROW_PATHS = [
   "M2.6221 2.70328C7.2794 0.992527 14.4256 -0.175349 22.2891 0.0216435C30.1891 0.219611 39.1345 1.80261 47.2901 5.88004C49.2657 6.86802 50.0668 9.27048 49.0791 11.2463C48.0912 13.2222 45.6879 14.0232 43.7119 13.0353C36.8677 9.61356 29.1459 8.19652 22.0879 8.01969C14.9935 7.84201 8.88919 8.92393 5.37992 10.213C3.30637 10.9745 1.00783 9.91059 0.246128 7.83707C-0.515164 5.7636 0.548693 3.46497 2.6221 2.70328Z",
 ] as const;
 
-export const ONBOARDING_MOOD_PRESENTATION: Record<
-  OnboardingMood,
-  {
-    label: string;
-    description: string;
-    greeting: string;
-  }
-> = {
-  calm: {
-    label: "Calm",
-    description: "Steady, warm, and unhurried",
-    greeting: "Take your time. What should we think through first?",
-  },
-  clearheaded: {
-    label: "Clearheaded",
-    description: "Crisp, thoughtful, and composed",
-    greeting: "What should we make clearer first?",
-  },
-  "quick-witted": {
-    label: "Quick-witted",
-    description: "Fast, playful, and a little surprising",
-    greeting: "All right, what's first?",
-  },
-  strategic: {
-    label: "Strategic",
-    description: "Proactive, practical, and two steps ahead",
-    greeting: "What should we get ahead of first?",
-  },
+type MoodPresentation = {
+  label: string;
+  description: string;
+  greeting: string;
+};
+
+// Getters so each read follows the current interface language (Settings reads
+// this map too). The English values are the canonical copy.
+function moodPresentation(keys: Record<keyof MoodPresentation, MessageKey>): MoodPresentation {
+  return {
+    get label() {
+      return t(keys.label);
+    },
+    get description() {
+      return t(keys.description);
+    },
+    get greeting() {
+      return t(keys.greeting);
+    },
+  };
+}
+
+export const ONBOARDING_MOOD_PRESENTATION: Record<OnboardingMood, MoodPresentation> = {
+  calm: moodPresentation({
+    label: "onboarding.mood.calm.label",
+    description: "onboarding.mood.calm.description",
+    greeting: "onboarding.mood.calm.greeting",
+  }),
+  clearheaded: moodPresentation({
+    label: "onboarding.mood.clearheaded.label",
+    description: "onboarding.mood.clearheaded.description",
+    greeting: "onboarding.mood.clearheaded.greeting",
+  }),
+  "quick-witted": moodPresentation({
+    label: "onboarding.mood.quickWitted.label",
+    description: "onboarding.mood.quickWitted.description",
+    greeting: "onboarding.mood.quickWitted.greeting",
+  }),
+  strategic: moodPresentation({
+    label: "onboarding.mood.strategic.label",
+    description: "onboarding.mood.strategic.description",
+    greeting: "onboarding.mood.strategic.greeting",
+  }),
 };
 
 export function OnboardingCharacter({
@@ -55,6 +71,7 @@ export function OnboardingCharacter({
   mood: OnboardingMood;
   className?: string;
 }) {
+  const translate = useT();
   const gradientId = `clovy-personality-${useId().replaceAll(":", "")}`;
 
   return (
@@ -69,7 +86,11 @@ export function OnboardingCharacter({
         preserveAspectRatio="xMidYMid meet"
         focusable="false"
       >
-        <title>{`${ONBOARDING_MOOD_PRESENTATION[mood].label} Clovy`}</title>
+        <title>
+          {translate("onboarding.mood.characterTitle", {
+            mood: ONBOARDING_MOOD_PRESENTATION[mood].label,
+          })}
+        </title>
         <defs>
           <linearGradient
             id={gradientId}

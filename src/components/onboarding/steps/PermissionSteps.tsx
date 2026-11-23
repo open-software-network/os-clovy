@@ -4,6 +4,7 @@ import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconTextIndicator } from "central-icons/IconTextIndicator";
 import { IconVolumeFull } from "central-icons/IconVolumeFull";
+import { type MessageKey, useT } from "../../../i18n";
 import type { OnboardingArea } from "../../../lib/onboarding";
 import { fallbackDictationCapabilities } from "../../../lib/platform";
 import { dictationHelperCommand, openPrivacySettings } from "../../../lib/tauri";
@@ -19,35 +20,35 @@ import {
 const PERMISSION_COPY: Record<
   OnboardingArea,
   {
-    subtitle: string;
-    microphone: string;
-    accessibility: string;
-    systemAudio: string;
+    subtitle: MessageKey;
+    microphone: MessageKey;
+    accessibility: MessageKey;
+    systemAudio: MessageKey;
   }
 > = {
   work: {
-    subtitle: "This lets Clovy take meeting notes, hear dictation, and type for you.",
-    microphone: "Hears your dictation and the meetings you choose to record.",
-    accessibility: "Puts your words where you're typing, in any app.",
-    systemAudio: "Hears the other people on calls so your meeting notes include everyone.",
+    subtitle: "onboarding.permissions.work.subtitle",
+    microphone: "onboarding.permissions.work.microphone",
+    accessibility: "onboarding.permissions.work.accessibility",
+    systemAudio: "onboarding.permissions.work.systemAudio",
   },
   personal: {
-    subtitle: "This lets Clovy hear voice notes, type for you, and capture a call when you choose.",
-    microphone: "Hears voice notes, reflections, and anything you'd rather say than type.",
-    accessibility: "Puts dictated messages and notes into other apps.",
-    systemAudio: "Only used when you ask Clovy to capture a call.",
+    subtitle: "onboarding.permissions.personal.subtitle",
+    microphone: "onboarding.permissions.personal.microphone",
+    accessibility: "onboarding.permissions.personal.accessibility",
+    systemAudio: "onboarding.permissions.captureOnRequest",
   },
   thinking: {
-    subtitle: "This lets Clovy hear rough ideas, type drafts, and capture a conversation.",
-    microphone: "Hears you talk through an idea or dictate a draft.",
-    accessibility: "Puts your spoken draft into the app you're working in.",
-    systemAudio: "Only used when you ask Clovy to capture a call.",
+    subtitle: "onboarding.permissions.thinking.subtitle",
+    microphone: "onboarding.permissions.thinking.microphone",
+    accessibility: "onboarding.permissions.thinking.accessibility",
+    systemAudio: "onboarding.permissions.captureOnRequest",
   },
   play: {
-    subtitle: "This lets Clovy hear your ideas, type for you, and capture a role-play.",
-    microphone: "Hears characters, dialogue, and stories you'd rather speak aloud.",
-    accessibility: "Puts dialogue and ideas into the app you're using.",
-    systemAudio: "Only used when you ask Clovy to capture a call.",
+    subtitle: "onboarding.permissions.play.subtitle",
+    microphone: "onboarding.permissions.play.microphone",
+    accessibility: "onboarding.permissions.play.accessibility",
+    systemAudio: "onboarding.permissions.captureOnRequest",
   },
 };
 
@@ -56,6 +57,7 @@ function PermissionRow({
   granted,
   probing = false,
   title,
+  allowLabel,
   detail,
   onAllow,
 }: {
@@ -65,11 +67,14 @@ function PermissionRow({
    * be); the row pulses so the wait reads as activity, not a stall. */
   probing?: boolean;
   title: string;
+  /** Accessible name of the allow button ("Allow microphone access"). */
+  allowLabel: string;
   detail: string;
   /** Grant affordance — fires the TCC prompt or opens System Settings;
    * either way the user's decision is "allow". */
   onAllow?: () => void;
 }) {
+  const t = useT();
   return (
     <li className="onboarding-perm" data-granted={granted} data-probing={probing}>
       <span className="onboarding-perm-icon" aria-hidden>
@@ -84,9 +89,9 @@ function PermissionRow({
           type="button"
           className="onboarding-perm-btn"
           onClick={onAllow}
-          aria-label={`Allow ${title.toLowerCase()} access`}
+          aria-label={allowLabel}
         >
-          Allow
+          {t("onboarding.permissions.allow")}
         </button>
       ) : null}
     </li>
@@ -108,6 +113,7 @@ export function PermissionsStep({
   onAllowSystemAudio: () => void;
   onContinue: () => void;
 }) {
+  const t = useT();
   const [showUnknownStatuses, setShowUnknownStatuses] = useState(false);
   const micGranted = isMicrophoneGranted(statuses);
   const micDenied = isMicrophoneDenied(statuses);
@@ -164,13 +170,13 @@ export function PermissionsStep({
 
   return (
     <StepCard
-      title="Let Clovy listen and type"
+      title={t("onboarding.permissions.title")}
       subtitle={
         macLikePlatform
-          ? copy.subtitle
+          ? t(copy.subtitle)
           : windowsPlatform
-            ? "Dictation and meeting notes need microphone access."
-            : "Meeting notes need microphone access."
+            ? t("onboarding.permissions.subtitle.windows")
+            : t("onboarding.permissions.subtitle.other")
       }
       wide
     >
@@ -182,15 +188,16 @@ export function PermissionsStep({
         <PermissionRow
           icon={<IconMicrophone size={15} />}
           granted={showPermissionRows && micGranted}
-          title="Microphone"
+          title={t("onboarding.permissions.microphone.title")}
+          allowLabel={t("onboarding.permissions.microphone.allowAria")}
           detail={
             micUnavailable
-              ? "No microphone found. Connect one, choose it in Windows sound settings, then try again."
+              ? t("onboarding.permissions.microphone.unavailable")
               : micDenied
                 ? macLikePlatform
-                  ? "Turned off in System Settings. Flip the toggle and Clovy will notice."
-                  : "Turned off in Windows settings. Flip the toggle and Clovy will notice."
-                : copy.microphone
+                  ? t("onboarding.permissions.microphone.deniedMac")
+                  : t("onboarding.permissions.microphone.deniedWindows")
+                : t(copy.microphone)
           }
           onAllow={
             showPermissionRows
@@ -213,25 +220,27 @@ export function PermissionsStep({
             <PermissionRow
               icon={<IconTextIndicator size={15} />}
               granted={showPermissionRows && accessibilityGranted}
-              title="Accessibility"
-              detail={copy.accessibility}
+              title={t("onboarding.permissions.accessibility.title")}
+              allowLabel={t("onboarding.permissions.accessibility.allowAria")}
+              detail={t(copy.accessibility)}
               onAllow={showPermissionRows ? openAccessibilitySettings : undefined}
             />
             <PermissionRow
               icon={<IconVolumeFull size={15} />}
               granted={showPermissionRows && systemAudioGranted}
               probing={showPermissionRows && systemAudioStatus === "probing"}
-              title="System audio"
+              title={t("onboarding.permissions.systemAudio.title")}
+              allowLabel={t("onboarding.permissions.systemAudio.allowAria")}
               detail={
                 systemAudioDenied
-                  ? "Turned off in System Settings. Flip the toggle and Clovy will notice."
+                  ? t("onboarding.permissions.systemAudio.denied")
                   : systemAudioUnsupported
-                    ? "Needs macOS 14.2 or later."
+                    ? t("onboarding.permissions.systemAudio.unsupported")
                     : systemAudioUnavailable
-                      ? "Allowed. Restart Clovy to finish turning it on."
+                      ? t("onboarding.permissions.systemAudio.unavailable")
                       : systemAudioStatus === "probing"
-                        ? "Waiting for macOS. Approve the prompt when it appears."
-                        : copy.systemAudio
+                        ? t("onboarding.permissions.systemAudio.probing")
+                        : t(copy.systemAudio)
               }
               onAllow={
                 showPermissionRows

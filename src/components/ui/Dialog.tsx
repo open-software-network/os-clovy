@@ -1,6 +1,7 @@
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { type ReactNode, useEffect, useId, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../../i18n";
 
 type DialogProps = {
   open: boolean;
@@ -49,6 +50,7 @@ export function Dialog({
   width,
   className,
 }: DialogProps) {
+  const t = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
   const onCloseRef = useRef(onClose);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -141,7 +143,7 @@ export function Dialog({
           <button
             type="button"
             className="dialog-close"
-            aria-label="Close"
+            aria-label={t("common.close")}
             onClick={onClose}
             disabled={closeDisabled}
             aria-disabled={closeDisabled || undefined}

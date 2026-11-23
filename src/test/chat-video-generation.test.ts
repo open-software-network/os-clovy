@@ -19,7 +19,7 @@ describe("chat video generation", () => {
         })
         .mockResolvedValueOnce({
           status: "completed",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.june/agent-workspaces/generated-media/videos/out.mp4",
+          path: "/Users/alex/Library/Application Support/dev.guilhermexp.clovy/agent-workspaces/generated-media/videos/out.mp4",
           mimeType: "video/mp4",
           sizeBytes: 1234,
           model: "wan-2.2-a14b-text-to-video",
@@ -50,7 +50,7 @@ describe("chat video generation", () => {
     expect(result).toEqual({
       status: "ok",
       jobId: "job-1",
-      path: "/Users/alex/Library/Application Support/co.opensoftware.june/agent-workspaces/generated-media/videos/out.mp4",
+      path: "/Users/alex/Library/Application Support/dev.guilhermexp.clovy/agent-workspaces/generated-media/videos/out.mp4",
       mimeType: "video/mp4",
       sizeBytes: 1234,
       model: "wan-2.2-a14b-text-to-video",
@@ -96,7 +96,7 @@ describe("chat video generation", () => {
         })
         .mockResolvedValueOnce({
           status: "completed",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.june/agent-workspaces/generated-media/videos/out.mp4",
+          path: "/Users/alex/Library/Application Support/dev.guilhermexp.clovy/agent-workspaces/generated-media/videos/out.mp4",
           mimeType: "video/mp4",
           sizeBytes: 42,
           model: "wan-2.2-a14b-text-to-video",
@@ -110,7 +110,7 @@ describe("chat video generation", () => {
     expect(result).toEqual({
       status: "ok",
       jobId: "job-resumed",
-      path: "/Users/alex/Library/Application Support/co.opensoftware.june/agent-workspaces/generated-media/videos/out.mp4",
+      path: "/Users/alex/Library/Application Support/dev.guilhermexp.clovy/agent-workspaces/generated-media/videos/out.mp4",
       mimeType: "video/mp4",
       sizeBytes: 42,
       model: "wan-2.2-a14b-text-to-video",

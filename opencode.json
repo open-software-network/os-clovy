@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "graft": {
+      "type": "local",
+      "command": ["graft", "mcp"],
+      "enabled": true
+    }
+  }
+}

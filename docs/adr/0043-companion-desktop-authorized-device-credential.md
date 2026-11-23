@@ -51,3 +51,7 @@ long-lived credential, or allow knowledge of a device id to open the relay.
   stored by June API.
 - The pairing and device credential endpoints are additive to the existing
   June API surface; desktop OS Accounts contracts remain unchanged.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

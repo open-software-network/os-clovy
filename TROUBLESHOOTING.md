@@ -9,10 +9,10 @@ Both halves matter; neither is an excuse to skip the failure.
 
 ## Frontend tests
 
-### 3 storage tests fail locally: `font-scale`, `referral-nudge`
+### Storage tests fail locally: `font-scale`
 
-Symptom: `src/test/font-scale.test.ts` and `src/test/referral-nudge.test.ts`
-fail (3 tests, storage related) on your machine while `main` is green in CI.
+Symptom: `src/test/font-scale.test.ts` fails (storage related) on your machine
+while `main` is green in CI.
 
 Cause: **Node 26 ships an experimental web-storage implementation and it
 shadows jsdom's `localStorage`.** The tests mock jsdom's; Node's real one wins.

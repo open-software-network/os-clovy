@@ -9,9 +9,10 @@
 
 ## Thesis
 
-Computer use is Clovy's universal adapter for Mac work that has no safe API or
-browser path. It lets Clovy operate another app in the background without
-stealing the user's cursor, keyboard focus, or active Space. It is strategically
+Computer use is Clovy's adapter for macOS and Windows work that has no safe API
+or browser path. It operates authorized app windows in the background when
+supported. An operation that requires focus or pointer input may use visible
+mode in the authorized window, selected before delivery. It is strategically
 powerful and technically risky, which is why it ranks behind Browser use and
 the two dominant work ecosystems.
 
@@ -24,14 +25,16 @@ also take over the desktop, expose unrelated content, and make silent mistakes.
 
 ## Product promise
 
-Grant each target app deliberately for the current task, keep using the Mac
-while Clovy works, and revoke the capability at any time.
+Grant each target app deliberately for the current task, preserve background
+operation when supported, and revoke the capability at any time. Delivered or
+uncertain input is never repeated in another mode.
 
 ## V1 experience
 
 - The plugin tile explains Accessibility and Screen recording before macOS
   prompts appear.
-- Clovy reports whether the selected model can use the capability.
+- Clovy reports local helper/engine availability and actual platform readiness.
+  No account, plan, remote rollout or selected vision model gates it.
 - The user chooses a target app/task. Clovy can open a missing app, capture a
   bounded representation, and propose actions.
 - The first access to each target app requires one task-scoped decision in
@@ -46,10 +49,15 @@ while Clovy works, and revoke the capability at any time.
 
 ## Scope
 
-Phase 2 is macOS-only, attended sessions only, vision-capable models only, and
-uses the pinned runtime's computer-use toolset with a Clovy-bundled driver.
+Computer use is limited to attended CLI turns on macOS and Windows, through
+Clovy's broker and privately bundled source-pinned agent-desktop engine.
+Captures return only to the CLI running that turn. The private helper retains
+its fourteen allowlisted operations; the model receives the `computer_use`
+tool rather than unrestricted upstream CLI or MCP access.
 Routines, credential entry, payment entry, security settings, destructive
-system operations, and Windows support are out of scope.
+system operations and Linux desktop support are out of scope. Visible mode
+grants no OS elevation or authentication authority. Native acceptance of the
+new engine remains required in [the proof matrix](../qa/computer-use-parity.md).
 
 ## Privacy and trust
 
@@ -58,17 +66,19 @@ Clovy must never imply that Screen recording means captures stay local when the
 selected model is remote. The driver is pinned and signed; the upstream network
 installer never runs. Mutating actions are gated structurally, not by a prompt.
 
-## Business model
+## Local availability
 
-Launch as Pro because of support burden, model requirements, and risk. Revisit
-after reliability and cost data. Permission education and the ability to revoke
-are available regardless of plan.
+Availability depends on local grants, signed pinned artifacts and real platform
+readiness ([ADR-0067](../adr/0067-computer-use-depends-only-on-local-gates.md)).
+macOS uses the required Accessibility and Screen Recording grants. Windows uses
+the standard interactive desktop with compatible integrity, without TCC or UAC
+bypass. Permission education and revocation are always available locally.
 
 ## Success measures
 
 | Metric | Target |
 | --- | ---: |
-| Eligible users completing TCC setup | 60% |
+| Eligible users completing local setup | 60% |
 | Supported tasks completed without user takeover | 65% |
 | Apps used without a current-task Clovy authorization | 0 |
 | Unexpected cursor/focus theft incidents | 0 |
@@ -84,5 +94,9 @@ are available regardless of plan.
 
 ## Decision
 
-The direction is accepted, but phase 2 stays gated on the driver-under-sandbox
-spike and a release self-test. Do not expand it to routines at launch.
+The current private-engine boundary follows
+[the 2026-11-01 decision](../adr/ADR-desktop-agent-desktop-private-host.md)
+and the D6 OpenSpec design. Source, patch, provenance and binary hashes are
+packaged with the signed helper. Signed native self-tests and the full platform
+matrix remain release gates; Linux engine evidence does not satisfy them.
+Do not expand it to routines.

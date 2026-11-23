@@ -1,12 +1,8 @@
 import { AGENT_NEW_SESSION_PENDING_KEY } from "../../lib/agent-events";
 import type { NoteReferenceInput } from "./composer/noteReference";
-import { isReportCategory, type ReportCategory } from "./composer/reportCategory";
 
 export type AgentNewSessionDetail = {
   prompt?: string;
-  /** Opens the direct issue report dialog with the category preselected. No
-   * model runs, so there is nothing to charge. */
-  category?: ReportCategory;
   /** Seeds the composer with a note chip (and skips auto-submit) so the user
    * lands ready to ask about that note instead of starting an ordinary ask. */
   noteRef?: NoteReferenceInput;
@@ -55,12 +51,11 @@ export function writeLastOpenSessionId(sessionId: string) {
 
 export function markAgentNewSessionPending(
   prompt?: string,
-  options?: { category?: ReportCategory; noteRef?: NoteReferenceInput },
+  options?: { noteRef?: NoteReferenceInput },
 ) {
   const payload = JSON.stringify({
     createdAt: Date.now(),
     prompt: prompt?.trim() || undefined,
-    category: options?.category,
     noteRef: options?.noteRef,
   });
   try {
@@ -129,7 +124,6 @@ export function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
       const parsed = JSON.parse(value) as {
         createdAt?: number;
         prompt?: string;
-        category?: string;
         noteRef?: unknown;
       };
       if (
@@ -138,11 +132,9 @@ export function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
       ) {
         return undefined;
       }
-      const category = isReportCategory(parsed.category) ? parsed.category : undefined;
-      const noteRef = category ? undefined : parsePendingNoteRef(parsed.noteRef);
+      const noteRef = parsePendingNoteRef(parsed.noteRef);
       return {
         ...(typeof parsed.prompt === "string" ? { prompt: parsed.prompt } : {}),
-        ...(category ? { category } : {}),
         ...(noteRef ? { noteRef } : {}),
       };
     } catch {

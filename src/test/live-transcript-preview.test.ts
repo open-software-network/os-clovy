@@ -204,6 +204,39 @@ describe("live transcript preview", () => {
     ).toEqual([sessionB]);
   });
 
+  it("removes only previews fully covered by an explicit echo discard", () => {
+    const mic = liveEvent();
+    const otherSession = liveEvent({ sessionId: "session-2" });
+    const partial = liveEvent({ segmentId: "partial", startMs: 7000, endMs: 9000 });
+    const system = liveEvent({ source: "system", segmentId: "system" });
+    const discard = {
+      sessionId: "session-1",
+      source: "microphone",
+      startMs: 0,
+      endMs: 8000,
+    } as const;
+    expect(
+      reconcileLiveTranscriptEvents(
+        [mic, otherSession, partial, system],
+        [persistedTurn({ source: "system", status: "failed", text: "" })],
+        [discard],
+      ),
+    ).toEqual([otherSession, partial, system]);
+  });
+
+  it("preserves partial final coverage and combines contiguous final and discard spans", () => {
+    const preview = liveEvent();
+    const final = persistedTurn({ startMs: 4000, endMs: 8000 });
+    expect(reconcileLiveTranscriptEvents([preview], [final])).toEqual([preview]);
+    expect(
+      reconcileLiveTranscriptEvents(
+        [preview],
+        [final],
+        [{ sessionId: "session-1", source: "microphone", startMs: 0, endMs: 4000 }],
+      ),
+    ).toEqual([]);
+  });
+
   it("never lets legacy unscoped rows erase a preview", () => {
     const legacy = persistedTurn({ recordingSessionId: undefined });
     expect(reconcileLiveTranscriptEvents([liveEvent()], [legacy])).toHaveLength(1);

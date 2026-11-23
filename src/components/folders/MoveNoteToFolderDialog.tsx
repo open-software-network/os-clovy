@@ -5,6 +5,7 @@ import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderDto, NoteListItemDto } from "../../lib/tauri";
+import { useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
 
 type Props = {
@@ -38,6 +39,7 @@ export function MoveNoteToFolderDialog({
   onRemoveFolder,
   onMoved,
 }: Props) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -149,15 +151,17 @@ export function MoveNoteToFolderDialog({
 
   const title = isSingle
     ? hasCurrent
-      ? "Move meeting note"
-      : "Add meeting note to project"
-    : `Move ${notes.length} meeting notes`;
+      ? t("notes.move.note.title")
+      : t("notes.move.note.addTitle")
+    : t("notes.move.note.bulkTitle", { count: notes.length });
   const description = isSingle
     ? hasCurrent
-      ? `This meeting note is in "${currentFolder?.name}". Pick another project to move it to.`
-      : "Pick a project for this meeting note."
-    : "Pick a project to move them to.";
-  const commitLabel = isSingle && !hasCurrent ? "Add" : "Move";
+      ? t("notes.move.note.currentDescription", { name: currentFolder?.name ?? "" })
+      : t("notes.move.note.pickDescription")
+    : t("notes.move.bulkDescription");
+  const addMode = isSingle && !hasCurrent;
+  const commitLabel = addMode ? t("common.add") : t("notes.list.move");
+  const committingLabel = addMode ? t("notes.move.adding") : t("notes.move.moving");
 
   return (
     <Dialog
@@ -172,7 +176,7 @@ export function MoveNoteToFolderDialog({
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -180,7 +184,7 @@ export function MoveNoteToFolderDialog({
             onClick={() => void handleCommit()}
             disabled={submitting || !selectedId}
           >
-            {submitting ? `${commitLabel}ing…` : commitLabel}
+            {submitting ? committingLabel : commitLabel}
           </button>
         </>
       }
@@ -192,7 +196,9 @@ export function MoveNoteToFolderDialog({
             ref={searchRef}
             type="search"
             name="move-note-search"
-            placeholder={onCreateFolder ? "Search or create project" : "Search projects"}
+            placeholder={
+              onCreateFolder ? t("notes.folderChip.searchOrCreate") : t("notes.move.searchProjects")
+            }
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -207,7 +213,7 @@ export function MoveNoteToFolderDialog({
             <button
               type="button"
               className="search-clear"
-              aria-label="Clear search"
+              aria-label={t("notes.folderChip.clearSearch")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setQuery("");
@@ -231,7 +237,9 @@ export function MoveNoteToFolderDialog({
                     type="button"
                     role="option"
                     aria-selected={isSelected || isCurrent}
-                    aria-label={isCurrent ? `Remove from ${folder.name}` : undefined}
+                    aria-label={
+                      isCurrent ? t("notes.move.removeFrom", { name: folder.name }) : undefined
+                    }
                     className="add-notes-row"
                     data-selected={isSelected}
                     data-current={isCurrent || undefined}
@@ -262,11 +270,11 @@ export function MoveNoteToFolderDialog({
           <p className="add-notes-empty">
             {folders.length === 0
               ? onCreateFolder
-                ? "No projects yet. Type a name to create one."
-                : "No projects yet. Create one from the Projects view."
+                ? t("notes.move.emptyCreate")
+                : t("notes.move.emptyGoToProjects")
               : query.trim()
-                ? "No projects match that search."
-                : "No other projects to move to."}
+                ? t("notes.move.noMatch")
+                : t("notes.move.noOther")}
           </p>
         )}
         {/* Create sits under the results: matches, if any, come first — the
@@ -285,7 +293,9 @@ export function MoveNoteToFolderDialog({
               <IconPlusMedium size={14} />
             </span>
             <span className="add-notes-body">
-              <span className="add-notes-title">Create “{trimmedQuery}”</span>
+              <span className="add-notes-title">
+                {t("notes.folderChip.create", { name: trimmedQuery })}
+              </span>
             </span>
             <span className="add-notes-check" aria-hidden />
           </button>

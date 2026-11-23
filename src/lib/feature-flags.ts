@@ -8,9 +8,7 @@ export const IMAGE_GENERATION_ENABLED = true;
 // VIDEO_GENERATION_ENABLED in src-tauri/src/feature_flags.rs.
 export const VIDEO_GENERATION_ENABLED = true;
 
-// Kill switch for Browser use. Off until the Chrome Web Store item exists
-// (the manual 0.1.0 bootstrap in docs/release-extension.md): without a store
-// listing there is no extension to install, so the Connectors capability row,
-// the routine opt-in, and the in-chat request card all stay hidden. Keep in
-// lockstep with the Rust BROWSER_USE_ENABLED in src-tauri/src/feature_flags.rs.
+// Public rollout switch for the Clovy-owned browser. Local experiments can
+// enable it before rollout; no browser extension or pairing is required.
+// Keep in lockstep with the native BROWSER_USE_ENABLED switch.
 export const BROWSER_USE_ENABLED = false;

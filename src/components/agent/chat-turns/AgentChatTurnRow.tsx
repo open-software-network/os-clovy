@@ -14,9 +14,13 @@ import {
   hasAgentCliAccessRequest,
   stripAgentCliAccessRequest,
 } from "../../../lib/agent-cli-access";
-import { hasBrowserAccessRequest, stripBrowserAccessRequest } from "../../../lib/browser-access";
+import {
+  hasBrowserAccessRequest,
+  stripBrowserAccessRequest,
+  useBrowserAccess,
+} from "../../../lib/browser-access";
+import { intlLocale, useT } from "../../../i18n";
 import { agentFilePreview } from "../../../lib/tauri";
-import type { FundingTier } from "../../account/FundingNotice";
 import { CopyStateIcon } from "../../ui/CopyStateIcon";
 import { DotSpinner } from "../../DotSpinner";
 import { HoverTip } from "../../ui/HoverTip";
@@ -42,7 +46,6 @@ import {
 import { AgentGeneratedImage, AgentGeneratedVideo } from "./GeneratedMedia";
 import {
   ContextOverflowNoticePart,
-  CreditsNoticePart,
   SteeringPart,
   UpstreamProviderFailureNoticePart,
 } from "./RunNotices";
@@ -73,11 +76,7 @@ export function AgentChatTurnRow({
   onRetryUpstreamFailure,
   upstreamFailureRetryAttempted,
   upstreamFailureRetryDisabled,
-  creditActionsDisabledReason,
   onThinkingOpenChange,
-  onTopUp,
-  topUpLabel,
-  fundingTier,
   onVisibleMarkdownChange,
   onBranch,
   branching,
@@ -119,11 +118,7 @@ export function AgentChatTurnRow({
   onRetryUpstreamFailure?: (assistantTurnId: string) => void;
   upstreamFailureRetryAttempted?: boolean;
   upstreamFailureRetryDisabled?: boolean;
-  creditActionsDisabledReason?: string;
   onThinkingOpenChange: (key: string, open: boolean) => void;
-  onTopUp?: () => void;
-  topUpLabel?: string;
-  fundingTier?: FundingTier;
   onVisibleMarkdownChange?: (visibleMarkdown: string) => void;
   onBranch?: (itemId: string) => void;
   branching?: boolean;
@@ -133,6 +128,19 @@ export function AgentChatTurnRow({
   homeUserRunEnd?: boolean;
   turn: AgentChatTurn;
 }) {
+  const t = useT();
+  const requestsBrowserAccess = turn.parts.some(
+    (part) => part.type === "text" && hasBrowserAccessRequest(part.text),
+  );
+  const storedBrowserAccess = useBrowserAccess(
+    browserAccess === undefined && requestsBrowserAccess,
+  );
+  const effectiveBrowserAccess = browserAccess ?? {
+    enabled: storedBrowserAccess.enabled,
+    submitting: storedBrowserAccess.submitting,
+    error: storedBrowserAccess.error,
+    onEnable: () => void storedBrowserAccess.setGrant(true),
+  };
   const textParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "text" }> => part.type === "text",
   );
@@ -142,38 +150,20 @@ export function AgentChatTurnRow({
   const toolParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "tool" }> => part.type === "tool",
   );
-  // A running generation tool holds space with the same placeholder the /image
-  // fast path uses, so the result doesn't pop in from nothing when the tool
-  // completes and its real image/video part takes over the slot.
-  const runningMediaTools = toolParts.filter(
-    (part): part is Extract<AgentChatPart, { type: "tool" }> & { media: "image" | "video" } =>
-      part.status === "running" && part.media !== undefined,
-  );
-  const hasGeneratedImage = turn.parts.some((part) => part.type === "image");
-  const hasGeneratedVideo = turn.parts.some((part) => part.type === "video");
-  // The media canvas owns successful generation from start through result.
-  // Keeping the generic tool row alongside it would show two activity states,
-  // then make that row pop back in above the finished media. Failed media tools
-  // and unrelated tools still render normally.
-  const visibleToolParts = toolParts.filter((part) => {
-    if (!part.media || part.status === "failed") return true;
-    if (part.status === "running") return false;
-    return part.media === "image" ? !hasGeneratedImage : !hasGeneratedVideo;
-  });
-  const visibleToolPartSet = new Set(visibleToolParts);
-  const visibleToolStacks = new Map<string, typeof visibleToolParts>();
-  let visibleToolStack: typeof visibleToolParts | undefined;
+  // Adjacent tool rows render as one stack, keyed by the stack's first row.
+  const toolStacks = new Map<string, typeof toolParts>();
+  let toolStack: typeof toolParts | undefined;
   for (const part of turn.parts) {
-    if (part.type !== "tool" || !visibleToolPartSet.has(part)) {
-      visibleToolStack = undefined;
+    if (part.type !== "tool") {
+      toolStack = undefined;
       continue;
     }
-    if (visibleToolStack) {
-      visibleToolStack.push(part);
+    if (toolStack) {
+      toolStack.push(part);
       continue;
     }
-    visibleToolStack = [part];
-    visibleToolStacks.set(part.id, visibleToolStack);
+    toolStack = [part];
+    toolStacks.set(part.id, toolStack);
   }
   const reasoningGroups = new Map<
     Extract<AgentChatPart, { type: "reasoning" }>,
@@ -202,8 +192,7 @@ export function AgentChatTurnRow({
     reasoningGroups.set(part, reasoningGroup);
   }
   // The disclosure owns internal reasoning only. Tool/action rows stay visible
-  // outside it so users can see what Clovy is doing without expanding Thought;
-  // a running media tool is represented by its canvas instead, just above.
+  // outside it so users can see what Clovy is doing without expanding Thought.
   const thinkingRunning = reasoningParts.some((part) => part.status === "running");
   const runningReasoningGroup = [...reasoningGroups.values()].find((group) =>
     group.parts.some((part) => part.status === "running"),
@@ -300,7 +289,7 @@ export function AgentChatTurnRow({
         cliAccess?.enabled !== true &&
         !dismissedAccessRequestCards.has(accessRequestCardKey(turn.id, index, "cli"))) ||
       (hasBrowserAccessRequest(part.text) &&
-        browserAccess?.enabled !== true &&
+        effectiveBrowserAccess.enabled !== true &&
         !dismissedAccessRequestCards.has(accessRequestCardKey(turn.id, index, "browser")))
     );
   });
@@ -338,14 +327,14 @@ export function AgentChatTurnRow({
       compact
       width={104}
       delay={TURN_ACTION_TIP_DELAY_MS}
-      tip={copied ? "Copied" : "Copy message"}
+      tip={copied ? t("common.copied") : t("chat.turn.copyMessage")}
       forceOpen={copied}
       className="agent-turn-action-tip"
     >
       <button
         type="button"
         className="agent-turn-action"
-        aria-label={copied ? "Copied message" : "Copy message"}
+        aria-label={copied ? t("chat.turn.copiedMessage") : t("chat.turn.copyMessage")}
         data-copied={copied ? "true" : undefined}
         onClick={() => void copyTurn()}
       >
@@ -359,13 +348,13 @@ export function AgentChatTurnRow({
         compact
         width={136}
         delay={TURN_ACTION_TIP_DELAY_MS}
-        tip="Branch from here"
+        tip={t("chat.turn.branchFromHere")}
         className="agent-turn-action-tip"
       >
         <button
           type="button"
           className="agent-turn-action"
-          aria-label={branching ? "Creating branch" : "Branch from here"}
+          aria-label={branching ? t("chat.turn.creatingBranch") : t("chat.turn.branchFromHere")}
           disabled={branching}
           onClick={() => onBranch(turn.id)}
         >
@@ -381,7 +370,7 @@ export function AgentChatTurnRow({
       compact
       width={200}
       delay={TURN_ACTION_TIP_DELAY_MS}
-      tip={new Date(turn.createdAt).toLocaleString()}
+      tip={new Date(turn.createdAt).toLocaleString(intlLocale())}
       className="agent-turn-action-tip"
     >
       <time className="agent-turn-timestamp" dateTime={turn.createdAt}>
@@ -417,10 +406,10 @@ export function AgentChatTurnRow({
   if (homeTaskHandoff) {
     const copy =
       homeTaskHandoff.status === "failed"
-        ? `I couldn't create the session for “${homeTaskHandoff.title}”.`
+        ? t("chat.homeTask.failed", { title: homeTaskHandoff.title })
         : homeTaskHandoff.status === "starting"
-          ? `I'm creating a session for “${homeTaskHandoff.title}”...`
-          : `I created a session for “${homeTaskHandoff.title}”.`;
+          ? t("chat.homeTask.starting", { title: homeTaskHandoff.title })
+          : t("chat.homeTask.created", { title: homeTaskHandoff.title });
     return (
       <article className="agent-assistant-turn" data-status={homeTaskHandoff.status}>
         <div className="agent-assistant-turn-body">
@@ -429,7 +418,7 @@ export function AgentChatTurnRow({
             {homeTaskHandoff.status === "failed" ? (
               onRetryHomeTask ? (
                 <button type="button" onClick={() => onRetryHomeTask(homeTaskHandoff)}>
-                  Try again
+                  {t("common.tryAgain")}
                 </button>
               ) : null
             ) : homeTaskHandoff.storedSessionId ? (
@@ -442,11 +431,15 @@ export function AgentChatTurnRow({
                   )
                 }
               >
-                Open session
+                {t("chat.homeTask.openSession")}
                 <IconChevronRightSmall size={14} aria-hidden />
               </button>
             ) : (
-              <span className="agent-home-task-pending" role="status" aria-label="Creating session">
+              <span
+                className="agent-home-task-pending"
+                role="status"
+                aria-label={t("chat.homeTask.creatingSession")}
+              >
                 <DotSpinner />
               </span>
             )}
@@ -466,7 +459,7 @@ export function AgentChatTurnRow({
         {turn.isScheduledRun ? (
           <span className="agent-user-turn-eyebrow">
             <IconArrowsRepeat size={12} aria-hidden />
-            Scheduled routine run
+            {t("chat.turn.scheduledRoutineRun")}
           </span>
         ) : null}
         <div className="agent-user-turn-body">
@@ -497,27 +490,14 @@ export function AgentChatTurnRow({
           hasActionCard ? " agent-assistant-turn-body-action-card" : ""
         }`}
       >
-        {runningMediaTools.map((tool) =>
-          tool.media === "image" ? (
-            <AgentGeneratedImage
-              key={`generating:${tool.id}`}
-              part={{ type: "image", status: "running", prompt: "" }}
-            />
-          ) : (
-            <AgentGeneratedVideo
-              key={`generating:${tool.id}`}
-              part={{ type: "video", status: "running", prompt: "" }}
-            />
-          ),
-        )}
         {turn.parts.map((part, index) =>
           part.type === "reasoning" ? (
             renderReasoningGroup(part)
           ) : part.type === "tool" ? (
-            visibleToolStacks.has(part.id) ? (
+            toolStacks.has(part.id) ? (
               <AgentToolStack
                 key={`${turn.id}:tools:${part.id}`}
-                parts={visibleToolStacks.get(part.id) ?? []}
+                parts={toolStacks.get(part.id) ?? []}
               />
             ) : null
           ) : part.type === "text" ? (
@@ -544,7 +524,7 @@ export function AgentChatTurnRow({
                 ) : null}
                 {hasBrowserAccessRequest(part.text) ? (
                   <AgentBrowserAccessCard
-                    browserAccess={browserAccess}
+                    browserAccess={effectiveBrowserAccess}
                     dismissed={dismissedAccessRequestCards.has(
                       accessRequestCardKey(turn.id, index, "browser"),
                     )}
@@ -604,6 +584,7 @@ export function AgentChatTurnRow({
               <UpstreamProviderFailureNoticePart
                 key={`${turn.id}:notice:${index}`}
                 kind={part.kind}
+                diagnostic={part.diagnostic}
                 attempted={upstreamFailureRetryAttempted}
                 disabled={upstreamFailureRetryDisabled}
                 onRetry={
@@ -612,14 +593,7 @@ export function AgentChatTurnRow({
                     : undefined
                 }
               />
-            ) : (
-              <CreditsNoticePart
-                key={`${turn.id}:notice:${index}`}
-                onTopUp={onTopUp}
-                topUpLabel={topUpLabel}
-                tier={fundingTier}
-              />
-            )
+            ) : null
           ) : part.type === "steering" ? (
             <SteeringPart key={`${turn.id}:steering:${index}`} part={part} />
           ) : part.type === "image" ? (
@@ -636,7 +610,6 @@ export function AgentChatTurnRow({
               part={part}
               onDownload={onDownloadVideo}
               onRetry={onRetryVideo ? () => onRetryVideo(turn.id, part) : undefined}
-              retryDisabledReason={part.jobId ? undefined : creditActionsDisabledReason}
             />
           ) : null,
         )}
@@ -647,7 +620,7 @@ export function AgentChatTurnRow({
         />
         {textParts.length === 0 && nonTextParts.length === 0 ? (
           <p className="agent-assistant-empty">
-            <span className="text-shimmer shimmer">Thinking…</span>
+            <span className="text-shimmer shimmer">{t("chat.turn.thinkingEllipsis")}</span>
           </p>
         ) : (
           // No actions on an empty/in-flight turn. There is nothing useful to
@@ -672,8 +645,9 @@ function AgentUserAttachmentList({
   attachments: Extract<AgentChatPart, { type: "attachment" }>[];
   onOpen?: (artifact: AgentArtifact) => void;
 }) {
+  const t = useT();
   return (
-    <div className="agent-user-attachments" role="group" aria-label="Attachments">
+    <div className="agent-user-attachments" role="group" aria-label={t("chat.turn.attachments")}>
       {attachments.map((attachment) => (
         <AgentUserAttachment key={attachment.path} attachment={attachment} onOpen={onOpen} />
       ))}
@@ -688,6 +662,7 @@ function AgentUserAttachment({
   attachment: Extract<AgentChatPart, { type: "attachment" }>;
   onOpen?: (artifact: AgentArtifact) => void;
 }) {
+  const t = useT();
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
@@ -708,14 +683,16 @@ function AgentUserAttachment({
   const artifact: AgentArtifact = {
     name: attachment.name,
     path: attachment.path,
-    rootLabel: "Workspace",
+    rootLabel: t("chat.turn.workspace"),
   };
   const content =
     attachment.kind === "image" ? (
       previewDataUrl ? (
         <img src={previewDataUrl} alt="" aria-hidden="true" draggable={false} />
       ) : previewDataUrl === undefined ? (
-        <span className="agent-user-attachment-loading text-shimmer shimmer">Loading image...</span>
+        <span className="agent-user-attachment-loading text-shimmer shimmer">
+          {t("chat.media.loadingImage")}
+        </span>
       ) : (
         <>
           <span className="agent-attachment-file-icon" aria-hidden="true">
@@ -738,7 +715,7 @@ function AgentUserAttachment({
       type="button"
       className="agent-user-attachment"
       data-kind={attachment.kind}
-      aria-label={`Open ${attachment.name}`}
+      aria-label={t("chat.openNamed", { name: attachment.name })}
       title={attachment.name}
       onClick={() => onOpen(artifact)}
     >
@@ -772,6 +749,7 @@ function userPromptTextForTurn(turn: AgentChatTurn): string {
 }
 
 function ContextCompactionPart({ part }: { part: Extract<AgentChatPart, { type: "context" }> }) {
+  const t = useT();
   return (
     <details className="agent-context-summary">
       <summary>
@@ -784,7 +762,7 @@ function ContextCompactionPart({ part }: { part: Extract<AgentChatPart, { type: 
           <span className="agent-tool-icon-expand">+</span>
           <span className="agent-tool-icon-minimize">−</span>
         </span>
-        <span className="agent-context-label">Context compacted</span>
+        <span className="agent-context-label">{t("chat.turn.contextCompacted")}</span>
       </summary>
       <MarkdownContent markdown={part.text} />
     </details>

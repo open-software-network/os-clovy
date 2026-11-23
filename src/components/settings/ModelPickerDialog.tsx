@@ -8,9 +8,10 @@ import {
   modelPrivacyBadge,
   modelPrivacyFlags,
 } from "../../lib/model-privacy";
-import { formatCreditsAsUsd, pricingLabel } from "../../lib/model-pricing";
+import { formatNumber, isEnglishLocale, t as translate, useT } from "../../i18n";
+import { pricingLabel, tokenPricingLabels } from "../../lib/model-pricing";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
-import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
+import type { ProviderModelMode, ProviderModelDto } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
 import { HoverTip } from "../ui/HoverTip";
 import { ModelPrivacyChip } from "../ui/ModelPrivacyChip";
@@ -20,14 +21,9 @@ export const AUTO_MODEL_ID = "open-software/auto";
 
 type ModelPickerEntry = {
   key: string;
-  model: VeniceModelDto;
+  model: ProviderModelDto;
   reason?: string;
-  costQuality?: number;
 };
-
-function withClovyModelName(model: VeniceModelDto): VeniceModelDto {
-  return model.id === AUTO_MODEL_ID && model.name !== "Auto" ? { ...model, name: "Auto" } : model;
-}
 
 // Model catalog UI shared between Settings (the Models tab rows) and the
 // agent workspace (the session bar's model pill): the picker dialog itself
@@ -35,7 +31,8 @@ function withClovyModelName(model: VeniceModelDto): VeniceModelDto {
 // AppSettings.tsx verbatim so the workspace can open the picker without
 // pulling in the whole settings surface.
 
-export function ModelMeta({ model }: { model: VeniceModelDto }) {
+export function ModelMeta({ model }: { model: ProviderModelDto }) {
+  const t = useT();
   const flags = modelPrivacyFlags(model);
   const privacyBadge = modelPrivacyBadge(model, flags);
   const context = contextLabel(model);
@@ -50,23 +47,23 @@ export function ModelMeta({ model }: { model: VeniceModelDto }) {
     const imagePrivacyLabel =
       model.modelType === "image"
         ? privacyBadge.mode === "private"
-          ? "Private"
+          ? t("settingsPanels.models.private")
           : privacyBadge.mode === "anonymous"
-            ? "Anonymized"
+            ? t("settingsPanels.models.anonymized")
             : undefined
         : undefined;
     items.push(<ModelPrivacyChip badge={privacyBadge} label={imagePrivacyLabel} />);
   }
   if (flags.uncensored) {
     items.push(
-      <span className="model-trait-icon" title="Uncensored">
+      <span className="model-trait-icon" title={t("settingsPanels.models.uncensored")}>
         <IconFire1 size={14} />
-        <span>Uncensored</span>
+        <span>{t("settingsPanels.models.uncensored")}</span>
       </span>,
     );
   }
   if (items.length === 0) {
-    items.push(<span>Model details unavailable</span>);
+    items.push(<span>{t("settingsPanels.models.detailsUnavailable")}</span>);
   }
   return (
     <span className="model-meta-items">
@@ -89,7 +86,6 @@ export function ModelPickerDialog({
   mode,
   value,
   options,
-  costQuality,
   search,
   onSearchChange,
   onClose,
@@ -98,13 +94,13 @@ export function ModelPickerDialog({
   open: boolean;
   mode: ProviderModelMode;
   value: string;
-  options: VeniceModelDto[];
-  costQuality?: number;
+  options: ProviderModelDto[];
   search: string;
   onSearchChange: (value: string) => void;
   onClose: () => void;
-  onSelect: (modelId: string, costQuality?: number) => void;
+  onSelect: (modelId: string) => void;
 }) {
+  const t = useT();
   // "Suggested" leads with the few models we actually recommend (benchmarks,
   // price, tool use, privacy — see SUGGESTED_MODELS); "All" is the full
   // catalog. Suggested is the default on every open; typing a search always
@@ -146,12 +142,12 @@ export function ModelPickerDialog({
   const showReasons = !searching && tab === "suggested" && suggested.length > 0;
   const title =
     mode === "transcription"
-      ? "Transcription model"
+      ? t("settingsPanels.models.transcriptionModel")
       : mode === "image"
-        ? "Image model"
+        ? t("settingsPanels.models.imageModel")
         : mode === "video"
-          ? "Video model"
-          : "Text model";
+          ? t("settingsPanels.models.videoModel")
+          : t("settingsPanels.models.textModel");
 
   return (
     <Dialog
@@ -168,19 +164,23 @@ export function ModelPickerDialog({
           className="model-picker-search-input"
           value={search}
           onChange={(event) => onSearchChange(event.currentTarget.value)}
-          placeholder="Search models"
-          aria-label="Search models"
+          placeholder={t("settingsPanels.models.search")}
+          aria-label={t("settingsPanels.models.search")}
         />
       </label>
       {!searching && suggested.length > 0 ? (
-        <div className="model-picker-tabs" role="tablist" aria-label="Model groups">
+        <div
+          className="model-picker-tabs"
+          role="tablist"
+          aria-label={t("settingsPanels.models.groups")}
+        >
           <button
             type="button"
             role="tab"
             aria-selected={tab === "suggested"}
             onClick={() => setTab("suggested")}
           >
-            Suggested
+            {t("settingsPanels.models.suggested")}
           </button>
           <button
             type="button"
@@ -188,17 +188,14 @@ export function ModelPickerDialog({
             aria-selected={tab === "all"}
             onClick={() => setTab("all")}
           >
-            All
+            {t("settingsPanels.models.all")}
           </button>
         </div>
       ) : null}
       <div className="model-picker-list" role="listbox" aria-label={title}>
         {filteredOptions.map((item) => {
           const { model } = item;
-          const presetCostQuality = item.costQuality;
-          const selected =
-            model.id === value &&
-            (presetCostQuality === undefined || presetCostQuality === costQuality);
+          const selected = model.id === value;
           const reason = showReasons ? item.reason : undefined;
           // A local (bring-your-own) endpoint is selectable, but its tool
           // support can't be verified from here, so it carries a non-blocking
@@ -212,13 +209,9 @@ export function ModelPickerDialog({
               role="option"
               aria-selected={selected}
               data-selected={selected}
-              onClick={() => onSelect(model.id, presetCostQuality)}
+              onClick={() => onSelect(model.id)}
             >
-              <span
-                className="model-picker-logo"
-                data-brand={model.id === AUTO_MODEL_ID ? "clovy" : undefined}
-                aria-hidden
-              >
+              <span className="model-picker-logo" aria-hidden>
                 <ProviderLogo provider={model.provider} id={model.id} name={model.name} />
               </span>
               <span className="model-picker-name" title={model.description}>
@@ -230,15 +223,15 @@ export function ModelPickerDialog({
               <span className="model-picker-meta">
                 {localCaveat ? (
                   <HoverTip
-                    tip="Tool support depends on your local model."
+                    tip={t("settingsPanels.models.toolsCaveatTip")}
                     className="model-picker-tools-caveat"
                     compact
                     width={220}
                     tabIndex={0}
-                    aria-label="Tools not verified. Tool support depends on your local model."
+                    aria-label={t("settingsPanels.models.toolsCaveatAria")}
                     onClick={(event) => event.stopPropagation()}
                   >
-                    Tools not verified
+                    {t("settingsPanels.models.toolsNotVerified")}
                   </HoverTip>
                 ) : null}
                 <ModelMeta model={model} />
@@ -252,8 +245,8 @@ export function ModelPickerDialog({
   );
 }
 
-export function selectedModel(options: VeniceModelDto[], value: string) {
-  return withClovyModelName(
+export function selectedModel(options: ProviderModelDto[], value: string) {
+  return (
     options.find((model) => model.id === value) ?? {
       provider: "",
       id: value,
@@ -261,86 +254,84 @@ export function selectedModel(options: VeniceModelDto[], value: string) {
       modelType: "",
       traits: [],
       capabilities: [],
-    },
+    }
   );
 }
 
-export function contextLabel(model: VeniceModelDto) {
+export function contextLabel(model: ProviderModelDto) {
   if (!model.contextTokens) return undefined;
   if (model.contextTokens >= 1_000_000) {
-    return `${trimNumber(model.contextTokens / 1_000_000)}M context`;
+    return translate("settingsPanels.models.contextMillions", {
+      value: trimNumber(model.contextTokens / 1_000_000),
+    });
   }
   if (model.contextTokens >= 1_000) {
-    return `${trimNumber(model.contextTokens / 1_000)}K context`;
+    return translate("settingsPanels.models.contextThousands", {
+      value: trimNumber(model.contextTokens / 1_000),
+    });
   }
-  return `${model.contextTokens} context`;
+  return translate("settingsPanels.models.contextTokens", { value: String(model.contextTokens) });
 }
 
+/** One decimal at most: "1.5M" in English (as before), the interface locale's digits elsewhere ("1,5M"). */
 function trimNumber(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  if (Number.isInteger(value)) return String(value);
+  if (isEnglishLocale()) return value.toFixed(1);
+  return formatNumber(value, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    useGrouping: false,
+  });
 }
 
 // The hover card's spec list: the pricing/context facts split into label/value
 // pairs so the card renders a compact spec table instead of a prose sentence.
 // Falls back to a single "Pricing" row when there is no clean input/output
-// credit split.
-export function modelSpecEntries(model: VeniceModelDto): { label: string; value: string }[] {
-  // Auto is a routing preference, not a concrete model. Its eventual model,
-  // price, and context window vary by request, so fixed catalog specs would be
-  // misleading even when the compatibility catalog provides placeholders.
-  if (model.id === "open-software/auto") return [];
-
+// USD token-price split.
+export function modelSpecEntries(model: ProviderModelDto): { label: string; value: string }[] {
   const entries: { label: string; value: string }[] = [];
-  // Use Clovy's billed credit price (with margin) for the input/output split.
-  // The raw `pricing.*.usd` on the DTO is upstream provider metadata the backend
-  // keeps for reference only — the user-facing price must come from the credit
-  // price (see clovy-api handlers/models.rs), so it is never shown as the price
-  // here. Anything without the credit split defers to `pricingLabel`, which
-  // resolves the price the same way the rest of the app does.
-  if (
-    model.priceUnit === "tokens" &&
-    typeof model.inputCreditsPerMillionTokens === "number" &&
-    typeof model.outputCreditsPerMillionTokens === "number"
-  ) {
+  const prices = tokenPricingLabels(model);
+  if (prices) {
+    entries.push({ label: translate("settingsPanels.models.input"), value: `${prices.input} /1M` });
     entries.push({
-      label: "Input",
-      value: `${formatCreditsAsUsd(model.inputCreditsPerMillionTokens)} /1M`,
-    });
-    entries.push({
-      label: "Output",
-      value: `${formatCreditsAsUsd(model.outputCreditsPerMillionTokens)} /1M`,
+      label: translate("settingsPanels.models.output"),
+      value: `${prices.output} /1M`,
     });
   } else {
     const price = pricingLabel(model);
-    if (price) entries.push({ label: "Pricing", value: price });
+    if (price) entries.push({ label: translate("settingsPanels.models.pricing"), value: price });
   }
   if (model.contextTokens) {
     const context =
       model.contextTokens >= 1_000_000
-        ? `${trimNumber(model.contextTokens / 1_000_000)}M tokens`
+        ? translate("settingsPanels.models.tokensMillions", {
+            value: trimNumber(model.contextTokens / 1_000_000),
+          })
         : model.contextTokens >= 1_000
-          ? `${trimNumber(model.contextTokens / 1_000)}K tokens`
-          : `${model.contextTokens} tokens`;
-    entries.push({ label: "Context", value: context });
+          ? translate("settingsPanels.models.tokensThousands", {
+              value: trimNumber(model.contextTokens / 1_000),
+            })
+          : translate("settingsPanels.models.tokensCount", { value: String(model.contextTokens) });
+    entries.push({ label: translate("settingsPanels.models.context"), value: context });
   }
   return entries;
 }
 
-export function modelOptions(models: VeniceModelDto[], selectedModel: string) {
+export function modelOptions(models: ProviderModelDto[], selectedModel: string) {
   const modelId = selectedModel.trim();
-  const namedModels = models.map(withClovyModelName);
-  if (!modelId || namedModels.some((model) => model.id === modelId)) {
+  const namedModels = models.filter((model) => model.id !== AUTO_MODEL_ID);
+  if (!modelId || modelId === AUTO_MODEL_ID || namedModels.some((model) => model.id === modelId)) {
     return namedModels;
   }
   return [
-    withClovyModelName({
+    {
       provider: "",
       id: modelId,
       name: modelId,
       modelType: "",
       traits: [],
       capabilities: [],
-    }),
+    },
     ...namedModels,
   ];
 }

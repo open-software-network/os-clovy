@@ -130,3 +130,8 @@ Under ADR-0055, newly generated diagnostics use the canonical
 `clovy-agent-diagnostics.txt` attachment name. The June-named attachment above
 describes the historical implementation and is not a persisted or accepted API
 identifier.
+
+Superada pela change desvincular-repo-ci no encaminhamento a os-platform: Clovy API só registra os relatórios em log; a submissão direta e o diagnóstico no servidor continuam.
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não envia mais relatórios de erro: o ReportDialog e as chamadas a `/v1/issue-reports` foram removidos (2026-10-21).

@@ -25,6 +25,8 @@ export class NoteSaveController {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlight = new Map<string, Promise<NoteSaveResult>>();
   private readonly retryAttempts = new Map<string, number>();
+  private readonly editVersions = new Map<string, number>();
+  private readonly discardVersions = new Map<string, number>();
   private readonly debounceMs: number;
 
   constructor(private readonly options: NoteSaveControllerOptions) {
@@ -33,6 +35,7 @@ export class NoteSaveController {
 
   queue(noteId: string, patch: NoteEditablePatch) {
     if (!hasPatchFields(patch)) return;
+    this.editVersions.set(noteId, this.getEditVersion(noteId) + 1);
     this.retryAttempts.delete(noteId);
     this.pending.set(noteId, {
       ...this.pending.get(noteId),
@@ -95,9 +98,19 @@ export class NoteSaveController {
   }
 
   discard(noteId: string) {
+    this.discardVersions.set(noteId, (this.discardVersions.get(noteId) ?? 0) + 1);
+    this.editVersions.set(noteId, this.getEditVersion(noteId) + 1);
     this.clearTimer(noteId);
     this.pending.delete(noteId);
     this.retryAttempts.delete(noteId);
+    // The request may still settle, but it no longer belongs to an editable
+    // note or the shutdown barrier. Its result cannot publish or retry.
+    this.inFlight.delete(noteId);
+  }
+
+  /** Local edit ordering for asynchronous native-event hydration. */
+  getEditVersion(noteId: string) {
+    return this.editVersions.get(noteId) ?? 0;
   }
 
   private async drain(noteId: string): Promise<NoteSaveResult> {
@@ -127,8 +140,11 @@ export class NoteSaveController {
   }
 
   private async persist(noteId: string, patch: NoteEditablePatch): Promise<NoteSaveResult> {
+    const generation = this.discardVersions.get(noteId) ?? 0;
+    const discarded = () => generation !== (this.discardVersions.get(noteId) ?? 0);
     try {
       const persisted = await this.options.persist(noteId, patch);
+      if (discarded()) return { succeeded: true };
       this.options.onPersisted?.({
         ...persisted,
         ...this.pending.get(noteId),
@@ -136,6 +152,7 @@ export class NoteSaveController {
       this.retryAttempts.delete(noteId);
       return { succeeded: true };
     } catch (error) {
+      if (discarded()) return { succeeded: true };
       // Keep the failed fields available for the next edit/flush. Newer values
       // win when the user changed the same field while this write was running.
       this.pending.set(noteId, {

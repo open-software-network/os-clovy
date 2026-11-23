@@ -12,9 +12,13 @@
 //! enumerated without keychain prompts. Tokens are never logged and never
 //! serialized into errors.
 
+pub mod agent_tools;
 pub mod approvals;
 pub mod commands;
 pub mod github;
+pub mod github_cli;
+#[cfg(all(test, unix))]
+pub(crate) mod github_cli_fixtures;
 pub mod google;
 pub mod linear;
 pub mod notion;
@@ -132,6 +136,10 @@ pub struct ConnectorAccount {
     /// The Linear teams this account is scoped to. Always empty for Google
     /// rows, which have no team concept.
     pub selected_teams: Vec<SelectedTeamDto>,
+    /// A GitHub account whose credential is the GitHub CLI's own login
+    /// (`gh auth token`), read on every call and never stored by Clovy.
+    #[serde(default)]
+    pub via_gh: bool,
 }
 
 /// One Linear team the account is scoped to, as shown to the frontend.
@@ -193,7 +201,7 @@ struct GoogleOAuthClient {
 }
 
 fn google_oauth_client() -> GoogleOAuthClient {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
     GoogleOAuthClient {
         client_id: env_or_build_trimmed(
             GOOGLE_OAUTH_CLIENT_ID_ENV,
@@ -222,7 +230,7 @@ fn require_oauth_client() -> Result<GoogleOAuthClient, AppError> {
 /// unlike [`google_oauth_client`] there is no second field to ship. Runtime
 /// env overrides the build-time value for local testing.
 fn linear_oauth_client_id() -> String {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
     env_or_build_trimmed(
         LINEAR_OAUTH_CLIENT_ID_ENV,
         option_env!("LINEAR_OAUTH_CLIENT_ID"),
@@ -268,7 +276,7 @@ impl GithubOAuthClient {
 }
 
 fn github_oauth_client() -> GithubOAuthClient {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
     GithubOAuthClient {
         client_id: env_or_build_trimmed(
             GITHUB_OAUTH_CLIENT_ID_ENV,
@@ -302,7 +310,7 @@ fn require_github_client_id() -> Result<GithubOAuthClient, AppError> {
 const GITHUB_APP_SLUG_ENV: &str = "GITHUB_APP_SLUG";
 
 fn github_app_slug() -> String {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
     env_or_build_trimmed(GITHUB_APP_SLUG_ENV, option_env!("GITHUB_APP_SLUG"))
 }
 
@@ -333,7 +341,7 @@ const LINEAR_OAUTH_LOOPBACK_PORT_ENV: &str = "LINEAR_OAUTH_LOOPBACK_PORT";
 /// (for an OAuth app registered with a custom callback URL), otherwise the
 /// registered defaults.
 fn linear_loopback_ports() -> Vec<u16> {
-    crate::os_accounts::load_local_env();
+    crate::local_env::load_local_env();
     linear_loopback_ports_from(&env_trimmed(LINEAR_OAUTH_LOOPBACK_PORT_ENV))
 }
 
@@ -657,6 +665,50 @@ async fn refresh_linear_access_token_with_freshness_gate(
     }
 }
 
+/// The account a connector tool call may use: connected, holding `scope`
+/// (directly or through a broader scope), and with teams when `teams` asks
+/// for them. Same rules for every credential source.
+pub fn check_account_grant(
+    accounts: &[ConnectorAccount],
+    account_id: &str,
+    provider: ConnectorProvider,
+    scope: &str,
+    teams: bool,
+) -> Result<ConnectorAccount, AppError> {
+    let account = accounts
+        .iter()
+        .find(|account| account.account_id == account_id && account.provider == provider)
+        .ok_or_else(|| {
+            AppError::new(
+                "connector_not_connected",
+                "This connector account is not connected.",
+            )
+        })?;
+    if account.status != ConnectorAccountStatus::Connected {
+        return Err(AppError::new(
+            "connector_reconnect_required",
+            "Reconnect this connector account in settings.",
+        ));
+    }
+    if !account
+        .scopes
+        .iter()
+        .any(|held| policy::scope_grants(held, scope))
+    {
+        return Err(AppError::new(
+            "connector_scope_missing",
+            "This connector account does not have the required permission.",
+        ));
+    }
+    if teams && account.selected_teams.is_empty() {
+        return Err(AppError::new(
+            "linear_teams_not_selected",
+            "Select at least one Linear team in settings.",
+        ));
+    }
+    Ok(account.clone())
+}
+
 fn github_not_connected_error() -> AppError {
     AppError::new(
         "connector_not_connected",
@@ -682,6 +734,19 @@ pub async fn github_access_token(
     app: &tauri::AppHandle,
     account_id: &str,
 ) -> Result<String, AppError> {
+    // A "via gh" account has no Clovy custody: its token comes from `gh` on
+    // every call (ADR-0066).
+    let repos = crate::commands::repositories(app).await?;
+    if let Some(record) = repos.get_connector_account(account_id).await? {
+        if github_cli::is_gh_account(&record.metadata) {
+            let env = crate::llm::shell_env::login_env().await;
+            let token = github_cli::access_token(&repos, &env, account_id).await;
+            if token.is_err() {
+                emit_connectors_changed(app);
+            }
+            return token;
+        }
+    }
     let stored = store::load_tokens(ConnectorProvider::Github, account_id)
         .await?
         .ok_or_else(github_not_connected_error)?;
@@ -689,17 +754,6 @@ pub async fn github_access_token(
         return Ok(stored.access_token.clone());
     }
     refresh_github_access_token_with_freshness_gate(app, account_id, true).await
-}
-
-/// Refresh regardless of cached freshness. Callers use this to retry once
-/// after `github::GithubApiError::Unauthorized` (a token revoked or expired
-/// server side before its local expiry).
-pub async fn force_refresh_github_access_token(
-    app: &tauri::AppHandle,
-    account_id: &str,
-) -> Result<String, AppError> {
-    // Skip the freshness fast path but still serialize on the account lock.
-    refresh_github_access_token_with_freshness_gate(app, account_id, false).await
 }
 
 async fn refresh_github_access_token_with_freshness_gate(
@@ -850,6 +904,7 @@ async fn account_dto(
     // info" rather than failing the whole account list.
     let metadata: ConnectorAccountMetadata =
         serde_json::from_str(&record.metadata).unwrap_or_default();
+    let via_gh = github_cli::is_gh_account(&record.metadata);
     // Same best-effort stance for the team rows: account enumeration was
     // infallible before selected teams existed, and callers treat an Err as
     // "no accounts" (blanking the settings page and routine gates), so one
@@ -877,6 +932,7 @@ async fn account_dto(
         email: record.email,
         scopes: record.scopes,
         status: ConnectorAccountStatus::from_db(&record.status),
+        via_gh,
         workspace_name: metadata.workspace_name,
         workspace_url_key: metadata.workspace_url_key,
         selected_teams,
@@ -959,6 +1015,7 @@ fn append_notion_account(
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -975,6 +1032,7 @@ fn append_notion_account(
                 email: notion::notion_account_email().to_string(),
                 scopes: Vec::new(),
                 status: ConnectorAccountStatus::Unavailable,
+                via_gh: false,
                 workspace_name: None,
                 workspace_url_key: None,
                 selected_teams: Vec::new(),
@@ -1149,6 +1207,7 @@ pub async fn begin_connect(
         email,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
@@ -1574,6 +1633,7 @@ pub async fn begin_connect_linear(
             email: identity.user_email.clone(),
             scopes: granted_scopes,
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some(identity.workspace_name.clone()).filter(|name| !name.is_empty()),
             workspace_url_key: Some(identity.workspace_url_key.clone()).filter(|key| !key.is_empty()),
             selected_teams,
@@ -1662,12 +1722,26 @@ pub async fn begin_connect_github(
             ),
         ));
     }
-    let client = require_github_client_id()?;
     let repos = crate::commands::repositories(app).await?;
 
     let reconnect_account_id = reconnect_account_id
         .map(str::trim)
         .filter(|id| !id.is_empty());
+
+    // A "via gh" account rides on the GitHub CLI's login: adding a bundle is
+    // a Clovy-side grant, never a device flow (ADR-0066).
+    if let Some(account_id) = reconnect_account_id {
+        if let Some(record) = repos.get_connector_account(account_id).await? {
+            if record.provider == ConnectorProvider::Github.as_str()
+                && github_cli::is_gh_account(&record.metadata)
+            {
+                let account = github_cli::grant_bundles(&repos, account_id, bundles).await?;
+                emit_connectors_changed(app);
+                return Ok(account);
+            }
+        }
+    }
+    let client = require_github_client_id()?;
 
     // Escalation/reconnect short-circuit: an existing, healthy account
     // that already holds every wanted scope needs no new device-flow round-trip.
@@ -1708,7 +1782,7 @@ pub async fn begin_connect_github(
         );
         // Open the verification URI in the default browser so the user
         // can approve the device without leaving Clovy.
-        let _ = crate::os_accounts::open_in_browser(&device_code.verification_uri);
+        let _ = crate::system_browser::open_in_browser(&device_code.verification_uri);
     })
     .await?;
     let identity = grant.identity;
@@ -1735,6 +1809,9 @@ pub async fn begin_connect_github(
     }
 
     // Same single-account rationale as Google and Linear, scoped to GitHub.
+    // The check and the writes below run under the GitHub account lifecycle
+    // lock so a concurrent "via gh" detection cannot add a second account.
+    let _lifecycle = github_cli::github_accounts_lock().lock().await;
     let existing_accounts = repos.list_connector_accounts().await?;
     if let Some(existing_id) = conflicting_existing_account(
         existing_accounts
@@ -1834,10 +1911,49 @@ pub async fn begin_connect_github(
         email: identity.login,
         scopes: granted_scopes,
         status: ConnectorAccountStatus::Connected,
+        via_gh: false,
         workspace_name: None,
         workspace_url_key: None,
         selected_teams: Vec::new(),
     })
+}
+
+fn github_cli_preferences_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, AppError> {
+    crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("app_data_dir_unavailable", error.to_string()))
+}
+
+pub fn start_github_cli_detection(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = connect_github_cli(&app, github_cli::ConnectMode::Automatic).await {
+            tracing::warn!(error_code = %error.code, "github cli detection at start failed");
+        }
+    });
+}
+
+/// Connect "GitHub (via gh)" when the GitHub CLI is signed in and no GitHub
+/// account exists (app start and Plugins), or on the explicit button.
+pub async fn connect_github_cli(
+    app: &tauri::AppHandle,
+    mode: github_cli::ConnectMode,
+) -> Result<Option<ConnectorAccount>, AppError> {
+    let repos = crate::commands::repositories(app).await?;
+    let env = crate::llm::shell_env::login_env().await;
+    let before = repos.list_connector_accounts().await?;
+    let account =
+        github_cli::detect_and_connect(&repos, &env, &github_cli_preferences_dir(app)?, mode)
+            .await?;
+    let after = repos.list_connector_accounts().await?;
+    let changed = before.len() != after.len()
+        || before
+            .iter()
+            .zip(&after)
+            .any(|(old, new)| old.account_id != new.account_id || old.status != new.status);
+    if changed {
+        emit_connectors_changed(app);
+    }
+    Ok(account)
 }
 
 /// Abort an in-flight connect (drains the browser-handoff wait).
@@ -1913,6 +2029,18 @@ pub async fn disconnect(
 ) -> Result<DisconnectOutcome, AppError> {
     let repos = crate::commands::repositories(app).await?;
     let account = repos.get_connector_account(account_id).await?;
+    if account
+        .as_ref()
+        .is_some_and(|record| github_cli::is_gh_account(&record.metadata))
+    {
+        // Nothing of the credential lives in Clovy; disconnecting also stops
+        // the automatic connection through gh.
+        github_cli::disconnect(&repos, &github_cli_preferences_dir(app)?, account_id).await?;
+        emit_connectors_changed(app);
+        return Ok(DisconnectOutcome {
+            provider_revocation_confirmed: None,
+        });
+    }
     let account_was_present = account.is_some();
     let providers: &[ConnectorProvider] = match account {
         Some(record) => match ConnectorProvider::from_db(&record.provider) {
@@ -2214,53 +2342,6 @@ pub fn linear_action_ambiguous_error(action_id: &str) -> AppError {
             "Clovy could not confirm whether Linear applied this change. Check Linear before retrying; action id {action_id}."
         ),
     )
-}
-
-/// Journal a mutation attempt as `pending` before the provider call.
-/// Best-effort by design: on a DB failure this logs a warning and returns -
-/// the journal must never block or fail a mutation the user approved.
-pub async fn journal_action_pending(
-    app: &tauri::AppHandle,
-    action_id: &str,
-    account_id: &str,
-    tool: &str,
-    summary: &str,
-) {
-    let result = match crate::commands::repositories(app).await {
-        Ok(repos) => repos
-            .insert_connector_action(action_id, account_id, tool, summary)
-            .await
-            .map_err(AppError::from),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        tracing::warn!(
-            error_code = %error.code,
-            tool,
-            "journaling pending connector action failed; continuing with the mutation"
-        );
-    }
-}
-
-/// Record a journaled mutation's outcome (`committed` / `ambiguous` /
-/// `failed`). Best-effort like [`journal_action_pending`]: the user-facing
-/// outcome of the mutation is already decided by the time this runs, so a
-/// journal failure is logged, never surfaced.
-pub async fn journal_action_resolved(app: &tauri::AppHandle, action_id: &str, status: &str) {
-    let result = match crate::commands::repositories(app).await {
-        Ok(repos) => repos
-            .resolve_connector_action(action_id, status)
-            .await
-            .map_err(AppError::from),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        tracing::warn!(
-            error_code = %error.code,
-            status,
-            "resolving journaled connector action failed"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2877,6 +2958,7 @@ mod tests {
             email: "user@example.com".to_string(),
             scopes: vec!["openid".to_string()],
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),
@@ -2895,6 +2977,7 @@ mod tests {
             email: String::new(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: Some("Acme".to_string()),
             workspace_url_key: Some("acme".to_string()),
             selected_teams: vec![SelectedTeamDto {
@@ -2920,6 +3003,7 @@ mod tests {
             email: notion::notion_account_email().to_string(),
             scopes: Vec::new(),
             status: ConnectorAccountStatus::Connected,
+            via_gh: false,
             workspace_name: None,
             workspace_url_key: None,
             selected_teams: Vec::new(),

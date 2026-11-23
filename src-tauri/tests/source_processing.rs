@@ -6,7 +6,7 @@ use clovy_lib::audio::validation::{
     source_audio_passes_validation, validate_audio_artifact, AudioValidationConfig,
 };
 use clovy_lib::domain::processing::{
-    build_dictionary_context, build_transcription_context, coalesce_source_transcripts,
+    build_transcription_context, build_transcription_dictionary, coalesce_source_transcripts,
     labeled_transcript_from_sources, merge_transcription_context, valid_sources_for_processing,
     SourceTranscriptInput,
 };
@@ -152,19 +152,66 @@ fn builds_transcription_context_from_previous_turns() {
     assert!(context.contains("Preserve the spoken language"));
 }
 
-#[test]
-fn builds_dictionary_context_from_custom_terms() {
-    let context = build_dictionary_context(&[DictionaryEntryDto {
-        id: "entry-1".to_string(),
-        phrase: "Jane Doe".to_string(),
-        created_at: "2026-05-26T00:00:00Z".to_string(),
-        updated_at: "2026-05-26T00:00:00Z".to_string(),
-    }])
-    .expect("dictionary context should be built");
+fn dictionary_entries(phrases: &[&str]) -> Vec<DictionaryEntryDto> {
+    phrases
+        .iter()
+        .enumerate()
+        .map(|(index, phrase)| DictionaryEntryDto {
+            id: format!("entry-{index}"),
+            phrase: phrase.to_string(),
+            created_at: "2026-05-26T00:00:00Z".to_string(),
+            updated_at: "2026-05-26T00:00:00Z".to_string(),
+        })
+        .collect()
+}
 
-    assert!(context.contains("Custom dictionary terms"));
-    assert!(context.contains("Jane Doe"));
-    assert!(context.contains("exact spelling and capitalization"));
+fn asr_hint(phrases: &[&str]) -> Option<String> {
+    build_transcription_dictionary(&dictionary_entries(phrases))
+        .and_then(|dictionary| dictionary.asr_hint)
+}
+
+#[test]
+fn asr_hint_joins_whole_trimmed_terms_in_dictionary_order() {
+    assert_eq!(
+        asr_hint(&[" Jane Doe ", "  ", "Clovy", "OSS"]).as_deref(),
+        Some("Jane Doe, Clovy, OSS")
+    );
+    assert_eq!(asr_hint(&[]), None);
+}
+
+#[test]
+fn asr_hint_counts_utf8_bytes_and_separators_against_its_200_byte_budget() {
+    let first = "a".repeat(100);
+    // 100 + ", " + 98 is exactly 200 bytes: the term is kept.
+    let exact = "b".repeat(98);
+    assert_eq!(
+        asr_hint(&[&first, &exact]),
+        Some(format!("{first}, {exact}"))
+    );
+    // One byte over: the whole term is skipped, never cut.
+    let over = "b".repeat(99);
+    assert_eq!(asr_hint(&[&first, &over]), Some(first.clone()));
+    // 102 characters but 202 bytes: two-byte characters count twice.
+    let accented = "é".repeat(60);
+    let umlauts = "ü".repeat(40);
+    assert_eq!(asr_hint(&[&accented, &umlauts]), Some(accented.clone()));
+}
+
+#[test]
+fn asr_hint_skips_a_term_that_does_not_fit_and_keeps_trying_later_ones() {
+    let filler = "f".repeat(190);
+    assert_eq!(
+        asr_hint(&[&filler, "Kubernetes", "OSS"]),
+        Some(format!("{filler}, OSS"))
+    );
+
+    let oversized = "x".repeat(201);
+    assert_eq!(asr_hint(&[&oversized, "Clovy"]).as_deref(), Some("Clovy"));
+    // No term fits: no hint at all, but correction still gets the full dictionary.
+    let dictionary = build_transcription_dictionary(&dictionary_entries(&[&oversized]))
+        .expect("a dictionary with one term");
+    assert_eq!(dictionary.asr_hint, None);
+    assert!(dictionary.context.contains(&oversized));
 }
 
 #[test]

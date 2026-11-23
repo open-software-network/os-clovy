@@ -14,7 +14,6 @@ const queued = {
     prompt: "Continue with the attachment",
     attachments: ["/tmp/brief.pdf"],
     model: "open-software/auto",
-    thinkingLevel: "medium" as const,
     delivery: "follow_up" as const,
     steering: "accepted" as const,
   },
@@ -101,7 +100,6 @@ describe("agent follow-up queue", () => {
         prompt: `Continue with the attachment\n\n${ATTACHMENT_FOLLOW_UP_NOTE}`,
         attachments: ["/tmp/brief.pdf"],
         model: "open-software/auto",
-        thinkingLevel: "medium",
         delivery: "attachments",
       },
     });

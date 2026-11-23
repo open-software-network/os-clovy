@@ -18,8 +18,8 @@ function pngImage(): GeneratedImageDto {
   return {
     imageBase64: HELLO_BASE64,
     mimeType: "image/png",
-    model: "venice-sd35",
-    provider: "venice",
+    model: "fal-ai/flux/dev",
+    provider: "fal",
   };
 }
 
@@ -55,11 +55,11 @@ describe("chat image generation", () => {
       importImageBytes: vi.fn().mockResolvedValue(file),
     };
 
-    const result = await generateChatImage("a red bicycle", deps, "venice-sd35", "image-req-1");
+    const result = await generateChatImage("a red bicycle", deps, "fal-ai/flux/dev", "image-req-1");
 
     expect(deps.generate).toHaveBeenCalledWith(
       "a red bicycle",
-      "venice-sd35",
+      "fal-ai/flux/dev",
       "image-req-1",
       undefined,
     );
@@ -83,14 +83,14 @@ describe("chat image generation", () => {
     const deps: GenerateChatImageDeps = {
       generate: vi.fn().mockResolvedValue(pngImage()),
       importImageBytes: vi.fn().mockResolvedValue(importedFile()),
-      defaultModel: () => "venice-sd35",
+      defaultModel: () => "fal-ai/flux/dev",
     };
 
     await generateChatImage("anything", deps);
 
     expect(deps.generate).toHaveBeenCalledWith(
       "anything",
-      "venice-sd35",
+      "fal-ai/flux/dev",
       expect.any(String),
       undefined,
     );
@@ -102,9 +102,9 @@ describe("chat image generation", () => {
       importImageBytes: vi.fn().mockResolvedValue(importedFile()),
     };
 
-    await generateChatImage("anything", deps, "venice-sd35", "image-req-1", false);
+    await generateChatImage("anything", deps, "fal-ai/flux/dev", "image-req-1", false);
 
-    expect(deps.generate).toHaveBeenCalledWith("anything", "venice-sd35", "image-req-1", false);
+    expect(deps.generate).toHaveBeenCalledWith("anything", "fal-ai/flux/dev", "image-req-1", false);
   });
 
   it("rejects a blank prompt without calling the backend", async () => {
@@ -142,8 +142,8 @@ describe("chat image generation", () => {
       generate: vi.fn().mockResolvedValue({
         imageBase64: HELLO_BASE64,
         mimeType: "text/plain",
-        model: "venice-sd35",
-        provider: "venice",
+        model: "fal-ai/flux/dev",
+        provider: "fal",
       }),
       importImageBytes: vi.fn(),
     };

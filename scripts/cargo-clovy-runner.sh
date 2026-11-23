@@ -46,10 +46,20 @@ for arg in "$@"; do
   esac
 done
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One code signing identity for the app bundle and every helper build.rs signs:
+# an explicit CLOVY_DEV_SIGNING_IDENTITY, or the single valid Apple Development
+# identity in the login keychain. Normalized to its SHA-1 before Cargo runs.
+CLOVY_DEV_SIGNING_IDENTITY="$(node "$script_dir/dev-signing-identity.mjs")"
+export CLOVY_DEV_SIGNING_IDENTITY
+
 # The Computer use helper is prepared and signed separately before Tauri runs.
-# Building only Clovy here prevents Cargo from relinking that helper with the
-# app's lower deployment target or a different active Swift toolchain.
-cargo build --bin os-june "${cargo_args[@]}"
+# Building only Clovy and its MCP relay here
+# prevents Cargo from relinking that helper with the app's lower deployment
+# target or a different active Swift toolchain. The relay sits
+# beside the app executable (docs/mcp-server.md).
+cargo build --bin clovy --bin clovy-mcp ${cargo_args[@]+"${cargo_args[@]}"}
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then
@@ -62,25 +72,17 @@ else
   bin_dir="$target_dir/$profile"
 fi
 
-binary="$bin_dir/os-june"
-launcher_name="${OS_CLOVY_DEV_APP_NAME:-${OS_JUNE_DEV_APP_NAME:-Clovy}}"
-if [[ -z "$launcher_name" || "$launcher_name" == */* || "$launcher_name" == *:* || "$launcher_name" == *$'\n'* || ${#launcher_name} -gt 80 ]]; then
-  echo "Invalid development app name: $launcher_name" >&2
-  exit 2
-fi
-launcher="$bin_dir/$launcher_name"
-tmp_launcher="$bin_dir/.Clovy-launcher.tmp"
-
-rm -f "$tmp_launcher"
-# Keep the product-named launcher and Cargo's canonical binary on the same
-# inode. The Computer use helper verifies this identity before accepting the
-# private peer, including issue-suffixed Codex and Claude development names.
-ln "$binary" "$tmp_launcher"
-chmod +x "$tmp_launcher"
-mv -f "$tmp_launcher" "$launcher"
+# Run the app from a signed bundle beside Cargo's output, so macOS can show it in
+# System Settings and keep its privacy grants across restarts and rebuilds
+# (docs/development.md). The launcher execs the bundle executable in place,
+# keeping this process id, the arguments, stdio, and the exit status Tauri dev
+# supervises, and makes the app responsible for its own privacy requests.
+launch="$(node "$script_dir/dev-app-bundle.mjs" --profile-dir "$bin_dir")"
+launcher="${launch%%$'\n'*}"
+executable="${launch#*$'\n'}"
 
 if [[ "${#app_args[@]}" -gt 0 ]]; then
-  exec "$launcher" "${app_args[@]}"
+  exec "$launcher" "$executable" "${app_args[@]}"
 else
-  exec "$launcher"
+  exec "$launcher" "$executable"
 fi

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "protocol": "clovy-agent-browser/1",
+  "source": {
+    "repository": "https://github.com/vercel-labs/agent-browser",
+    "commit": "5868f7c05020e047c00e68e4abf9253cce864f41",
+    "license": "Apache-2.0",
+    "patches": ["0001-no-reference-recovery.patch", "0002-private-host.patch"],
+    "preparationFiles": ["preparation-lock.mjs", "windows-signing.mjs"],
+    "reviewException": "The owner explicitly selected this source commit for the private authenticated host. The downstream patches remove public command listeners and unsafe reference recovery; the stock release does not satisfy the required authority boundary. This is an exact-source review exception, not a registry cooldown exclusion.",
+    "hostFiles": [
+      "private-host/clovy_private_main.rs",
+      "private-host/clovy_private_client.rs",
+      "private-host/clovy_private_launch.rs",
+      "private-host/clovy_browser_process_identity.rs",
+      "private-host/clovy_browser_grant.rs",
+      "private-host/clovy_browser_recovery.rs",
+      "private-host/clovy_private_guard.js"
+    ],
+    "patchRevision": 1
+  },
+  "chrome": {
+    "version": "156.0.8078.80",
+    "revision": "1706539",
+    "catalog": "https://googlechromelabs.github.io/chrome-for-testing/156.0.8078.80.json",
+    "digestMethod": "SHA-256 of complete official archive bytes, downloaded 2026-11-01; official catalog supplies URLs but no SHA-256 values.",
+    "platforms": {
+      "linux64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux64/chrome-linux64.zip",
+        "sha256": "b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7",
+        "bytes": 201329937,
+        "archiveRoot": "chrome-linux64",
+        "executable": "chrome/chrome-linux64/chrome",
+        "engine": "clovy-agent-browser",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "mac-arm64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/mac-arm64/chrome-mac-arm64.zip",
+        "sha256": "8bc590d1b1acac042a000234c768f31830f25a3983a83ed5e067114c87c4cad1",
+        "bytes": 195027080,
+        "archiveRoot": "chrome-mac-arm64",
+        "executable": "chrome/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "engine": "clovy-agent-browser",
+        "target": "aarch64-apple-darwin"
+      },
+      "mac-x64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/mac-x64/chrome-mac-x64.zip",
+        "sha256": "672b79dc79fdf28bb2ec9787b7fa33810c2b3cfd946a0fb4d3b72775f4e6fd9a",
+        "bytes": 205782188,
+        "archiveRoot": "chrome-mac-x64",
+        "executable": "chrome/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "engine": "clovy-agent-browser",
+        "target": "x86_64-apple-darwin"
+      },
+      "win64": {
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/win64/chrome-win64.zip",
+        "sha256": "16edb57d6107bf1c48a7c149b8d78b155fe614410093796dd72441fd6640540f",
+        "bytes": 208152768,
+        "archiveRoot": "chrome-win64",
+        "executable": "chrome/chrome-win64/chrome.exe",
+        "engine": "clovy-agent-browser.exe",
+        "target": "x86_64-pc-windows-msvc"
+      }
+    }
+  },
+  "artifacts": {
+    "provenance": "provenance.json",
+    "sbom": "sbom.spdx.json",
+    "licenses": "licenses"
+  }
+}

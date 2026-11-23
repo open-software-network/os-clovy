@@ -1,7 +1,10 @@
-import "./lib/storage-compat-bootstrap";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { IconWindow } from "central-icons/IconWindow";
+import { activityAppIcon } from "./lib/activity-timeline";
+import { detectMeetingWindow, type DictationTarget, type MeetingWindowDto } from "./lib/tauri";
+import { isMacLikePlatform } from "./lib/platform";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
@@ -22,18 +25,23 @@ import { SPINNER_GRID_COLS, spinnerGrid } from "./lib/spinner-grid";
 import { isOnboardingComplete, subscribeToOnboardingComplete } from "./lib/onboarding";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { subscribeBrand } from "./lib/brand";
+import { messageForErrorCode } from "./lib/errors";
 import { createHudLifecycle } from "./lib/hud-lifecycle";
+import { subscribeInterfaceLocale, subscribeInterfaceLocaleAcrossWindows, t } from "./i18n";
 import "./styles/hud.css";
 
 const lifecycle = createHudLifecycle();
 
 // Recolor this HUD window to the selected accent and keep it live-synced.
 lifecycle.trackUnlisten(subscribeBrand());
+// Follow the interface language chosen in the main window (sets <html lang>).
+lifecycle.addCleanup(subscribeInterfaceLocaleAcrossWindows());
 
 type DictationHudEvent = {
   type: string;
   payload?: {
     app?: string;
+    target?: DictationTarget | null;
     code?: string;
     message?: string;
     level?: string;
@@ -54,6 +62,76 @@ const appWindow = (() => {
 lifecycle.addCleanup(installNativeContextMenuGuard());
 
 const hud = document.querySelector<HTMLDivElement>("#hud");
+const targetNode = document.querySelector<HTMLElement>("#hud-target");
+const targetImage = targetNode?.querySelector<HTMLImageElement>("img");
+const targetFallback = targetNode?.querySelector<HTMLElement>(".hud-target-fallback");
+let targetName: string | undefined;
+let targetIdentity: string | undefined;
+let targetGeneration = 0;
+let targetPinned = false;
+let targetActive = false;
+
+function renderTargetLabel() {
+  const label = targetName
+    ? t("hud.dictation.target", { app: targetName })
+    : t("hud.dictation.targetUnknown");
+  targetNode?.setAttribute("aria-label", label);
+  targetNode?.setAttribute("title", label);
+}
+
+function clearTargetImage() {
+  if (targetImage) {
+    targetImage.hidden = true;
+    targetImage.removeAttribute("src");
+  }
+  if (targetFallback) targetFallback.hidden = false;
+}
+
+function resetTarget() {
+  targetGeneration += 1;
+  targetName = undefined;
+  targetIdentity = undefined;
+  targetPinned = false;
+  targetActive = false;
+  if (targetNode) targetNode.hidden = true;
+  clearTargetImage();
+  renderTargetLabel();
+}
+
+function updateTarget(value: unknown) {
+  const metadata =
+    value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+  const name = typeof metadata?.app === "string" ? metadata.app.trim() : "";
+  const bundleId = typeof metadata?.bundleIdentifier === "string" ? metadata.bundleIdentifier : "";
+  const identity = JSON.stringify([name, bundleId, metadata?.processIdentifier]);
+  targetName = name || undefined;
+  renderTargetLabel();
+  if (identity === targetIdentity) return;
+  targetIdentity = identity;
+  const generation = ++targetGeneration;
+  clearTargetImage();
+  if (!name || !bundleId) return;
+  void activityAppIcon(bundleId)
+    .then((icon) => {
+      if (lifecycle.signal.aborted || generation !== targetGeneration || !targetActive) return;
+      // The shared resolver returns only bounded, local PNGs. Never load a URL
+      // from helper metadata, even if a malformed event supplies one.
+      if (!icon?.startsWith("data:image/png;base64,") || !targetImage) return;
+      targetImage.src = icon;
+      targetImage.hidden = false;
+      if (targetFallback) targetFallback.hidden = true;
+    })
+    .catch(() => {});
+}
+
+targetImage?.addEventListener("error", clearTargetImage);
+if (targetFallback) {
+  targetFallback.innerHTML = renderToStaticMarkup(
+    createElement(IconWindow, { size: 18, ariaHidden: true, focusable: false }),
+  );
+}
+lifecycle.addCleanup(resetTarget);
+
 const bars = Array.from(document.querySelectorAll<HTMLElement>(".hud-bar"));
 const spinnerNode = document.querySelector<HTMLElement>("#hud-spinner");
 const errorText = document.querySelector<HTMLElement>("#hud-error-text");
@@ -63,9 +141,68 @@ const stopButton = document.querySelector<HTMLButtonElement>("#hud-stop");
 const cancelButton = document.querySelector<HTMLButtonElement>("#hud-cancel");
 const meetingStartButton = document.querySelector<HTMLButtonElement>("#hud-meeting-start");
 const meetingAppLabel = document.querySelector<HTMLElement>("#hud-meeting-app");
+const meetingVideoButton = document.querySelector<HTMLButtonElement>("#hud-meeting-video");
+const meetingVideoLabel = document.querySelector<HTMLElement>("#hud-meeting-video-label");
+let meetingVideoWindow: MeetingWindowDto | null = null;
+let meetingVideoSelected = false;
+let meetingPromptGeneration = 0;
+let meetingVideoDetectionGeneration: number | undefined;
+
+function renderMeetingVideo() {
+  if (meetingVideoButton) {
+    meetingVideoButton.hidden = !meetingVideoWindow;
+    meetingVideoButton.setAttribute("aria-label", t("notes.editor.video.record"));
+    meetingVideoButton.setAttribute("aria-checked", String(meetingVideoSelected));
+    meetingVideoButton.title = t("notes.editor.video.permission");
+  }
+  if (meetingVideoLabel) meetingVideoLabel.textContent = t("notes.editor.video.record");
+  if (hud) hud.dataset.meetingVideo = String(Boolean(meetingVideoWindow));
+  if (meetingAppLabel && meetingVideoWindow) {
+    meetingAppLabel.textContent = t("notes.editor.video.window", {
+      app: meetingVideoWindow.appName,
+      title: meetingVideoWindow.title,
+    });
+    meetingAppLabel.title = meetingAppLabel.textContent;
+  } else {
+    meetingAppLabel?.removeAttribute("title");
+  }
+}
+meetingVideoButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (hud?.dataset.state !== "meeting" || !meetingVideoWindow) return;
+  meetingVideoSelected = !meetingVideoSelected;
+  renderMeetingVideo();
+});
 const meetingDismissButton = document.querySelector<HTMLButtonElement>("#hud-meeting-dismiss");
 const statusText = document.querySelector<HTMLElement>("#hud-status");
 const escTip = document.querySelector<HTMLElement>("#hud-esc-tip");
+const meetingLabel = document.querySelector<HTMLElement>("#hud-meeting-label");
+
+// Replace a control's own text while keeping its child elements (the record
+// button carries its microphone icon next to the label).
+function setOwnText(element: HTMLElement | null, text: string) {
+  if (!element) return;
+  const node = Array.from(element.childNodes).find(
+    (child) => child.nodeType === Node.TEXT_NODE && child.textContent?.trim(),
+  );
+  if (node) node.textContent = text;
+  else element.append(document.createTextNode(text));
+}
+
+// The static page chrome from hud.html, in the current language.
+function applyStaticLabels() {
+  renderTargetLabel();
+  renderMeetingVideo();
+  document.title = t("hud.dictation.windowTitle");
+  cancelButton?.setAttribute("aria-label", t("hud.dictation.cancel"));
+  stopButton?.setAttribute("aria-label", t("hud.dictation.stop"));
+  meetingDismissButton?.setAttribute("aria-label", t("hud.meeting.dismiss"));
+  if (meetingLabel) meetingLabel.textContent = t("hud.meeting.detected");
+  setOwnText(meetingStartButton, t("hud.meeting.record"));
+}
+
+applyStaticLabels();
 
 // House iconography (central-icons), injected like the agent HUD does.
 // The cancel X is the cross-medium cut at 16px: its drawn span (~8.3px)
@@ -266,9 +403,25 @@ type HudTransition = {
 
 let hudTransitionId = 0;
 
-function setHud(state: string, status: string): HudTransition {
+// A status line is either a translatable label (resolved again when the
+// interface language changes) or verbatim text such as a native error message.
+type StatusText = string | (() => string);
+
+const idleStatus = () => t("hud.status.idle");
+const listeningStatus = () => t("hud.status.listening");
+const transcribingStatus = () => t("hud.status.transcribing");
+let currentStatus: StatusText = idleStatus;
+
+function resolveStatus(status: StatusText) {
+  return typeof status === "function" ? status() : status;
+}
+
+function setHud(state: string, statusSource: StatusText): HudTransition {
   const id = ++hudTransitionId;
   if (!hud || !statusText) return { changed: false, id };
+  if (state === "idle" || state === "meeting") resetTarget();
+  currentStatus = statusSource;
+  const status = resolveStatus(statusSource);
   const previous = hud.dataset.state;
   const entersProcessing =
     (state === "transcribing" || state === "pasting") &&
@@ -478,6 +631,18 @@ function setCancelHover(isHovered: boolean) {
 // explicitly advertise a global Escape monitor before the HUD teaches it.
 let escapeCancelAvailable = !HAS_TAURI_BRIDGE;
 let activeDictationTakeId: string | undefined;
+// Take IDs are never reused. Keep terminal identities for this webview's
+// lifetime so queued outcomes cannot revive a cancelled/completed indicator.
+const retiredDictationTakeIds = new Set<string>();
+function retireDictationTake() {
+  if (activeDictationTakeId) retiredDictationTakeIds.add(activeDictationTakeId);
+  activeDictationTakeId = undefined;
+  cleanupSkippedReason = undefined;
+}
+/** Cleanup failed for the take being pasted: its raw transcript is pasted,
+ * and the paste status says so instead of raising an error. */
+let cleanupSkippedReason: "openrouter_api_key_missing" | "other" | undefined;
+let receivedLiveDictationEvent = false;
 
 function dictationTakeId(event: DictationHudEvent) {
   const takeId = event.payload?.takeId;
@@ -823,13 +988,16 @@ function startLongDictationNotice() {
     longDictationNoticeTimer = undefined;
     if (lifecycle.signal.aborted) return;
     if (hud?.dataset.state !== "transcribing") return;
-    const transition = setHud("transcribing", "Still transcribing");
+    const transition = setHud("transcribing", () => t("hud.status.stillTranscribing"));
     void showHud(showOptionsForTransition(transition));
   }, LONG_DICTATION_NOTICE_MS);
 }
 
 async function hideHud() {
   if (lifecycle.signal.aborted) return;
+  retireDictationTake();
+  targetActive = false;
+  targetGeneration += 1;
   const requestId = ++hideRequestId;
   showRequestId += 1;
   clearHideTimer();
@@ -850,7 +1018,7 @@ async function hideHud() {
     if (exitState) {
       hud.dataset.exitState = exitState;
     }
-    setHud("exiting", statusText?.textContent || "Idle");
+    setHud("exiting", currentStatus);
     if (meetingExit) {
       // The meeting card leaves the way it came in: a native slide-up +
       // fade that also hides the window (the invoke resolves once it's
@@ -884,7 +1052,7 @@ async function hideHud() {
   if (hud?.dataset.state === "exiting" && requestId === hideRequestId) {
     hud.classList.remove("hud-error-exit");
     delete hud.dataset.exitState;
-    setHud("idle", "Idle");
+    setHud("idle", idleStatus);
   }
 }
 
@@ -1032,14 +1200,17 @@ async function handleDictationEventPayload(payload: unknown) {
     return;
   }
   const eventTakeId = dictationTakeId(dictationEvent);
+  if (eventTakeId && retiredDictationTakeIds.has(eventTakeId)) return;
   if (
     activeDictationTakeId &&
     eventTakeId &&
     eventTakeId !== activeDictationTakeId &&
     [
       "audio_level",
+      "focus_target",
       "finalizing_transcript",
       "final_transcript",
+      "dictation_cleanup_skipped",
       "paste_target",
       "paste_completed",
       "recording_discarded",
@@ -1049,13 +1220,42 @@ async function handleDictationEventPayload(payload: unknown) {
     return;
   }
 
+  if (dictationEvent.type === "dictation_cleanup_skipped") {
+    cleanupSkippedReason =
+      dictationEvent.payload?.code === "openrouter_api_key_missing"
+        ? "openrouter_api_key_missing"
+        : "other";
+    return;
+  }
+
   if (dictationEvent.type === "listening_started") {
+    if (eventTakeId !== activeDictationTakeId) retireDictationTake();
+    cleanupSkippedReason = undefined;
+    resetTarget();
+    targetActive = true;
+    if (targetNode) targetNode.hidden = false;
+    updateTarget(dictationEvent.payload?.target);
     activeDictationTakeId = dictationTakeId(dictationEvent);
     escapeCancelAvailable =
       !HAS_TAURI_BRIDGE || dictationEvent.payload?.escapeCancelAvailable === true;
     resetBars();
-    const transition = setHud("listening", "Listening");
+    const transition = setHud("listening", listeningStatus);
     await showHud(showOptionsForTransition(transition));
+    return;
+  }
+
+  if (dictationEvent.type === "focus_target") {
+    // Candidate updates belong only to listening. A late subscriber may be
+    // pasting before it receives authoritative destination metadata.
+    if (
+      !targetActive ||
+      targetPinned ||
+      hud?.dataset.state !== "listening" ||
+      (activeDictationTakeId && !eventTakeId)
+    ) {
+      return;
+    }
+    updateTarget(dictationEvent.payload?.target);
     return;
   }
 
@@ -1082,20 +1282,26 @@ async function handleDictationEventPayload(payload: unknown) {
     }
     const level = Number(dictationEvent.payload?.level || 0);
     queueAudioLevel(level);
-    setHud("listening", "Listening");
+    setHud("listening", listeningStatus);
     return;
   }
 
   if (dictationEvent.type === "finalizing_transcript") {
+    targetActive = true;
+    if (Object.hasOwn(dictationEvent.payload ?? {}, "target")) {
+      updateTarget(dictationEvent.payload?.target);
+    }
+    targetPinned = true;
+    if (targetNode) targetNode.hidden = false;
     // Drop any level still queued from listening so it can't push a stray
     // sample into the meter after we've moved on to transcribing.
     cancelPendingAudioLevel();
     if (hud?.dataset.state === "listening") {
       // Push-to-talk release (or any stop that skipped the button): same
       // collapse the stop button plays.
-      await collapseToSpinner("Transcribing");
+      await collapseToSpinner(transcribingStatus);
     } else {
-      const transition = setHud("transcribing", "Transcribing");
+      const transition = setHud("transcribing", transcribingStatus);
       await showHud(showOptionsForTransition(transition));
     }
     if (lifecycle.signal.aborted) return;
@@ -1104,28 +1310,59 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "final_transcript") {
-    const transition = setHud("pasting", "Pasting");
+    targetActive = true;
+    if (targetNode) targetNode.hidden = false;
+    if (!targetPinned && Object.hasOwn(dictationEvent.payload ?? {}, "target")) {
+      updateTarget(dictationEvent.payload?.target);
+      targetPinned = true;
+    }
+    const transition = setHud("pasting", () => t("hud.status.pasting"));
     await showHud(showOptionsForTransition(transition));
     return;
   }
 
   if (dictationEvent.type === "paste_target") {
-    const transition = setHud(
-      "pasting",
-      `Pasting into ${dictationEvent.payload?.app || "previous app"}`,
+    targetActive = true;
+    if (targetNode) targetNode.hidden = false;
+    if (!targetPinned && Object.hasOwn(dictationEvent.payload ?? {}, "target")) {
+      updateTarget(dictationEvent.payload?.target);
+    }
+    targetPinned = true;
+    const app = dictationEvent.payload?.app;
+    const statusKey =
+      cleanupSkippedReason === "openrouter_api_key_missing"
+        ? "hud.status.pastingIntoMissingOpenRouterKey"
+        : cleanupSkippedReason
+          ? "hud.status.pastingIntoUncleaned"
+          : "hud.status.pastingInto";
+    const transition = setHud("pasting", () =>
+      t(statusKey, {
+        app: app || t("hud.status.previousApp"),
+      }),
     );
     await showHud(showOptionsForTransition(transition));
     return;
   }
 
-  if (dictationEvent.type === "paste_completed") {
-    activeDictationTakeId = undefined;
+  if (dictationEvent.type === "helper_unavailable" || dictationEvent.type === "shutdown_ack") {
+    retireDictationTake();
     void hideHud();
     return;
   }
 
+  if (dictationEvent.type === "paste_completed") {
+    const showMissingKeyNotice = cleanupSkippedReason === "openrouter_api_key_missing";
+    retireDictationTake();
+    if (showMissingKeyNotice) {
+      hideSoon(3000);
+    } else {
+      void hideHud();
+    }
+    return;
+  }
+
   if (dictationEvent.type === "recording_discarded") {
-    activeDictationTakeId = undefined;
+    retireDictationTake();
     // A grazed push-to-talk key or a signed-out session: the recording was
     // dropped without transcription, so the listening HUD just goes away.
     void hideHud();
@@ -1174,8 +1411,15 @@ async function handleDictationEventPayload(payload: unknown) {
       triggerShake();
       return;
     }
-    const message = String(dictationEvent.payload?.message ?? "Dictation failed.").trim();
-    const transition = setHud("error", message || "Dictation failed.");
+    targetPinned = true;
+    retireDictationTake();
+    // Native errors carry a stable code; the interface language words it, and
+    // the native (English) message is only the fallback for unknown codes.
+    const message = messageForErrorCode(
+      dictationEvent.payload?.code,
+      String(dictationEvent.payload?.message ?? "").trim(),
+    );
+    const transition = setHud("error", message || (() => t("hud.status.dictationFailed")));
     // Latch the error state before awaiting native placement. A key-up event
     // can arrive during that IPC call, and its secondary not_listening error
     // must not dismiss the actionable start failure.
@@ -1246,16 +1490,57 @@ async function showMeetingPrompt(meetingEvent: DictationHudEvent) {
     hideBlankWindowIfNeeded();
     return;
   }
+  const opening = hud?.dataset.state !== "meeting";
+  const generation = opening ? ++meetingPromptGeneration : meetingPromptGeneration;
+  if (opening) {
+    meetingVideoSelected = false;
+    meetingVideoWindow = null;
+  }
+  let detection: Promise<MeetingWindowDto | null> | undefined;
+  if (
+    !meetingVideoWindow &&
+    meetingVideoDetectionGeneration !== generation &&
+    isMacLikePlatform()
+  ) {
+    meetingVideoDetectionGeneration = generation;
+    detection = detectMeetingWindow().catch(() => null);
+  }
   // Set the app line before the pill is measured so the window is sized
   // for it. Heartbeats refresh it (the mic can move between apps).
+  meetingAppLabels = meetingEvent.payload?.appLabels;
   if (meetingAppLabel) {
-    meetingAppLabel.textContent = meetingAppLine(meetingEvent.payload?.appLabels);
+    meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
   }
-  const transition = setHud("meeting", "Meeting detected");
-  await showHud(showOptionsForTransition(transition));
-  if (lifecycle.signal.aborted) return;
-  startMeetingPromptTimer();
+  renderMeetingVideo();
+  const transition = setHud("meeting", () => t("hud.meeting.detected"));
+  try {
+    await showHud(showOptionsForTransition(transition));
+    if (lifecycle.signal.aborted || generation !== meetingPromptGeneration) return;
+    startMeetingPromptTimer();
+    if (detection) {
+      const window = await detection;
+      if (
+        lifecycle.signal.aborted ||
+        generation !== meetingPromptGeneration ||
+        hud?.dataset.state !== "meeting" ||
+        meetingPromptSuppressed ||
+        meetingVideoWindow
+      )
+        return;
+      meetingVideoWindow = window;
+      renderMeetingVideo();
+      if (window) await syncWindowToPill({ animate: false });
+    }
+  } finally {
+    // Hold the slot through rendering. An old prompt must not release a
+    // lookup belonging to its replacement, nor can heartbeats overlap retries.
+    if (detection && meetingVideoDetectionGeneration === generation) {
+      meetingVideoDetectionGeneration = undefined;
+    }
+  }
 }
+
+let meetingAppLabels: unknown;
 
 function hideBlankWindowIfNeeded() {
   if (pillIsBlank(hud?.dataset.state)) {
@@ -1277,7 +1562,7 @@ function meetingAppLine(labels: unknown) {
   const names = Array.isArray(labels)
     ? labels.filter((label): label is string => typeof label === "string" && label.trim() !== "")
     : [];
-  return names.length > 0 ? names.join(", ") : "Microphone in use";
+  return names.length > 0 ? names.join(", ") : t("hud.meeting.micInUse");
 }
 
 function pillIsBlank(state: string | undefined) {
@@ -1323,7 +1608,7 @@ hud?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
   if (event.target instanceof Element && event.target.closest("button")) return;
   event.preventDefault();
-  void appWindow?.startDragging().catch(() => {});
+  void invoke("dictation_hud_start_drag").catch(() => {});
 });
 
 // While the collapse tween plays, window sizing is locked (syncWindowToPill
@@ -1348,11 +1633,16 @@ lifecycle.addCleanup(interruptCollapse);
 // The stop moment: the shell width tweens down around the incoming spinner
 // (CSS, see .hud.hud-collapse) while the waveform ghost fades in place. The
 // native frame holds the old, larger size — it is transparent, so only the
-// pill's motion is visible — and snaps to the square once the tween settles.
-async function collapseToSpinner(status: string) {
+// pill's motion is visible — and fits both slots once the tween settles.
+async function collapseToSpinner(status: StatusText) {
   if (!hud || lifecycle.signal.aborted) return;
   const fromWidth = hud.getBoundingClientRect().width;
-  const collapsedPillSize = cssPixelToken("--control-lg") || hud.getBoundingClientRect().height;
+  const previousState = hud.dataset.state;
+  hud.classList.add("hud-snap");
+  hud.dataset.state = "transcribing";
+  const collapsedPillSize = hud.getBoundingClientRect().width;
+  hud.dataset.state = previousState;
+  hud.classList.remove("hud-snap");
   if (prefersReducedMotion() || collapsedPillSize <= 0 || fromWidth <= collapsedPillSize) {
     // Reduced motion, or nothing measurable to tween (jsdom): atomic swap.
     const transition = setHud("transcribing", status);
@@ -1416,7 +1706,7 @@ stopButton?.addEventListener("click", async (event) => {
   event.preventDefault();
   setStopHover(false);
   if (hud?.dataset.state === "listening") {
-    void collapseToSpinner("Transcribing");
+    void collapseToSpinner(transcribingStatus);
   }
   try {
     await invoke("dictation_helper_command", {
@@ -1426,7 +1716,7 @@ stopButton?.addEventListener("click", async (event) => {
     if (lifecycle.signal.aborted) return;
     if (hud?.dataset.state === "transcribing") {
       interruptCollapse();
-      const transition = setHud("listening", "Listening");
+      const transition = setHud("listening", listeningStatus);
       await showHud(showOptionsForTransition(transition));
       triggerShake();
     }
@@ -1434,9 +1724,9 @@ stopButton?.addEventListener("click", async (event) => {
 });
 
 // Cancel makes the current take terminal before asking the helper to discard
-// it. Work that has not started is suppressed; a metered request whose
-// settlement Clovy API already spawned cannot be revoked at the desktop
-// boundary. The helper answers with recording_discarded, which is the
+// it. Work that has not started is suppressed; a provider request already
+// in flight may still complete. The helper answers with recording_discarded,
+// which is the
 // authoritative confirmation that capture actually stopped. Keep the
 // listening HUD visible if the command write fails so an active recording is
 // never concealed behind a dismissed panel.
@@ -1482,7 +1772,15 @@ meetingStartButton?.addEventListener("click", async (event) => {
 
   meetingStartButton.disabled = true;
   try {
-    await invoke("queue_meeting_start_request");
+    if (meetingVideoSelected && meetingVideoWindow) {
+      // Native capture validates the opted-in id and persists a video failure
+      // if it disappeared, while preserving the audio recording.
+      const windowId = meetingVideoWindow.windowId;
+      // Queue immediately: the helper revalidates after audio starts.
+      await invoke("queue_meeting_start_request", { video: { windowId } });
+    } else {
+      await invoke("queue_meeting_start_request");
+    }
   } catch {
     if (lifecycle.signal.aborted) return;
     // The request was not durably queued, so leave the prompt available for
@@ -1513,7 +1811,12 @@ meetingDismissButton?.addEventListener("click", (event) => {
 
 lifecycle.trackUnlisten(
   listen("dictation-event", async (event) => {
-    await handleDictationEventPayload(event.payload);
+    const previousTransition = hudTransitionId;
+    const handling = handleDictationEventPayload(event.payload);
+    // Only an applied lifecycle transition supersedes the startup snapshot.
+    // Diagnostics, configuration and rejected stale events must not discard it.
+    if (hudTransitionId !== previousTransition) receivedLiveDictationEvent = true;
+    await handling;
   }),
 );
 
@@ -1589,6 +1892,24 @@ if (import.meta.env.DEV) {
 
 lifecycle.addCleanup(subscribeToOnboardingComplete(showPendingMeetingPromptAfterOnboarding));
 
+// Language change from the main window: re-render the visible state in place
+// and re-fit the native frame to the new label widths.
+function rerenderForLocale() {
+  applyStaticLabels();
+  const state = hud?.dataset.state;
+  const status = resolveStatus(currentStatus);
+  if (statusText) statusText.textContent = status;
+  if (errorText && state === "error") errorText.textContent = status;
+  if (meetingAppLabel && state === "meeting" && !meetingVideoWindow) {
+    meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
+  }
+  if (state && state !== "idle" && state !== "exiting") {
+    void syncWindowToPill({ animate: false });
+  }
+}
+
+lifecycle.addCleanup(subscribeInterfaceLocale(rerenderForLocale));
+
 // Console drivers for this page when served standalone in a browser:
 // __dictationHud("listening") drives the dictation pill, __meetingHud(
 // "detected") drives the meeting-detection prompt. See lib/dictation-hud-demo.ts
@@ -1604,8 +1925,10 @@ if (import.meta.env.DEV) {
 
 void invoke<string | undefined>("latest_dictation_event")
   .then((payload) => {
-    if (lifecycle.signal.aborted) return;
+    if (lifecycle.signal.aborted || receivedLiveDictationEvent) return;
     if (payload) {
+      const snapshot = parseEvent(payload);
+      if (snapshot) activeDictationTakeId = dictationTakeId(snapshot);
       return handleDictationEventPayload(payload);
     }
   })

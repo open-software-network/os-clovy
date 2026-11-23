@@ -4,6 +4,7 @@ import { IconExclamationCircle } from "central-icons-filled/IconExclamationCircl
 import { IconExclamationTriangle } from "central-icons-filled/IconExclamationTriangle";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { Toaster as SonnerToaster } from "sonner";
+import { useT } from "../../i18n";
 import { DotSpinner } from "../DotSpinner";
 
 // The Clovy-styled wrapper around sonner's toaster. Sonner ships as an unstyled
@@ -31,10 +32,11 @@ const TONE_ICON_SIZE = 16;
  * read as messages tucked into the upper-right of the workspace.
  */
 export function Toaster() {
+  const t = useT();
   return (
     <SonnerToaster
       position="top-right"
-      containerAriaLabel="Clovy notifications"
+      containerAriaLabel={t("shell.toast.containerLabel")}
       // Clear the custom titlebar and use the same top/right inset from the
       // workspace corner.
       offset={{ top: "calc(var(--titlebar-h) + var(--sp-6))", right: "var(--sp-6)" }}
@@ -55,6 +57,7 @@ export function Toaster() {
       }}
       toastOptions={{
         unstyled: true,
+        closeButtonAriaLabel: t("shell.toast.close"),
         classNames: {
           toast: "clovy-toast",
           content: "clovy-toast-content",

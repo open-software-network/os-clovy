@@ -8,14 +8,7 @@ import {
   setCurrentDataPartitionName,
 } from "../lib/data-partition";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
-import {
-  beginMaxGrantWait,
-  clearMaxGrantWait,
-  currentMaxGrantWait,
-  markMaxGrantWaitSlow,
-} from "../lib/max-upgrade";
 import type {
-  AccountStatus,
   BootstrapResponse,
   NoteDto,
   RecoverableRecordingDto,
@@ -74,14 +67,6 @@ const mocks = vi.hoisted(() => ({
   listDictationHistory: vi.fn(),
   listDictionaryEntries: vi.fn(),
   deleteDictationHistoryItem: vi.fn(),
-  osAccountsStatus: vi.fn(),
-  osAccountsLogin: vi.fn(),
-  osAccountsCancelLogin: vi.fn(),
-  osAccountsLogout: vi.fn(),
-  osAccountsReferralSummary: vi.fn(async () => undefined),
-  osAccountsUpgrade: vi.fn(),
-  osAccountsUpgradeSession: vi.fn(),
-  osAccountsChangePlan: vi.fn(),
   agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
   agentHudHide: vi.fn(),
@@ -119,6 +104,12 @@ vi.mock("../components/ui/Toaster", () => ({
 }));
 
 vi.mock("../lib/tauri", () => ({
+  listRecordingMarks: vi.fn().mockResolvedValue([]),
+  getRecordingAssistanceStatus: vi
+    .fn()
+    .mockResolvedValue({ epoch: 0, enabled: false, hasRecentContext: false }),
+  appPreferencesGet: vi.fn().mockResolvedValue({ hideFromDock: false }),
+  appPreferencesSet: vi.fn(async (request: { hideFromDock: boolean }) => request),
   dictationCapabilities: vi.fn().mockResolvedValue({
     capabilities: {
       available: true,
@@ -165,8 +156,6 @@ vi.mock("../lib/tauri", () => ({
   patchNote: mocks.patchNote,
   completeNoteSaveFlush: mocks.completeNoteSaveFlush,
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
-  companionListAgentMedia: vi.fn(async () => []),
-  companionReadAgentMediaChunk: vi.fn(),
   openPrivacySettings: mocks.openPrivacySettings,
   startRecording: mocks.startRecording,
   pauseRecording: mocks.pauseRecording,
@@ -181,15 +170,6 @@ vi.mock("../lib/tauri", () => ({
   listDictationHistory: mocks.listDictationHistory,
   listDictionaryEntries: mocks.listDictionaryEntries,
   deleteDictationHistoryItem: mocks.deleteDictationHistoryItem,
-  osAccountsStatus: mocks.osAccountsStatus,
-  osAccountsStatusLocal: mocks.osAccountsStatus,
-  osAccountsLogin: mocks.osAccountsLogin,
-  osAccountsCancelLogin: mocks.osAccountsCancelLogin,
-  osAccountsLogout: mocks.osAccountsLogout,
-  osAccountsReferralSummary: mocks.osAccountsReferralSummary,
-  osAccountsUpgrade: mocks.osAccountsUpgrade,
-  osAccountsUpgradeSession: mocks.osAccountsUpgradeSession,
-  osAccountsChangePlan: mocks.osAccountsChangePlan,
   agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   agentHudHide: mocks.agentHudHide,
@@ -200,21 +180,12 @@ vi.mock("../lib/tauri", () => ({
   // these tests focused on the meetings surfaces.
   hermesBridgeStatus: vi.fn(async () => ({ running: false })),
   listAgentTasks: vi.fn(async () => ({ items: [] })),
-  clovyOpenVerifyPage: vi.fn(async () => ""),
   providerModelSettings: vi.fn(async () => ({
     settings: { generationModel: "" },
   })),
-  setVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: true,
-  })),
-  clearVeniceApiKey: vi.fn(async () => ({
-    generationModel: "",
-    veniceApiKeyConfigured: false,
-  })),
   hermesAgentCliAccess: vi.fn(async () => ({ enabled: false })),
   hermesBrowserAccess: vi.fn(async () => ({ enabled: false })),
-  listVeniceModels: vi.fn(async () => ({
+  listProviderModels: vi.fn(async () => ({
     mode: "generation",
     modelType: "text",
     selectedModel: "",
@@ -317,7 +288,6 @@ describe("notes recording reliability", () => {
   });
 
   beforeEach(() => {
-    clearMaxGrantWait();
     vi.clearAllMocks();
     mocks.listeners.clear();
     mocks.pendingMeetingStartRequest = undefined;
@@ -337,14 +307,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [],
-      providerConfigured: true,
-    };
-    const account: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
-      balance: { usdMillis: 1200 },
-      subscription: { subscribed: true, status: "active" },
     };
 
     mocks.getCurrentWindow.mockReturnValue({
@@ -427,17 +389,6 @@ describe("notes recording reliability", () => {
     });
     mocks.listDictionaryEntries.mockResolvedValue([]);
     mocks.deleteDictationHistoryItem.mockResolvedValue(undefined);
-    mocks.osAccountsStatus.mockResolvedValue(account);
-    mocks.osAccountsLogin.mockResolvedValue(account);
-    mocks.osAccountsLogout.mockResolvedValue(undefined);
-    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
-    mocks.osAccountsUpgrade.mockResolvedValue(undefined);
-    mocks.osAccountsUpgradeSession.mockResolvedValue(undefined);
-    mocks.osAccountsChangePlan.mockResolvedValue({
-      subscribed: true,
-      status: "active",
-      plan: "max",
-    });
     mocks.updateNote.mockImplementation(async (input) => ({
       ...first,
       ...input,
@@ -480,11 +431,34 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
     await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
     await userEvent.click(screen.getByRole("button", { name: "First note Preview" }));
-    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Record" }));
     await waitFor(() =>
       expect(mocks.startRecording).toHaveBeenCalledWith("note-1", "microphonePlusSystem"),
     );
   }
+
+  it("keeps the last clicked note open when an earlier open resolves later", async () => {
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    let resolveSecond: ((value: NoteDto) => void) | undefined;
+    mocks.getNote.mockImplementation((noteId: string) =>
+      noteId === "note-2"
+        ? new Promise<NoteDto>((resolve) => {
+            resolveSecond = resolve;
+          })
+        : Promise.resolve(first),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /^Second note/ }));
+    await userEvent.click(screen.getByRole("button", { name: /^First note/ }));
+    await act(async () => {
+      resolveSecond?.(second);
+    });
+
+    expect(screen.getAllByText("First note").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Second note/)).toBeNull();
+  });
 
   it("swaps notes when the data partition switches", async () => {
     render(<App />);
@@ -694,7 +668,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithoutDownloadableAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithoutDownloadableAudio,
@@ -727,7 +700,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithAudio,
@@ -774,7 +746,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [noteWithAudio, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : noteWithAudio,
@@ -814,7 +785,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.listNotes.mockResolvedValue({ items: [] });
 
@@ -913,6 +883,157 @@ describe("notes recording reliability", () => {
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
     await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"));
     expect(screen.getByText("Provisional words survive Stop")).toBeInTheDocument();
+  });
+
+  it("removes a discarded echo preview when the terminal event arrives", async () => {
+    const complete = {
+      ...first,
+      activeTab: "transcription" as const,
+      processingStatus: "ready" as const,
+      updatedAt: "2026-05-19T10:00:05Z",
+      sourceTranscripts: [
+        {
+          id: "system-final",
+          recordingSessionId: "rec-1",
+          source: "system" as const,
+          startMs: 0,
+          endMs: 4000,
+          text: "System final",
+          status: "succeeded" as const,
+        },
+      ],
+    };
+    mocks.finishRecording.mockResolvedValue({
+      note: { ...first, processingStatus: "transcribing" },
+      recording: recording({ state: "ready" }),
+      validation: {},
+      processingStarted: true,
+    });
+    await startRecordingDirectlyOnFirstNote();
+    await waitFor(() => expect(mocks.listeners.has("live-transcript-event")).toBe(true));
+    await act(async () => {
+      await mocks.listeners.get("live-transcript-event")?.({
+        payload: {
+          noteId: "note-1",
+          sessionId: "rec-1",
+          sourceMode: "microphonePlusSystem",
+          source: "microphone",
+          segmentId: "mic-echo",
+          startMs: 0,
+          endMs: 4000,
+          text: "Echo preview",
+          stability: "final",
+        },
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Transcription" }));
+    expect(await screen.findByText("Echo preview")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalled());
+    mocks.getNote.mockResolvedValue(complete);
+    await act(async () => {
+      await mocks.listeners.get("note-processing-progress")?.({
+        payload: {
+          noteId: "note-1",
+          recordingSessionId: "rec-1",
+          stage: "done",
+          processingStatus: "ready",
+          revision: complete.updatedAt,
+          discardedSpans: [{ sessionId: "rec-1", source: "microphone", startMs: 0, endMs: 4000 }],
+        },
+      });
+    });
+    await waitFor(() => expect(screen.queryByText("Echo preview")).not.toBeInTheDocument());
+    expect(await screen.findByText("System final")).toBeInTheDocument();
+  });
+
+  it("retains session A discard when session B supersedes its pending hydration", async () => {
+    mocks.finishRecording.mockResolvedValue({
+      note: { ...first, activeTab: "transcription", processingStatus: "transcribing" },
+      recording: recording({ state: "ready" }),
+      validation: {},
+      processingStarted: true,
+    });
+    await startRecordingDirectlyOnFirstNote();
+    await waitFor(() => expect(mocks.listeners.has("live-transcript-event")).toBe(true));
+    await act(async () => {
+      await mocks.listeners.get("live-transcript-event")?.({
+        payload: {
+          noteId: "note-1",
+          sessionId: "rec-1",
+          sourceMode: "microphonePlusSystem",
+          source: "microphone",
+          segmentId: "echo-a",
+          startMs: 0,
+          endMs: 8000,
+          text: "Queued echo preview",
+          stability: "final",
+        },
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Transcription" }));
+    expect(await screen.findByText("Queued echo preview")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalled());
+    const pendingA = deferred<NoteDto>();
+    const finalNote = {
+      ...first,
+      activeTab: "transcription" as const,
+      processingStatus: "ready" as const,
+      updatedAt: "2026-05-19T10:00:06Z",
+      sourceTranscripts: [
+        {
+          id: "final-a",
+          recordingSessionId: "rec-1",
+          source: "microphone" as const,
+          startMs: 4000,
+          endMs: 8000,
+          text: "Final words",
+          status: "succeeded" as const,
+        },
+      ],
+    };
+    mocks.getNote
+      .mockReset()
+      .mockImplementationOnce(() => pendingA.promise)
+      .mockResolvedValue(finalNote);
+    const emit = async (payload: object) => {
+      await act(async () => {
+        await mocks.listeners.get("note-processing-progress")?.({ payload });
+      });
+    };
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-1",
+      stage: "done",
+      processingStatus: "ready",
+      revision: "2026-05-19T10:00:05Z",
+      discardedSpans: [{ sessionId: "rec-1", source: "microphone", startMs: 0, endMs: 4000 }],
+    });
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Queued echo preview")).toBeInTheDocument();
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-2",
+      stage: "transcribing",
+      processingStatus: "transcribing",
+      revision: "2026-05-19T10:00:05Z",
+    });
+    await act(async () => {
+      pendingA.resolve(finalNote);
+      await pendingA.promise;
+    });
+    expect(screen.getByText("Queued echo preview")).toBeInTheDocument();
+    await emit({
+      noteId: "note-1",
+      recordingSessionId: "rec-2",
+      stage: "done",
+      processingStatus: "ready",
+      revision: finalNote.updatedAt,
+      discardedSpans: [],
+    });
+    expect(await screen.findByText("Final words")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Queued echo preview")).not.toBeInTheDocument());
   });
 
   it("follows live transcription until the reader scrolls upward, then resumes at the bottom", async () => {
@@ -1251,7 +1372,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.recoverRecording.mockResolvedValue({
       ...first,
@@ -1306,7 +1426,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) => {
       if (noteId === "note-2") return second;
@@ -1364,7 +1483,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [first, second],
       activeRecoveries: [recovery()],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) => {
       if (noteId === "note-2") return second;
@@ -1420,7 +1538,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [failedNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : failedNote,
@@ -1449,7 +1566,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [recoverableNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : recoverableNote,
@@ -1476,7 +1592,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [warningNote, second],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : warningNote,
@@ -1528,7 +1643,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));
@@ -1601,7 +1715,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     mocks.getNote.mockResolvedValue(selectedNote);
 
@@ -1683,7 +1796,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));
@@ -1748,7 +1860,6 @@ describe("notes recording reliability", () => {
       folders: [],
       notes: [selectedNote],
       activeRecoveries: [],
-      providerConfigured: true,
     });
     let processingDone = false;
     mocks.getNote.mockImplementation(async () => (processingDone ? completedNote : selectedNote));
@@ -1881,288 +1992,5 @@ describe("notes recording reliability", () => {
         activeTab: "transcription",
       }),
     );
-  });
-
-  it("changes to Max in place and announces success only after the credit grant", async () => {
-    const failedNote = {
-      ...first,
-      processingStatus: "failed" as const,
-      lastError: "Your balance is too low. Upgrade to continue.",
-    };
-    const proAccount: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex" },
-      balance: { credits: 10, usdMillis: 10 },
-      subscription: { subscribed: true, status: "active", plan: "pro" },
-    };
-    mocks.osAccountsStatus.mockResolvedValue(proAccount);
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [failedNote, second],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.getNote.mockImplementation(async (noteId: string) =>
-      noteId === "note-2" ? second : failedNote,
-    );
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
-
-    // The banner's action requires confirmation before changing the plan.
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
-    expect(
-      await screen.findByText(
-        "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-      ),
-    ).toBeInTheDocument();
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-
-    let resolveGrantRefresh: ((account: AccountStatus) => void) | undefined;
-    mocks.osAccountsStatus.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveGrantRefresh = resolve;
-        }),
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
-
-    expect(mocks.osAccountsUpgradeSession).toHaveBeenCalledTimes(1);
-    expect(mocks.osAccountsUpgradeSession).toHaveBeenCalledWith("max");
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    expect(
-      await screen.findByText("Waiting for you to confirm in the browser"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Max is active.")).toBeNull();
-
-    // The waiting refresh resolves only after the payment-backed credit balance
-    // change. That landed grant is what allows the active announcement.
-    resolveGrantRefresh?.({
-      ...proAccount,
-      balance: { credits: 50_000, usdMillis: 50_000 },
-      subscription: { subscribed: true, status: "active", plan: "max" },
-    });
-    expect(await screen.findByText("Max is active.")).toBeInTheDocument();
-  });
-
-  it("does not reroute a confirmed Max upgrade after the subscription lapses", async () => {
-    const failedNote = {
-      ...first,
-      processingStatus: "failed" as const,
-      lastError: "Your balance is too low. Upgrade to continue.",
-    };
-    const proAccount: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex" },
-      balance: { credits: 10, usdMillis: 10 },
-      subscription: { subscribed: true, status: "active", plan: "pro" },
-    };
-    mocks.osAccountsStatus.mockResolvedValue(proAccount);
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [failedNote, second],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.getNote.mockImplementation(async (noteId: string) =>
-      noteId === "note-2" ? second : failedNote,
-    );
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
-
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
-    expect(
-      await screen.findByText(
-        "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-      ),
-    ).toBeInTheDocument();
-
-    mocks.osAccountsStatus.mockResolvedValue({
-      ...proAccount,
-      subscription: { subscribed: false },
-    });
-    const callsBeforeRefresh = mocks.osAccountsStatus.mock.calls.length;
-    window.dispatchEvent(new Event("focus"));
-    await waitFor(() =>
-      expect(mocks.osAccountsStatus.mock.calls.length).toBeGreaterThan(callsBeforeRefresh),
-    );
-    expect(await screen.findByRole("button", { name: "Upgrade" })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
-
-    await waitFor(() =>
-      expect(
-        screen.queryByText(
-          "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-        ),
-      ).toBeNull(),
-    );
-    // The dialog never closes silently: the confirmed intent evaporated, so
-    // the user is told why and pointed back at the surface's options.
-    expect(await screen.findByText("Your plan changed - pick an option again")).toBeInTheDocument();
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    expect(mocks.osAccountsUpgradeSession).not.toHaveBeenCalled();
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-  });
-
-  it("adopts a pending upgrade wait instead of offering a second purchase", async () => {
-    const failedNote = {
-      ...first,
-      processingStatus: "failed" as const,
-      lastError: "Your balance is too low. Upgrade to continue.",
-    };
-    const proAccount: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex" },
-      balance: { credits: 10, usdMillis: 10 },
-      subscription: { subscribed: true, status: "active", plan: "pro" },
-    };
-    mocks.osAccountsStatus.mockResolvedValue(proAccount);
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [failedNote, second],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.getNote.mockImplementation(async (noteId: string) =>
-      noteId === "note-2" ? second : failedNote,
-    );
-    // An upgrade already in flight for this account, started on another
-    // surface (Billing settings, the funding gate).
-    beginMaxGrantWait(10, "usr_123", "browser");
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
-
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
-
-    // No second confirm, no second session: the surface adopts the wait and
-    // re-shows its status.
-    expect(
-      await screen.findByText("Waiting for you to confirm in the browser"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(
-        "Max is $100 per month. A secure Stripe page will open in your browser to review and confirm. Your billing cycle restarts today.",
-      ),
-    ).toBeNull();
-    expect(mocks.osAccountsUpgradeSession).not.toHaveBeenCalled();
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-  });
-
-  it("drops the waiting banner when the wait is cancelled on another surface", async () => {
-    const failedNote = {
-      ...first,
-      processingStatus: "failed" as const,
-      lastError: "Your balance is too low. Upgrade to continue.",
-    };
-    const proAccount: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex" },
-      balance: { credits: 10, usdMillis: 10 },
-      subscription: { subscribed: true, status: "active", plan: "pro" },
-    };
-    mocks.osAccountsStatus.mockResolvedValue(proAccount);
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [failedNote, second],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.getNote.mockImplementation(async (noteId: string) =>
-      noteId === "note-2" ? second : failedNote,
-    );
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
-
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade now" }));
-    expect(
-      await screen.findByText("Waiting for you to confirm in the browser"),
-    ).toBeInTheDocument();
-
-    // The user cancels from the funding notice ("I closed the Stripe page").
-    // The banner's cached copy must not keep claiming a wait that no longer
-    // exists. A real refresh always yields a fresh snapshot object.
-    clearMaxGrantWait();
-    mocks.osAccountsStatus.mockResolvedValue({ ...proAccount });
-    const callsBeforeRefresh = mocks.osAccountsStatus.mock.calls.length;
-    window.dispatchEvent(new Event("focus"));
-    await waitFor(() =>
-      expect(mocks.osAccountsStatus.mock.calls.length).toBeGreaterThan(callsBeforeRefresh),
-    );
-    await waitFor(() =>
-      expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull(),
-    );
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-  });
-
-  it("re-derives the banner when another surface's poll advances the wait phase", async () => {
-    const failedNote = {
-      ...first,
-      processingStatus: "failed" as const,
-      lastError: "Your balance is too low. Upgrade to continue.",
-    };
-    const proAccount: AccountStatus = {
-      signedIn: true,
-      configured: true,
-      user: { id: "usr_123", handle: "alex" },
-      balance: { credits: 10, usdMillis: 10 },
-      subscription: { subscribed: true, status: "active", plan: "pro" },
-    };
-    mocks.osAccountsStatus.mockResolvedValue(proAccount);
-    mocks.bootstrapApp.mockResolvedValue({
-      folders: [],
-      notes: [failedNote, second],
-      activeRecoveries: [],
-      providerConfigured: true,
-    });
-    mocks.getNote.mockImplementation(async (noteId: string) =>
-      noteId === "note-2" ? second : failedNote,
-    );
-
-    render(<App />);
-    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
-    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
-    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
-
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Upgrade now" }));
-    expect(
-      await screen.findByText("Waiting for you to confirm in the browser"),
-    ).toBeInTheDocument();
-
-    // Another surface's poll times out and mutates the shared wait in place.
-    // The banner snapshot must follow on the next refresh tick.
-    const grantWait = currentMaxGrantWait();
-    expect(grantWait).toBeDefined();
-    if (grantWait) markMaxGrantWaitSlow(grantWait);
-    mocks.osAccountsStatus.mockResolvedValue({ ...proAccount });
-    window.dispatchEvent(new Event("focus"));
-
-    expect(
-      await screen.findByText(
-        "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull();
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 });

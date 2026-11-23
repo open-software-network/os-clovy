@@ -1,11 +1,8 @@
-import type { ThinkingLevel } from "./thinking-level";
-
 export type QueuedAgentFollowUp = {
   messageId: string;
   prompt: string;
   attachments: string[];
   model: string;
-  thinkingLevel: ThinkingLevel;
   delivery?: "follow_up" | "attachments";
   steering?: "pending" | "accepted";
 };
@@ -16,10 +13,6 @@ export const ATTACHMENT_FOLLOW_UP_NOTE = "The files are attached to this message
 
 const STORAGE_KEY = "clovy.agent.queuedFollowUps";
 
-function isThinkingLevel(value: unknown): value is ThinkingLevel {
-  return value === "instant" || value === "medium" || value === "hard";
-}
-
 function queuedFollowUp(value: unknown): QueuedAgentFollowUp | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
@@ -29,7 +22,6 @@ function queuedFollowUp(value: unknown): QueuedAgentFollowUp | undefined {
     typeof record.model !== "string" ||
     !Array.isArray(record.attachments) ||
     !record.attachments.every((path) => typeof path === "string") ||
-    !isThinkingLevel(record.thinkingLevel) ||
     (record.delivery !== undefined &&
       record.delivery !== "follow_up" &&
       record.delivery !== "attachments") ||
@@ -44,7 +36,6 @@ function queuedFollowUp(value: unknown): QueuedAgentFollowUp | undefined {
     prompt: record.prompt,
     attachments: record.attachments,
     model: record.model,
-    thinkingLevel: record.thinkingLevel,
     ...(record.delivery ? { delivery: record.delivery } : {}),
   };
 }

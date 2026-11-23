@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   listDictionaryEntries: vi.fn(),
   listen: vi.fn(),
   writeText: vi.fn(),
+  activityAppIcon: vi.fn(),
 }));
 
 function stubNavigatorPlatform(platform: string, userAgent: string) {
@@ -46,6 +47,8 @@ vi.mock("../lib/tauri", () => ({
   listDictionaryEntries: mocks.listDictionaryEntries,
 }));
 
+vi.mock("../lib/activity-timeline", () => ({ activityAppIcon: mocks.activityAppIcon }));
+
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mocks.listen,
 }));
@@ -55,6 +58,7 @@ describe("DictationHistoryView", () => {
     vi.clearAllMocks();
     localStorage.clear();
     mocks.listen.mockResolvedValue(vi.fn());
+    mocks.activityAppIcon.mockResolvedValue(null);
     mocks.writeText.mockResolvedValue(undefined);
     mocks.deleteDictationHistoryItem.mockResolvedValue(undefined);
     mocks.listDictionaryEntries.mockResolvedValue([]);
@@ -117,6 +121,49 @@ describe("DictationHistoryView", () => {
     });
   });
 
+  it("shows the target app icon and falls back when missing", async () => {
+    mocks.activityAppIcon.mockImplementation(async (id: string) =>
+      id === "app.found" ? "data:image/png;base64,AA==" : null,
+    );
+    mocks.listDictationHistory.mockResolvedValue({
+      retentionDays: 7,
+      items: [
+        {
+          id: "found",
+          text: "Found app",
+          provider: "local",
+          createdAt: new Date().toISOString(),
+          appBundleId: "app.found",
+        },
+        {
+          id: "missing",
+          text: "Missing app",
+          provider: "local",
+          createdAt: new Date().toISOString(),
+          appBundleId: "app.missing",
+        },
+        { id: "old", text: "Old item", provider: "local", createdAt: new Date().toISOString() },
+      ],
+    });
+    render(<DictationHistoryView />);
+    const found = (await screen.findByText("Found app")).closest("li");
+    const missing = screen.getByText("Missing app").closest("li");
+    const old = screen.getByText("Old item").closest("li");
+    if (!found || !missing || !old) throw new Error("history rows missing");
+    await waitFor(() =>
+      expect(found.querySelector("img.app-icon")).toHaveAttribute(
+        "src",
+        "data:image/png;base64,AA==",
+      ),
+    );
+    expect(within(missing).getByTestId("app-icon-fallback")).toBeInTheDocument();
+    expect(within(old).getByTestId("app-icon-fallback")).toBeInTheDocument();
+    const image = found.querySelector("img.app-icon");
+    if (!image) throw new Error("app icon missing");
+    fireEvent.error(image);
+    expect(within(found).getByTestId("app-icon-fallback")).toBeInTheDocument();
+  });
+
   it("renders recent dictations and copies with trailing space", async () => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -170,6 +217,20 @@ describe("DictationHistoryView", () => {
   });
 
   it("keeps dialog copy feedback inside a fixed button footprint", async () => {
+    mocks.activityAppIcon.mockResolvedValue("data:image/png;base64,AA==");
+    mocks.listDictationHistory.mockResolvedValue({
+      retentionDays: 7,
+      items: [
+        {
+          id: "dictation-1",
+          text: "Send the follow up.",
+          language: "en",
+          provider: "local",
+          createdAt: new Date().toISOString(),
+          appBundleId: "app.editor",
+        },
+      ],
+    });
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -189,6 +250,12 @@ describe("DictationHistoryView", () => {
 
       await user.click(transcript);
       const dialog = screen.getByRole("dialog");
+      await waitFor(() =>
+        expect(dialog.querySelector("img.app-icon")).toHaveAttribute(
+          "src",
+          "data:image/png;base64,AA==",
+        ),
+      );
       const dialogCopyButton = within(dialog).getByRole("button", { name: "Copy" });
       const dialogIconSwap = dialogCopyButton.querySelector(".t-icon-swap");
 

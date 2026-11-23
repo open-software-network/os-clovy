@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from "react";
 import { HoverTip } from "../ui/HoverTip";
 import { primaryShortcutLabel } from "../../lib/platform";
+import { useT } from "../../i18n";
 
 export type TabItem = {
   id: string;
@@ -153,6 +154,7 @@ export function TabBar({
   const pendingTransformClearRef = useRef(false);
   const [dragSourceId, setDragSourceId] = useState<string | null>(null);
   const newTabShortcut = primaryShortcutLabel("T");
+  const t = useT();
 
   function stripTabEls(): HTMLElement[] {
     return Array.from(stripRef.current?.querySelectorAll<HTMLElement>(".tab") ?? []);
@@ -502,7 +504,7 @@ export function TabBar({
           className="tab-close"
           tabIndex={-1}
           aria-hidden="true"
-          aria-label={`Close ${tab.title}`}
+          aria-label={t("shell.tabs.closeTab", { title: tab.title })}
           onClick={(event) => {
             event.stopPropagation();
             onClose(tab.id);
@@ -519,7 +521,7 @@ export function TabBar({
     <div
       className="tab-bar"
       role="tablist"
-      aria-label="Open tabs"
+      aria-label={t("shell.tabs.openTabs")}
       data-tauri-drag-region
       onPointerDown={handleDragRegionPointerDown}
     >
@@ -538,7 +540,7 @@ export function TabBar({
             className="tab-overflow"
             // The popover is a full switcher listing every open tab (the badge
             // counts how many are currently off-strip), so the label says so.
-            aria-label={`Show all ${tabs.length} tabs`}
+            aria-label={t("shell.tabs.showAll", { count: tabs.length })}
             aria-expanded={overflowOpen}
             onClick={(event) => {
               event.stopPropagation();
@@ -558,12 +560,17 @@ export function TabBar({
           delay={550}
           tip={
             <span className="tab-tip">
-              New tab
+              {t("shell.tabs.newTab")}
               <span className="tab-tip-kbd">{newTabShortcut}</span>
             </span>
           }
         >
-          <button type="button" className="tab-new" aria-label="New tab" onClick={onNew}>
+          <button
+            type="button"
+            className="tab-new"
+            aria-label={t("shell.tabs.newTab")}
+            onClick={onNew}
+          >
             <IconPlusMedium size={14} />
           </button>
         </HoverTip>
@@ -607,7 +614,7 @@ export function TabBar({
                   className="tab-overflow-close"
                   tabIndex={-1}
                   aria-hidden="true"
-                  aria-label={`Close ${tab.title}`}
+                  aria-label={t("shell.tabs.closeTab", { title: tab.title })}
                   onClick={(event) => {
                     event.stopPropagation();
                     onClose(tab.id);
@@ -636,7 +643,7 @@ export function TabBar({
               setMenu(null);
             }}
           >
-            Close tab
+            {t("shell.tabs.closeTabMenu")}
           </button>
           {tabs.length > 1 ? (
             <button
@@ -647,7 +654,7 @@ export function TabBar({
                 setMenu(null);
               }}
             >
-              Close other tabs
+              {t("shell.tabs.closeOthers")}
             </button>
           ) : null}
         </div>

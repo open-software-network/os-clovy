@@ -101,3 +101,11 @@ payloads.
   service credentials, unrestricted tools, or persistence authority.
 - Implement the entire agent loop in Rust. Rejected because it would duplicate
   a maintained SDK while adding a slower path to feature parity.
+
+## Addendum (2026-10-15)
+
+Superseded in part by
+[ADR-0062](0062-cli-engines-are-the-default-agent-native-harness-is-legacy.md):
+Claude Code or Codex is now the default engine of new agent work; this
+harness stays as the legacy Clovy engine until its tools reach the Clovy MCP
+server.

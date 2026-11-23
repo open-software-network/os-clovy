@@ -1,24 +1,13 @@
-import { FundingNotice, fundingTierOf } from "../components/account/FundingNotice";
-import { markAgentNewSessionPending } from "../components/agent/session-persistence";
-import { AgentSessionsList } from "../components/agent/AgentSessionsList";
+import { t } from "../i18n";
 import { DictationHistoryView } from "../components/dictation/DictationHistoryView";
-import { ShareLinkCopyAction } from "../components/share/ShareLinkCopyAction";
 import { NotesList } from "../components/notes-list/NotesList";
 import { BreadcrumbBar } from "../components/ui/BreadcrumbBar";
 import { IconProjects } from "central-icons/IconProjects";
-import { agentRuntimeBindings, retryProcessing } from "../lib/tauri";
-import { selectSessionProjectContext } from "../lib/agent-project-context";
+import { retryProcessing } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
-import {
-  COMPOSER_FUNDING_DISABLED_REASON,
-  NOTE_RETRY_FUNDING_DISABLED_REASON,
-  RECOVERY_FUNDING_DISABLED_REASON,
-  RECORDING_FUNDING_DISABLED_REASON,
-  ROUTINE_FUNDING_DISABLED_REASON,
-} from "./app-shell";
 import type { RenderAppWorkspaceDependencies } from "./app-workspace-view-types";
 import {
-  AgentWorkspaceRoute,
+  ActivityTimelineViewRoute,
   AppSettingsRoute,
   FoldersWorkspaceRoute,
   NoteEditorRoute,
@@ -28,28 +17,13 @@ import {
 export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies) {
   const {
     accessibilityStatus,
-    account,
-    accountLoading,
-    currentDataPartitionName,
-    activeAgentSessionFolder,
-    activeAgentSessionId,
-    activeAgentSessionSeed,
+    checkingForUpdates,
+    onCheckForUpdates,
     activeView,
-    agentOrigin,
-    agentOriginFolder,
-    agentProjectContextFolder,
-    agentSessions,
-    agentSessionsListRef,
-    agentWaitingSessionIds,
-    agentWorkingSessionIds,
     changeSettingsTab,
     checkingSourceReadiness,
-    completedSessions,
     dispatch,
     folderReturnTarget,
-    fundingAccount,
-    fundingRequired,
-    handleAccountChanged,
     handleCreateFolder,
     handleCreateNote,
     handleDeleteFolder,
@@ -62,69 +36,43 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     handleKeepRecordingAfterMeetingEnd,
     handleFlushNote,
     handleFoldersImported,
-    handleNewAgentSession,
-    handleNewAgentSessionInProject,
-    handleOpenSessionProject,
     handlePauseRecording,
-    handleReconcileToStable,
     handleRecovery,
-    handleRelaunchUpdate,
     handleRemoveNoteFromFolder,
-    handleRemoveSessionFromFolder,
-    handleRenameAgentSession,
     handleRenameFolder,
-    handleReportIssue,
     handleResumeRecording,
     handleSaveNoteNow,
-    handleReturnToAgentOriginFolder,
-    handleReturnToAgentsList,
     handleReturnToNote,
-    handleReturnToRoutines,
     handleSelectFolder,
     handleSelectNote,
     handleSelectNoteFromAllNotes,
     handleSelectNoteFromFolder,
     handleSetNoteFolder,
-    handleSetSessionFolder,
     handleSourceModeChange,
-    handleStartBundleChat,
     handleStartRecording,
     handleStopNowAfterMeetingEnd,
-    handleToggleSessionCompleted,
-    handleTopUp,
     handleUpdateNote,
-    homeStoredSessionId,
     memoryFolderFilter,
     meetingEndCountdown,
     microphoneBlocked,
     microphoneStatus,
     noteDetailScrollRef,
-    noteShareUrl,
     noteToolbarActions,
     notesListRef,
     openMemorySettings,
     openTab,
     originAllNotes,
     originFolder,
-    readyUpdate,
     recordNoticesConsentPinned,
     recordingNoteId,
-    refreshAccount,
-    refreshFundingAccount,
-    rememberHomeSession,
-    runUpdateCheck,
     selectedNote,
     selectedNoteId,
     selectedNoteLiveTranscript,
     selectedRecovery,
-    sessionFolders,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setError,
     setFolderReturnTarget,
     setMoveDialogNoteIds,
-    setMoveDialogSessionIds,
     setOriginAllNotes,
     setOriginFolderId,
     setSettingsDetailPinned,
@@ -135,35 +83,17 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     sourceReadiness,
     state,
     takeNewTabIntent,
-    topUpLabel,
   } = dependencies;
-
-  const resolveAgentSessionProjectContext = (sessionId: string) => {
-    const folder =
-      sessionId === activeAgentSessionId
-        ? activeAgentSessionFolder
-        : selectSessionProjectContext(state.folders, sessionFolders[sessionId]);
-    return folder
-      ? {
-          id: folder.id,
-          name: folder.name,
-          instructions: folder.instructions,
-          localPath: folder.localPath,
-        }
-      : undefined;
-  };
 
   return activeView === "settings" ? (
     <AppSettingsRoute
-      account={account}
-      accountLoading={accountLoading}
+      onCheckForUpdates={onCheckForUpdates}
+      checkingForUpdates={checkingForUpdates}
       sourceMode={sourceMode}
       sourceReadiness={sourceReadiness}
       checkingSourceReadiness={checkingSourceReadiness}
       microphonePermissionStatus={microphoneStatus}
       accessibilityPermissionStatus={accessibilityStatus}
-      onAccountChanged={handleAccountChanged}
-      onAccountRefresh={refreshAccount}
       onSourceModeChange={handleSourceModeChange}
       onEnableMicrophone={handleEnableMicrophone}
       onEnableAccessibility={handleEnableAccessibility}
@@ -178,12 +108,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       activeTab={settingsTab}
       onTabChange={changeSettingsTab}
       onDetailPinnedChange={setSettingsDetailPinned}
-      onCheckForUpdates={() => runUpdateCheck("manual")}
-      updateReadyToRelaunch={readyUpdate != null}
-      onRelaunch={handleRelaunchUpdate}
-      onReconcileToStable={handleReconcileToStable}
-      onReportIssue={handleReportIssue}
-      onStartBundleChat={handleStartBundleChat}
     />
   ) : activeView === "dictation" ? (
     <DictationHistoryView
@@ -200,191 +124,16 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
         }, 80);
       }}
     />
+  ) : activeView === "today" ? (
+    <ActivityTimelineViewRoute
+      onNavigateToSettings={(tab) => {
+        setSettingsReturnView(activeView);
+        setActiveView("settings");
+        setSettingsTab(tab ?? "activity");
+      }}
+    />
   ) : activeView === "routines" ? (
-    <RoutinesViewRoute
-      creditActionsDisabledReason={fundingRequired ? ROUTINE_FUNDING_DISABLED_REASON : undefined}
-      onCreateRoutine={(prompt) => {
-        markAgentNewSessionPending(prompt);
-        setActiveAgentSession(undefined);
-        setActiveView("agent");
-      }}
-      onOpenRun={(session) => {
-        if (takeNewTabIntent()) {
-          openTab({
-            view: "agent",
-            agentSessionId: session.id,
-            agentOrigin: { kind: "routines" },
-          });
-          return;
-        }
-        setAgentOrigin({ kind: "routines" });
-        setActiveAgentSession(session);
-        setActiveView("agent");
-      }}
-    />
-  ) : activeView === "home" ? (
-    <AgentWorkspaceRoute
-      key={`home:${currentDataPartitionName}`}
-      homeMode
-      homeUserDisplayName={account.user?.displayName}
-      initialSessionId={homeStoredSessionId}
-      onHomeSessionCreated={rememberHomeSession}
-      onOpenHomeTaskSession={(sessionId, title) => {
-        void (async () => {
-          try {
-            const session =
-              agentSessions.find((item) => item.id === sessionId) ??
-              (await agentRuntimeBindings.getSession(sessionId));
-            setAgentOrigin(undefined);
-            setActiveAgentSession(session);
-            setActiveView("agent");
-          } catch (cause) {
-            setError(messageFromError(cause) || `Could not open ${title}.`);
-          }
-        })();
-      }}
-      creditActionsDisabledReason={fundingRequired ? COMPOSER_FUNDING_DISABLED_REASON : undefined}
-      renderFundingNotice={
-        fundingRequired
-          ? (textFundingContext) => (
-              <FundingNotice
-                account={fundingAccount}
-                onRefresh={refreshFundingAccount}
-                textFundingContext={textFundingContext}
-              />
-            )
-          : undefined
-      }
-      fundingTier={fundingTierOf(fundingAccount)}
-      topUpLabel={topUpLabel}
-      onTopUp={handleTopUp}
-      resolveSessionProjectContext={resolveAgentSessionProjectContext}
-    />
-  ) : activeView === "agent" ? (
-    // The origin crumbs render inside the workspace's own sticky
-    // session bar, so they persist while the chat scrolls beneath.
-    <AgentWorkspaceRoute
-      initialSession={activeAgentSessionSeed}
-      initialSessionId={activeAgentSessionId}
-      onSessionSelected={setActiveAgentSession}
-      creditActionsDisabledReason={fundingRequired ? COMPOSER_FUNDING_DISABLED_REASON : undefined}
-      renderFundingNotice={
-        fundingRequired
-          ? (textFundingContext) => (
-              <FundingNotice
-                account={fundingAccount}
-                onRefresh={refreshFundingAccount}
-                textFundingContext={textFundingContext}
-              />
-            )
-          : undefined
-      }
-      fundingTier={fundingTierOf(fundingAccount)}
-      topUpLabel={topUpLabel}
-      onTopUp={handleTopUp}
-      sessionInProject={Boolean(activeAgentSessionFolder)}
-      resolveSessionProjectContext={resolveAgentSessionProjectContext}
-      projectContext={
-        agentProjectContextFolder
-          ? {
-              id: agentProjectContextFolder.id,
-              name: agentProjectContextFolder.name,
-              instructions: agentProjectContextFolder.instructions,
-              localPath: agentProjectContextFolder.localPath,
-            }
-          : undefined
-      }
-      onMoveSessionToProject={(sessionId) => setMoveDialogSessionIds([sessionId])}
-      origin={
-        agentOriginFolder
-          ? {
-              backLabel: `Back to ${agentOriginFolder.name}`,
-              onBack: handleReturnToAgentOriginFolder,
-              crumbs: [
-                {
-                  label: "Projects",
-                  onClick: () => {
-                    setActiveView("folders");
-                    dispatch({
-                      type: "folderSelected",
-                      folderId: undefined,
-                    });
-                    setActiveAgentSession(undefined);
-                    setAgentOrigin(undefined);
-                  },
-                },
-                {
-                  label: agentOriginFolder.name,
-                  icon: <IconProjects size={13} />,
-                  onClick: handleReturnToAgentOriginFolder,
-                },
-              ],
-            }
-          : agentOrigin?.kind === "routines"
-            ? {
-                backLabel: "Back to routines",
-                onBack: handleReturnToRoutines,
-                crumbs: [
-                  {
-                    label: "Routines",
-                    onClick: handleReturnToRoutines,
-                  },
-                ],
-              }
-            : activeAgentSessionFolder
-              ? // Opened from the Sessions view or sidebar but filed in a
-                // project: the crumb shows the session's home (back still
-                // returns to where the user came from).
-                {
-                  backLabel: "Back to sessions",
-                  onBack: handleReturnToAgentsList,
-                  crumbs: [
-                    {
-                      label: activeAgentSessionFolder.name,
-                      icon: <IconProjects size={13} />,
-                      onClick: () => handleOpenSessionProject(activeAgentSessionFolder.id),
-                    },
-                  ],
-                }
-              : {
-                  backLabel: "Back to sessions",
-                  onBack: handleReturnToAgentsList,
-                  crumbs: [
-                    {
-                      label: "Sessions",
-                      onClick: handleReturnToAgentsList,
-                    },
-                  ],
-                }
-      }
-    />
-  ) : activeView === "agent-sessions" ? (
-    <AgentSessionsList
-      ref={agentSessionsListRef}
-      sessions={agentSessions}
-      folders={state.folders}
-      sessionFolderIds={sessionFolders}
-      completedSessionIds={completedSessions}
-      onToggleCompleted={handleToggleSessionCompleted}
-      workingSessionIds={agentWorkingSessionIds}
-      waitingSessionIds={agentWaitingSessionIds}
-      onSelectSession={(session) => {
-        if (takeNewTabIntent()) {
-          openTab({ view: "agent", agentSessionId: session.id });
-          return;
-        }
-        setAgentOrigin(undefined);
-        setActiveAgentSession(session);
-        setActiveView("agent");
-      }}
-      onNewSession={handleNewAgentSession}
-      onRenameSession={handleRenameAgentSession}
-      onOpenMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
-      onOpenMoveSessions={(sessionIds) => setMoveDialogSessionIds(sessionIds)}
-      onRemoveFromProject={(sessionId, folderId) =>
-        void handleRemoveSessionFromFolder(sessionId, folderId)
-      }
-    />
+    <RoutinesViewRoute />
   ) : activeView === "notes" || activeView === "all-notes" ? (
     <NotesList
       ref={notesListRef}
@@ -411,13 +160,11 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
     <FoldersWorkspaceRoute
       folders={state.folders}
       notes={state.notes}
-      sessions={agentSessions}
-      sessionFolderIds={sessionFolders}
       selectedFolderId={state.selectedFolderId}
       folderBackTarget={
         folderReturnTarget
           ? {
-              label: `Back to ${folderReturnTarget.label}`,
+              label: t("app.breadcrumb.backTo", { name: folderReturnTarget.label }),
               onBack: () => void handleReturnToNote(folderReturnTarget.noteId),
             }
           : undefined
@@ -455,49 +202,18 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       }
       onOpenMoveDialog={(noteId) => setMoveDialogNoteIds([noteId])}
       onDeleteNote={(noteId) => void handleDeleteNote(noteId)}
-      onCreateSession={(folderId) => handleNewAgentSessionInProject(folderId)}
-      onSelectSession={(session) => {
-        // Remember the project so the agent view can breadcrumb
-        // back to it.
-        const agentOriginValue = state.selectedFolderId
-          ? ({
-              kind: "project",
-              folderId: state.selectedFolderId,
-            } as const)
-          : undefined;
-        if (takeNewTabIntent()) {
-          openTab({
-            view: "agent",
-            agentSessionId: session.id,
-            agentOrigin: agentOriginValue,
-          });
-          return;
-        }
-        setAgentOrigin(agentOriginValue);
-        setActiveAgentSession(session);
-        setActiveView("agent");
-      }}
-      onAssignSessionToFolder={(sessionId, folderId) =>
-        handleSetSessionFolder(sessionId, folderId, {
-          rethrow: true,
-        })
-      }
-      onRemoveSessionFromFolder={(sessionId, folderId) =>
-        void handleRemoveSessionFromFolder(sessionId, folderId)
-      }
-      onOpenSessionMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
       onManageProjectMemory={(folderId) => openMemorySettings(folderId)}
     />
   ) : selectedNote ? (
     <div className="note-shell">
       {/* Every note gets the toolbar so its content starts at a
-                        consistent height (aligning with the Ask Clovy panel) and
+                        consistent height and
                         the note actions live in one predictable spot. The left
                         shows breadcrumb nav when there's a parent, else a quiet
                         "Notes" root. */}
       {originFolder ? (
         <BreadcrumbBar
-          backLabel={`Back to ${originFolder.name}`}
+          backLabel={t("app.breadcrumb.backTo", { name: originFolder.name })}
           onBack={() => {
             setActiveView("folders");
             dispatch({
@@ -520,30 +236,28 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               },
             },
             {
-              label: selectedNote.title.trim() || "New note",
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
+              label: selectedNote.title.trim() || t("app.newNote"),
             },
           ]}
           actions={noteToolbarActions}
         />
       ) : originAllNotes ? (
         <BreadcrumbBar
-          backLabel="Back to meeting notes"
+          backLabel={t("app.breadcrumb.backToMeetingNotes")}
           onBack={() => {
             setActiveView("all-notes");
             setOriginAllNotes(false);
           }}
           items={[
             {
-              label: "Meeting notes",
+              label: t("app.nav.meetingNotes"),
               onClick: () => {
                 setActiveView("all-notes");
                 setOriginAllNotes(false);
               },
             },
             {
-              label: selectedNote.title.trim() || "New note",
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
+              label: selectedNote.title.trim() || t("app.newNote"),
             },
           ]}
           actions={noteToolbarActions}
@@ -551,10 +265,9 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       ) : (
         <BreadcrumbBar
           items={[
-            { label: "Notes", onClick: () => setActiveView("all-notes") },
+            { label: t("app.nav.notes"), onClick: () => setActiveView("all-notes") },
             {
-              label: selectedNote.title.trim() || "New note",
-              action: noteShareUrl ? <ShareLinkCopyAction url={noteShareUrl} /> : null,
+              label: selectedNote.title.trim() || t("app.newNote"),
             },
           ]}
           actions={noteToolbarActions}
@@ -568,15 +281,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           recordingStatus={selectedNoteId === recordingNoteId ? state.recordingStatus : undefined}
           meetingEndCountdown={selectedNoteId === recordingNoteId ? meetingEndCountdown : null}
           recordingDisabled={Boolean(state.recordingStatus && selectedNoteId !== recordingNoteId)}
-          recordingBlockedReason={fundingRequired ? RECORDING_FUNDING_DISABLED_REASON : undefined}
-          fundingNotice={
-            fundingRequired ? (
-              <FundingNotice account={fundingAccount} onRefresh={refreshFundingAccount} />
-            ) : undefined
-          }
-          fundingTier={fundingTierOf(fundingAccount)}
-          retryBlockedReason={fundingRequired ? NOTE_RETRY_FUNDING_DISABLED_REASON : undefined}
-          recoveryBlockedReason={fundingRequired ? RECOVERY_FUNDING_DISABLED_REASON : undefined}
           liveTranscript={selectedNoteLiveTranscript}
           sourceMode={sourceMode}
           sourceReadiness={sourceReadiness}
@@ -600,7 +304,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               activeTab,
             })
           }
-          onStartRecording={() => void handleStartRecording()}
+          onStartRecording={(video) => void handleStartRecording(video)}
           onPauseRecording={(sessionId) => void handlePauseRecording(sessionId)}
           onResumeRecording={(sessionId) => void handleResumeRecording(sessionId)}
           onFinishRecording={(sessionId) => void handleFinishRecording(sessionId)}
@@ -608,10 +312,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
           onStopNowAfterMeetingEnd={handleStopNowAfterMeetingEnd}
           onRetry={async () => {
             if (!selectedNote) return;
-            if (fundingRequired) {
-              setError(NOTE_RETRY_FUNDING_DISABLED_REASON);
-              return;
-            }
             try {
               const note = await retryProcessing(
                 selectedNote.id,
@@ -632,8 +332,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               throw err;
             }
           }}
-          onTopUp={handleTopUp}
-          topUpLabel={topUpLabel}
           onAssignFolder={(folderId) => void handleSetNoteFolder(selectedNote.id, folderId)}
           onRemoveFolder={(folderId) => void handleRemoveNoteFromFolder(selectedNote.id, folderId)}
           onNavigateToFolder={(folderId) => {
@@ -641,7 +339,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
             dispatch({ type: "folderSelected", folderId });
             setFolderReturnTarget({
               noteId: selectedNote.id,
-              label: selectedNote.title.trim() || "New note",
+              label: selectedNote.title.trim() || t("app.newNote"),
             });
             setOriginFolderId(undefined);
           }}
@@ -657,6 +355,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       </div>
     </div>
   ) : (
-    <section className="editor-empty" aria-label="Opening note" />
+    <section className="editor-empty" aria-label={t("app.workspace.openingNote")} />
   );
 }

@@ -1,13 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
-import {
-  markAgentNewSessionPending,
-  type AgentNewSessionDetail,
-} from "../components/agent/session-persistence";
-import { recordDictationFinished } from "../lib/referral-nudge";
-import { AGENT_NEW_SESSION_EVENT, dispatchAgentSessionStatus } from "../lib/agent-events";
 import { nextDictationWorkflowActive, parseDictationHelperEvent } from "../lib/dictation-events";
-import { titleFromPrompt } from "../lib/session-title";
 import { stringPayloadValue } from "./app-helpers";
 import type { UseDictationEventsDependencies } from "./use-dictation-events-types";
 
@@ -26,29 +19,8 @@ export function useDictationEvents(dependencies: UseDictationEventsDependencies)
         helperEvent.type,
         helperEvent.payload?.preserveActiveTake === true,
       );
-      if (helperEvent.type === "final_transcript") {
-        // T3 of the referral delight nudge: a dictation landed (often while
-        // Clovy is backgrounded; the card waits to be found).
-        recordDictationFinished();
-        return;
-      }
       if (helperEvent.type === "agent_session_prompt") {
-        const prompt = stringPayloadValue(helperEvent.payload?.prompt) ?? "";
-        dispatchAgentSessionStatus({
-          prompt,
-          title: titleFromPrompt(prompt),
-          status: "received",
-          summary: "Clovy is starting.",
-        });
-        markAgentNewSessionPending(prompt);
-        setActiveView("agent");
-        window.setTimeout(() => {
-          window.dispatchEvent(
-            new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT, {
-              detail: { prompt },
-            }),
-          );
-        }, 0);
+        setActiveView("today");
         return;
       }
       if (
@@ -69,5 +41,5 @@ export function useDictationEvents(dependencies: UseDictationEventsDependencies)
       aborted = true;
       unlisten?.();
     };
-  }, []);
+  }, [dictationWorkflowActiveRef, setAccessibilityStatus, setActiveView, setMicrophoneStatus]);
 }

@@ -1,104 +1,96 @@
-# Releasing Clovy for Windows
+# Building Clovy for Windows
 
-Clovy ships Windows builds as an NSIS installer. The production Windows release
-workflow builds from the promoted commit recorded by `stable-build.json`, signs
-the app executable and installer with Authenticode, signs updater artifacts with
-the Tauri updater key, and attaches Windows assets to the existing
-`open-software-network/os-june-releases` release.
+Windows releases come from `.github/workflows/release.yml` (see
+[ADR-0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md)
+and [release-macos.md](release-macos.md)): its `windows` job runs
+`scripts/build-windows.ps1` with the updater key and publishes the NSIS
+installer and its `.sig`. You can also build the installer locally with
+`scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
+with the checks below.
 
-`Clovy_*` names are canonical release artifacts. The existing release
-repository, June-named artifact aliases, `os-june.exe`, and the
-`$env:LOCALAPPDATA\June` install path remain compatibility identities under
-[ADR-0055](adr/0055-clovy-technical-identity-migrates-through-a-compatibility-bridge.md).
+The workflow defaults to both platforms (`CLOVY_RELEASE_PLATFORMS=all`, also
+when the non-secret repository variable is unset). For the temporary macOS-only
+0.1.6 publication, the owner selects `macos` and preserves/restores the previous
+variable state. The version job validates this choice once and passes its
+output to the build/publication jobs and manifest generator. In `macos`, the
+entire Windows job, including certificate preparation, is skipped. Windows
+awaits a valid signing certificate; its signing and verification requirements
+remain unchanged. This release has no Windows 0.1.6 installer or updater entry
+and does not reuse the Windows 0.1.5 package under a newer version. In `all`,
+Windows must build successfully with its certificate and updater signature;
+a skipped, failed or cancelled required job cannot publish a partial release.
+See [release-macos.md](release-macos.md) for the selection and restoration steps.
+
+The canonical installer directory is `artifacts/windows-signed`; the desktop
+workflow uploads `clovy-windows-signed-release-nsis` from that directory. There
+is no unsigned output alias.
+
+Computer use now requires signed native artifacts. Set
+`WINDOWS_CERTIFICATE_THUMBPRINT` to an available current-user signing
+certificate and provide `signtool.exe` on PATH (or `WINDOWS_SIGNTOOL_PATH`).
+The builder signs the bundled `clovy-mcp.exe` relay, agent-desktop engine and authenticated helper
+before Tauri signs Clovy and the installer. Payload verification requires a
+valid matching publisher on the host, MCP relay, Computer use helper and engine, plus
+matching engine manifest, source, protocol, patch, target, binary and license
+hashes. Missing signing credentials fail the build; unsigned executables cannot
+satisfy the private helper's peer contract.
+
+`scripts/tauri-build.mjs` stages the MCP relay through
+`prepare-windows-mcp.mjs` after preparing the existing native engines. This
+invokes Cargo with the requested target/profile and honors `CARGO_TARGET_DIR`,
+selects the executable from Cargo's artifact events, signs it with the existing
+certificate, and writes `.tauri-helper/mcp-windows/clovy-mcp-manifest.json`.
+The Windows config maps that directory to `native/bin`. `build.rs` may create
+the directory for bootstrap, but never a placeholder executable.
+`verify-windows-artifacts.ps1` requires exactly one extracted relay and manifest
+at that location, identical staged/extracted hashes, current-source provenance,
+the release MSVC target/profile, and the same publisher as app/installer.
+Run the builder and final verifier on native Windows; a GNU metadata/typecheck
+run is not proof of signing or NSIS extraction.
+
+`pnpm tauri:dev` uses a native development runner around Cargo. On every rebuild,
+it takes the executable paths reported by Cargo, signs the newly built host and
+CLI relays with this same certificate, verifies their publisher, and only then
+launches Clovy. Signing failure stops launch. The runner keeps the selected dev
+identity and arguments and owns its child process tree across rebuilds. It does
+not import a certificate or relax the private helper's signature checks. Native
+Windows launch, handshake and rebuild acceptance is still required.
+
+Updater minisign signing remains separate: with `TAURI_SIGNING_PRIVATE_KEY`
+(and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) the installer also has a `.sig`.
+Without that key the Authenticode-signed installer has no updater `.sig`.
+The hosted Windows release workflow imports the owner-provided
+`WINDOWS_CERTIFICATE` (base64 PFX) with `WINDOWS_CERTIFICATE_PASSWORD` into
+its disposable current-user certificate store and exports the resulting
+thumbprint. The import script refuses local or self-hosted execution using
+[GitHub's runner environment marker](https://docs.github.com/en/actions/reference/workflows-and-actions/variables). Those
+real owner secrets must be configured before the workflow can produce this
+candidate; no certificate was imported on the implementation box. This native build and its
+interactive Computer use acceptance have not run on the Linux implementation
+box; see [computer-use-support.md](computer-use-support.md).
+
+The installer installs `clovy.exe` under `$env:LOCALAPPDATA\Clovy` with the owner
+as publisher, per
+[ADR-0068](adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md);
+`scripts/verify-windows-artifacts.ps1` checks the payload.
+
+The one-time identity migration of ADR-0068 runs only on macOS: Clovy on
+Windows always starts with a new profile.
 
 ## Windows support
 
-The Windows installer supports the app shell, OS Accounts sign-in, microphone
+The Windows installer supports the app shell, microphone
 recording, dictation shortcuts and paste, note generation, folders, and settings
-backed by the production Clovy API. macOS system-audio capture and Seatbelt
+using direct user-key providers or the selected CLI/endpoint Notes engine. macOS system-audio capture and Seatbelt
 sandbox features are macOS-only.
 
-Production Windows builds bundle the signed Node 24 agent sidecar, so Clovy can
-start the agent on a clean machine without Python, GitHub downloads, or a
-first-run runtime install. Sandboxed mode restricts host file tools to the
-workspace and disables shell execution on Windows. Unrestricted mode supports
-shell execution with approval for sensitive actions.
+Chat requires an installed CLI and its own login. Claude Code is the default,
+with Codex as the existing local fallback. The installer bundles the `clovy-mcp`
+relay for Clovy tools, not a model-and-tool loop. CLI execution policy and
+Clovy's local approval broker govern each turn; see
+[llm-providers.md](llm-providers.md#cli-chat-engine).
 
-## One-time prerequisites
-
-Create or confirm these before cutting the first Windows release:
-
-- Public GitHub repo: `open-software-network/os-june-releases`.
-- Release GitHub App installed on `os-clovy` and `os-june-releases` with
-  `contents:write`, exposed as `RELEASE_APP_ID` and
-  `RELEASE_APP_PRIVATE_KEY`.
-- Authenticode signing certificate exported as a password-protected PFX. Store
-  the base64-encoded PFX in `WINDOWS_CERTIFICATE` and its password in
-  `WINDOWS_CERTIFICATE_PASSWORD`.
-- Optional `WINDOWS_SIGNING_TIMESTAMP_URL` if the default
-  `http://timestamp.digicert.com` should be overridden.
-- Optional `WINDOWS_SIGNTOOL_PATH` if the runner cannot discover
-  `signtool.exe` from `PATH` or the Windows SDK.
-- Updater signing secrets: `TAURI_SIGNING_PRIVATE_KEY` and, when the key is
-  password-protected, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-- Production runtime secrets: `PRODUCTION_OS_ACCOUNTS_URL`,
-  `PRODUCTION_OS_ACCOUNTS_API_URL`, `PRODUCTION_OS_ACCOUNTS_CLIENT_ID`, and
-  `PRODUCTION_CLOVY_API_URL`.
-Keep the Authenticode certificate separate from the Tauri updater key. The
-certificate establishes the Windows publisher signature. The updater key signs
-the update artifact that Tauri verifies before installation.
-
-## Cutting a production Windows release
-
-Cut the macOS release first (build an RC, then promote it):
-
-```text
-GitHub Actions -> rc-desktop-release -> Run workflow (base-version X.Y.Z, rc-number N)
-GitHub Actions -> promote-desktop-release -> Run workflow (rc-version X.Y.Z-rc.N)
-```
-
-Promote owns the clean semver `X.Y.Z`, the `release: vX.Y.Z` bump committed
-directly to `main` by the release bot, the stable release creation, macOS assets,
-and initial `latest.json`. It also records the source commit in a
-`stable-build.json` asset on the `vX.Y.Z` release. The Windows workflow reads that
-commit and rebuilds the same tree, so it does not depend on the bump and can run
-as soon as promote finishes.
-
-Once promote has published `vX.Y.Z`, run:
-
-```text
-GitHub Actions -> production-desktop-windows -> Run workflow -> version X.Y.Z
-```
-
-The Windows workflow performs the release steps in order:
-
-1. Reads `stable-build.json` from the `vX.Y.Z` release to learn the promoted
-   source commit, then checks that commit out (not `main`).
-2. Validates required Windows signing, updater, release, and production runtime
-   secrets.
-3. Stamps the clean `X.Y.Z` version into the checked-out tree so the Windows
-   build matches the promoted macOS version.
-4. Verifies release `vX.Y.Z` and its existing `latest.json` exist in
-   `open-software-network/os-june-releases`.
-5. Runs `pnpm typecheck` and `pnpm test`.
-6. Builds the Node 24 agent runtime as `clovy-agent-runtime.exe`, writes its
-   SHA-256 checksum, and runs a startup smoke test from a path with spaces.
-7. Authenticode-signs the agent runtime executable and verifies its signature.
-8. Builds and signs the Windows dictation helper, then builds the Windows NSIS
-   installer with production OS Accounts and Clovy API configuration embedded as
-   fallback runtime config.
-9. Signs the app executable and NSIS installer through
-   `scripts/windows-sign.ps1`.
-10. Verifies Authenticode status for the executable and installer, checks the
-    updater signature file exists, and inspects the NSIS payload, including the
-    bundled dictation helper and agent runtime, while rejecting Hermes and
-    Python payloads.
-11. Uploads the NSIS output as a workflow artifact.
-12. Uploads Windows release assets and merges `windows-x86_64` into
-    `latest.json` without removing macOS updater entries or the generated
-    release changelog.
-
-## Qualifying an unsigned build on native Windows
+## Qualifying a signed build on native Windows
 
 Before merging Windows build changes, run the tracked qualification helper in
 PowerShell 7 on a native x64 Windows machine. Pass the standalone repository,
@@ -115,10 +107,10 @@ $expectedSha = "<exact-40-character-commit-sha>"
   -ExpectedSha $expectedSha
 ```
 
-The helper fetches `origin` and `upstream`, synchronizes the named GitButler
-branch to its remote state, and fails unless both resolve to the expected SHA.
-It then runs two complete unsigned builders and an additional explicit artifact
-verification after each build. It does not install dependencies, sign or upload
+The helper fetches `origin`, synchronizes the named GitButler branch to its
+remote state, and fails unless both resolve to the expected SHA.
+It then runs two complete signed builders and an additional explicit artifact
+verification after each build. It does not install dependencies or upload
 artifacts, push branches, or discard source changes.
 
 The default evidence directory is
@@ -128,32 +120,35 @@ The default evidence directory is
 
 ## Validation
 
-After the workflow publishes assets, download `Clovy_x64-setup.exe` from
-`open-software-network/os-june-releases`, copy it to a clean Windows 11 VM, and
-run:
+Copy a locally built `Clovy_x64-setup.exe` to a clean Windows 11 VM and run:
 
 ```powershell
 $installer = "$env:USERPROFILE\Downloads\Clovy_x64-setup.exe"
 Get-AuthenticodeSignature $installer | Format-List
 Start-Process -FilePath $installer -ArgumentList "/S" -Wait
-Start-Process "$env:LOCALAPPDATA\June\os-june.exe"
+Start-Process "$env:LOCALAPPDATA\Clovy\clovy.exe"
 ```
 
 The installed app is branded as Clovy, but the current Windows binary on disk is
-`os-june.exe` under `$env:LOCALAPPDATA\June`.
+`clovy.exe` under `$env:LOCALAPPDATA\Clovy`.
 
-Confirm the signature status is `Valid`, the publisher is Open Software Network,
-the app launches as Clovy, the sign-in copy mentions recording, notes, and
-dictation, and sign-in lands on the fresh New session hero with the Sessions
-sidebar visible. Confirm the bundled agent starts on a clean VM with no Python
-installed, and Windows dictation can record from the microphone and paste into
-a normal app. Record from the microphone and generate a note against production
-Clovy API before linking the installer publicly.
+Confirm the app launches as Clovy and an installed CLI starts with its own login, and Windows dictation can record from the microphone and
+paste into a normal app. Record from the microphone and generate a note against
+the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` must report `Valid` for this candidate; the
+Computer use peer contract also requires the helper and engine to match the
+host signing publisher. Record the signed native acceptance matrix separately.
 
-For updater validation after a second Windows release, install an older
-updater-capable Windows build, run **Clovy -> Check for updates...**, confirm the
-prompt shows the new version, install, and verify the app exits for the Windows
-installer handoff and relaunches cleanly on the new version.
+## Private browser resources
 
-If Authenticode validation, updater signature validation, sign-in, recording, or
-update installation fails, do not promote the Windows installer.
+The build wrapper prepares the pinned Windows x64 agent-browser host and Chrome
+for Testing before the desktop build. Resources are installed beneath
+`native/agent-browser/win64/`, including the private `clovy-agent-browser.exe`,
+`chrome/chrome-win64/chrome.exe`, licenses, dependency SBOM and provenance.
+The source commit, patches and immutable Chrome archive digest are recorded in
+`scripts/agent-browser/manifest.json`; no runtime installer or global browser
+lookup is used. The private host receives Authenticode signing through
+`scripts/windows-sign.ps1` when the Windows signing certificate is configured;
+Chrome keeps its vendor signatures. Unsigned local packaging follows the
+existing Windows release policy. `pnpm browser:prepare -- --release --check`
+verifies the exact staged files before bundling. Native installation, signature,
+process-job teardown and persistent-login acceptance remain Windows checks.

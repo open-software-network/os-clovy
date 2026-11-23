@@ -13,6 +13,10 @@
         type="button"
         aria-label="Cancel dictation"
       ></button>
+      <span id="hud-target" class="hud-target" role="img" hidden>
+        <img alt="" draggable="false" hidden />
+        <span class="hud-target-fallback" aria-hidden="true"></span>
+      </span>
       <div class="hud-viz">
         <div class="hud-bars" aria-hidden="true">
           <span class="hud-bar"></span>
@@ -37,6 +41,10 @@
             >Meeting detected</span
           >
           <span id="hud-meeting-app" class="hud-meeting-app"></span>
+          <button id="hud-meeting-video" class="hud-meeting-video" type="button" role="switch" aria-checked="false" aria-describedby="hud-meeting-app" hidden>
+            <span class="hud-meeting-video-toggle" aria-hidden="true"></span>
+            <span id="hud-meeting-video-label"></span>
+          </button>
         </span>
       </span>
       <button id="hud-meeting-start" class="hud-meeting-start" type="button">

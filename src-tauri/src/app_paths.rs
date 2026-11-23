@@ -1,12 +1,15 @@
 use std::{
-    ffi::OsStr,
     io::{Error, ErrorKind},
     path::{Component, Path, PathBuf},
 };
 use tauri::{AppHandle, Manager};
 
-const USE_PROD_DATA_DIR_ENV: &str = "OS_CLOVY_USE_PROD_DATA_DIR";
-const LEGACY_USE_PROD_DATA_DIR_ENV: &str = "OS_JUNE_USE_PROD_DATA_DIR";
+#[path = "app_paths/profile.rs"]
+mod profile;
+#[cfg(test)]
+use profile::env_value_truthy;
+pub(crate) use profile::production_app_data_dir;
+pub use profile::use_prod_data_dir;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -72,24 +75,7 @@ pub fn app_config_dir(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
     })
 }
 
-/// Public because migration validation (`db::migrations`) relaxes its
-/// newer-schema guard only for dev builds on the isolated dev data dir, and
-/// must not relax it when a dev build is pointed at production data.
-pub fn use_prod_data_dir() -> bool {
-    let value = crate::env_compat::var_os(USE_PROD_DATA_DIR_ENV, LEGACY_USE_PROD_DATA_DIR_ENV);
-    env_value_truthy(value.as_deref())
-}
-
-fn env_value_truthy(value: Option<&OsStr>) -> bool {
-    value.and_then(OsStr::to_str).is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-/// Public because the native messaging shim (`extension_host::shim_data_dir`)
+/// Public because the MCP relay
 /// has no AppHandle and must rebuild the same dev/prod split from scratch.
 pub fn app_data_dir_for_build(
     data_dir: PathBuf,
@@ -194,7 +180,7 @@ mod tests {
 
     #[test]
     fn release_builds_use_the_configured_data_dir() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir.clone(), false, false),
@@ -204,17 +190,17 @@ mod tests {
 
     #[test]
     fn debug_builds_use_a_separate_dev_data_dir_by_default() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir, true, false),
-            PathBuf::from("/tmp/co.opensoftware.june-dev")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev")
         );
     }
 
     #[test]
     fn debug_builds_can_opt_into_the_configured_data_dir() {
-        let data_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let data_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_data_dir_for_build(data_dir.clone(), true, true),
@@ -224,7 +210,7 @@ mod tests {
 
     #[test]
     fn release_builds_use_the_configured_config_dir() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir.clone(), false, false),
@@ -234,17 +220,17 @@ mod tests {
 
     #[test]
     fn debug_builds_use_a_separate_dev_config_dir_by_default() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir, true, false),
-            PathBuf::from("/tmp/co.opensoftware.june-dev")
+            PathBuf::from("/tmp/dev.guilhermexp.clovy-dev")
         );
     }
 
     #[test]
     fn debug_builds_can_opt_into_the_configured_config_dir() {
-        let config_dir = PathBuf::from("/tmp/co.opensoftware.june");
+        let config_dir = PathBuf::from("/tmp/dev.guilhermexp.clovy");
 
         assert_eq!(
             app_config_dir_for_build(config_dir.clone(), true, true),

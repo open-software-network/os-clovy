@@ -1,5 +1,10 @@
 # JUN-334 note transcription latency
 
+> **Historical measurements (2026-10-28).** The measurements below predate
+> the direct-provider cut in ADR-0073. They preserve the original fixture and
+> observations and do not prove the current transport or native behavior.
+
+
 ## Measurement origins
 
 The benchmark clock starts after recording finalization, synthetic fixture creation, database setup, and observer readiness. It immediately precedes the call to the existing three-argument `finish_recording_session` handoff. All benchmark fields therefore measure post-finalization orchestration. They do not include the time spent finalizing a recording after the user presses Done.

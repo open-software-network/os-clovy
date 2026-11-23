@@ -116,3 +116,7 @@ currently tracked reference, and removes untracked directories once the
 15-minute reference lifetime has elapsed. This covers process termination and
 restart without racing a newly materialized or still-live reference. A failed
 materialization removes its staging directory immediately when possible.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

@@ -18,6 +18,38 @@ function persistedPatch(noteId: string, patch: NoteEditablePatch): NotePatchDto 
 }
 
 describe("NoteSaveController", () => {
+  it.each([
+    "success",
+    "error",
+  ] as const)("ignores discarded in-flight %s without retry or shutdown blockage", async (outcome) => {
+    let resolveOld!: (patch: NotePatchDto) => void;
+    let rejectOld!: (error: Error) => void;
+    const onPersisted = vi.fn();
+    const onError = vi.fn();
+    const persist = vi.fn((id: string, patch: NoteEditablePatch) =>
+      id === "deleted"
+        ? new Promise<NotePatchDto>((resolve, reject) => {
+            resolveOld = resolve;
+            rejectOld = reject;
+          })
+        : Promise.resolve(persistedPatch(id, patch)),
+    );
+    const controller = new NoteSaveController({ persist, onPersisted, onError });
+    controller.queue("deleted", { editedContent: "Old body" });
+    const oldSave = controller.flush("deleted").catch(() => undefined);
+    controller.discard("deleted");
+    controller.queue("kept", { editedContent: "Save this note" });
+    await controller.flushAll();
+    expect(controller.hasPending()).toBe(false);
+    if (outcome === "success") resolveOld(persistedPatch("deleted", { editedContent: "Old body" }));
+    else rejectOld(new Error("RowNotFound"));
+    await oldSave;
+    await controller.flushAll();
+    expect(onPersisted.mock.calls.map(([patch]) => patch.id)).toEqual(["kept"]);
+    expect(onError).not.toHaveBeenCalled();
+    expect(controller.hasPending()).toBe(false);
+    expect(persist.mock.calls.map(([id]) => id)).toEqual(["deleted", "kept"]);
+  });
   afterEach(() => {
     vi.useRealTimers();
   });

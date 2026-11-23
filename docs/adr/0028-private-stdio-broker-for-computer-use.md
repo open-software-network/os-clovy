@@ -315,3 +315,11 @@ its epoch and terminate it. Authorization, target validation, rollout, plan,
 model, billing, and approval behavior remain unchanged.
 
 2026-07-27 addendum: ADR-0040 supersedes this ADR's public `june_computer_use` MCP-server integration shape; the brokered-helper isolation pattern and Computer use product scope remain binding.
+
+## Addendum - local gates only (2026-10-18)
+
+[ADR-0067](0067-computer-use-depends-only-on-local-gates.md) removes the Pro or
+Max plan, the remote rollout decision and the vision-capable model from the
+readiness gates, and takes `computer_use` out of the native agent's catalog.
+The broker, pin, lease, per-app authorization and per-action approval above
+stay binding.

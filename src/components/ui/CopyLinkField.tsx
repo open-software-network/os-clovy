@@ -1,3 +1,4 @@
+import { useT } from "../../i18n";
 import { CopyStateIcon } from "./CopyStateIcon";
 import { HoverTip } from "./HoverTip";
 
@@ -16,6 +17,7 @@ export function CopyLinkField({
   onCopy: () => void;
   id?: string;
 }) {
+  const t = useT();
   return (
     <div className="copy-link-field">
       <input
@@ -29,7 +31,7 @@ export function CopyLinkField({
       <HoverTip
         compact
         width={104}
-        tip={copied ? "Copied" : "Copy link"}
+        tip={copied ? t("common.copied") : t("shell.copyLink.copy")}
         forceOpen={copied}
         suppressed={disabled}
         className="copy-link-action-tip"
@@ -37,7 +39,7 @@ export function CopyLinkField({
         <button
           type="button"
           className="copy-link-action"
-          aria-label={copied ? "Link copied" : "Copy link"}
+          aria-label={copied ? t("shell.copyLink.copied") : t("shell.copyLink.copy")}
           data-copied={copied ? "true" : undefined}
           disabled={disabled}
           onClick={onCopy}

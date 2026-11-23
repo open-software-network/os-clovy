@@ -12,11 +12,12 @@ import type {
 export type NotesState = {
   folders: FolderDto[];
   notes: NoteListItemDto[];
+  /** Confirmed deletions fence every asynchronous producer of note snapshots. */
+  deletedNoteIds?: ReadonlySet<string>;
   selectedNoteId?: string;
   selectedNote?: NoteDto;
   selectedFolderId?: string;
   recordingStatus?: RecordingStatusDto;
-  providerConfigured: boolean;
   activeRecoveries: RecoverableRecordingDto[];
 };
 
@@ -24,6 +25,8 @@ export type NotesAction =
   | { type: "bootstrapLoaded"; payload: BootstrapResponse }
   | { type: "noteLoaded"; note: NoteDto }
   | { type: "noteUpdated"; note: NoteDto }
+  | { type: "noteUpdatedPreservingFolders"; note: NoteDto }
+  | { type: "noteFoldersReconciled"; noteId: string; folderIds: string[] }
   | {
       type: "notePatched";
       noteId: string;
@@ -45,6 +48,14 @@ export type NotesAction =
   | { type: "folderSelected"; folderId?: string }
   | { type: "foldersLoaded"; folders: FolderDto[] }
   | { type: "notesLoaded"; notes: NoteListItemDto[] }
+  | {
+      type: "notesInvalidated";
+      notes: NoteListItemDto[];
+      deletedId?: string;
+      preserveIds?: string[];
+      preserveFolderIdsForNoteIds?: string[];
+    }
+  | { type: "noteDeleted"; noteId: string }
   | { type: "recoveriesUpdated"; recoveries: RecoverableRecordingDto[] }
   | { type: "recoveryRemoved"; sessionId: string };
 
@@ -52,22 +63,29 @@ export function createInitialState(): NotesState {
   return {
     folders: [],
     notes: [],
+    deletedNoteIds: new Set(),
     activeRecoveries: [],
-    providerConfigured: false,
   };
 }
 
 export function notesReducer(state: NotesState, action: NotesAction): NotesState {
+  if ("note" in action && state.deletedNoteIds?.has(action.note.id)) return state;
+  if (
+    "noteId" in action &&
+    action.type !== "noteDeleted" &&
+    state.deletedNoteIds?.has(action.noteId)
+  )
+    return state;
   switch (action.type) {
     case "bootstrapLoaded": {
-      const selectedNoteId = state.selectedNoteId ?? action.payload.notes[0]?.id;
+      const notes = action.payload.notes.filter((note) => !state.deletedNoteIds?.has(note.id));
+      const selectedNoteId = state.selectedNoteId ?? notes[0]?.id;
       return {
         ...state,
         folders: sortFolders(action.payload.folders),
-        notes: action.payload.notes,
+        notes,
         activeRecoveries: action.payload.activeRecoveries,
         selectedNoteId,
-        providerConfigured: action.payload.providerConfigured,
       };
     }
     case "noteLoaded":
@@ -81,6 +99,25 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
     // regress an in-flight pipeline or reopen a terminal one.
     case "noteUpdated":
       return applyNoteUpdate(state, mergeNoteUpdate(state, action.note));
+    case "noteUpdatedPreservingFolders": {
+      const current =
+        state.selectedNote?.id === action.note.id
+          ? state.selectedNote
+          : state.notes.find((note) => note.id === action.note.id);
+      const note = { ...action.note, folderIds: current?.folderIds ?? action.note.folderIds };
+      return applyNoteUpdate(state, mergeNoteUpdate(state, note));
+    }
+    case "noteFoldersReconciled":
+      return {
+        ...state,
+        notes: state.notes.map((note) =>
+          note.id === action.noteId ? { ...note, folderIds: action.folderIds } : note,
+        ),
+        selectedNote:
+          state.selectedNote?.id === action.noteId
+            ? { ...state.selectedNote, folderIds: action.folderIds }
+            : state.selectedNote,
+      };
     case "notePatched":
       return applyNotePatch(state, action.noteId, action.patch);
     case "noteProcessingStageChanged":
@@ -140,6 +177,12 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
               }
             : note,
         ),
+        selectedNote: state.selectedNote?.folderIds.includes(action.folderId)
+          ? {
+              ...state.selectedNote,
+              folderIds: state.selectedNote.folderIds.filter((id) => id !== action.folderId),
+            }
+          : state.selectedNote,
       };
     case "foldersLoaded":
       return {
@@ -153,12 +196,44 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
         selectedNoteId: undefined,
         selectedNote: undefined,
       };
-    case "notesLoaded":
+    case "notesLoaded": {
+      const notes = action.notes.filter((note) => !state.deletedNoteIds?.has(note.id));
       return {
         ...state,
-        notes: action.notes,
-        selectedNoteId: action.notes[0]?.id,
+        notes,
+        selectedNoteId: notes[0]?.id,
         selectedNote: undefined,
+      };
+    }
+    case "noteDeleted":
+      return {
+        ...state,
+        deletedNoteIds: new Set([...(state.deletedNoteIds ?? []), action.noteId]),
+        notes: state.notes.filter((note) => note.id !== action.noteId),
+        selectedNoteId: state.selectedNoteId === action.noteId ? undefined : state.selectedNoteId,
+        selectedNote: state.selectedNoteId === action.noteId ? undefined : state.selectedNote,
+      };
+    case "notesInvalidated":
+      return {
+        ...state,
+        notes: action.notes
+          .filter((note) => !state.deletedNoteIds?.has(note.id))
+          .map((note) => {
+            if (
+              !action.preserveIds?.includes(note.id) &&
+              !action.preserveFolderIdsForNoteIds?.includes(note.id)
+            )
+              return note;
+            const current = state.notes.find((item) => item.id === note.id);
+            if (action.preserveIds?.includes(note.id)) return current ?? note;
+            if (action.preserveFolderIdsForNoteIds?.includes(note.id) && current) {
+              return { ...note, folderIds: current.folderIds };
+            }
+            return note;
+          }),
+        selectedNoteId:
+          state.selectedNoteId === action.deletedId ? undefined : state.selectedNoteId,
+        selectedNote: state.selectedNoteId === action.deletedId ? undefined : state.selectedNote,
       };
     case "recoveriesUpdated":
       return {

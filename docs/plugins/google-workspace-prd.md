@@ -96,8 +96,7 @@ inside it.
 
 The shipped Google path implements the local-mode design proposed in ADR-0016.
 Refresh tokens live in the Keychain. Google API calls go from the device to
-Google through the Rust provider proxy. Clovy API is not in the connector data
-path. Model inference remains a separate path and the consent copy says so.
+Google through the Rust provider proxy, with no hosted intermediary. Model inference remains a separate path and the consent copy says so.
 
 Provider content is untrusted. Full email bodies and file contents are fetched
 only when needed. Mutating tools live in separate action servers. Approval and

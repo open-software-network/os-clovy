@@ -25,6 +25,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "../../native/video_client.rs"]
+pub mod video;
+
 pub const DEFAULT_SILENCE_THRESHOLD: f32 = 0.012;
 // Healthy devices open quickly; this bounds CPAL/CoreAudio hangs during device handoff.
 pub const CAPTURE_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,14 +40,38 @@ pub const MICROPHONE_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// publishes `ACTIVE_RECORDING`, so the watchdog can never declare a timeout
 /// for a capture that is (or is about to be) active — it either abandons a
 /// still-pending build or accepts a published one as success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureStartState {
-    Pending,
-    Published,
-    Abandoned,
-}
+pub use super::control_admission::CaptureStartState;
 
 pub type CaptureStartHandshake = Mutex<CaptureStartState>;
+
+/// Host-owned admission, checked after preparation and final publication locks.
+pub(crate) use super::control_admission::CaptureStartAuthorization;
+
+fn check_capture_authorization(
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<(), AppError> {
+    if let Some(authorization) = authorization {
+        authorization()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_capture_start(
+    state: &mut CaptureStartState,
+    already_active: bool,
+    authorization: Option<&CaptureStartAuthorization>,
+    start: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if *state == CaptureStartState::Abandoned {
+        return Err(capture_start_timeout_error());
+    }
+    if already_active {
+        return Err(recording_already_active_error());
+    }
+    check_capture_authorization(authorization)?;
+    start()?;
+    super::control_admission::publish_capture_start(state, already_active, authorization)
+}
 
 fn capture_start_abandoned(handshake: &CaptureStartHandshake) -> bool {
     handshake
@@ -61,6 +88,13 @@ const MICROPHONE_WRITER_WARNING_MESSAGE: &str =
 const MICROPHONE_BUFFER_OVERFLOW_WARNING_MESSAGE: &str =
     "Microphone recording could not keep up. Some audio may be missing.";
 
+/// Held while a recording taken out of `ACTIVE_RECORDING` is finalized, so a
+/// new capture cannot start until the previous one released its devices.
+/// Lock order: this first, then `ACTIVE_RECORDING`.
+static RECORDING_FINALIZATION: Mutex<()> = Mutex::new(());
+// A timed-out native start can still be inside CPAL. Keep its reservation until
+// that worker has cleaned up, without blocking the watchdog or active state.
+static CAPTURE_START_RESERVATION: Mutex<()> = Mutex::new(());
 static ACTIVE_RECORDING: LazyLock<Mutex<Option<ActiveRecording>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -124,6 +158,7 @@ struct ActiveRecording {
     source_mode: RecordingSourceMode,
     system_final_path: Option<PathBuf>,
     system_capture: Option<SystemAudioCapture>,
+    video_capture: Option<video::VideoCapture>,
     started: Instant,
     active_since: Option<Instant>,
     accumulated_active: Duration,
@@ -232,7 +267,7 @@ fn microphone_authorization_status() -> MicrophoneAuthorizationStatus {
 }
 
 /// TCC microphone grants are bundle-scoped: onboarding prompts through the
-/// dictation helper (`co.opensoftware.june.dictation-helper`), whose grant
+/// dictation helper (`dev.guilhermexp.clovy.dictation-helper`), whose grant
 /// never covers the main app bundle. The main app must trigger its own TCC
 /// prompt before capture, or a fresh install records only zeros.
 #[cfg(target_os = "macos")]
@@ -304,6 +339,7 @@ pub fn start_capture(
         note_id,
         source_mode,
         Arc::new(Mutex::new(CaptureStartState::Pending)),
+        None,
     )
 }
 
@@ -313,14 +349,23 @@ pub fn start_capture_with_cancel(
     note_id: String,
     source_mode: RecordingSourceMode,
     handshake: Arc<CaptureStartHandshake>,
+    authorization: Option<CaptureStartAuthorization>,
 ) -> Result<StartedRecording, AppError> {
+    let _reservation = super::control_admission::reserve_capture_start(&CAPTURE_START_RESERVATION)?;
+    // Holds an update install back until this recording is published in
+    // `ACTIVE_RECORDING` (or fails); refused while an update installs.
+    let _update_gate = crate::update_gate::UPDATE_GATE.begin_recording_start()?;
     {
+        // Waits for a recording that is still finalizing to release its
+        // devices; that recording is no longer in `ACTIVE_RECORDING`.
+        let _finalization = lock_finalization()?;
         let active = ACTIVE_RECORDING.lock().map_err(|_| {
             AppError::new("recording_lock_failed", "Recording state is unavailable.")
         })?;
         if active.is_some() {
             return Err(recording_already_active_error());
         }
+        check_capture_authorization(authorization.as_ref())?;
     }
 
     let host = cpal::default_host();
@@ -368,9 +413,8 @@ pub fn start_capture_with_cancel(
     // The user's Live transcription setting gates both preview lanes at the
     // source: when off, no preview audio leaves the device and nothing is
     // billed (JUN-375).
-    let live_preview_available = crate::clovy_api::configured()
-        && crate::os_accounts::cached_signed_in()
-        && crate::providers::live_transcription();
+    let live_preview_available = crate::providers::live_transcription()
+        && crate::providers::transcription::current_backend().is_ok();
     let live_preview = if live_preview_available {
         Some(start_live_transcript_preview(
             app.clone(),
@@ -485,12 +529,37 @@ pub fn start_capture_with_cancel(
     let system_capture = if let (Some(system_partial_path), Some(system_final_path)) =
         (system_partial_path.clone(), system_final_path.clone())
     {
+        if let Err(error) = check_capture_authorization(authorization.as_ref()) {
+            cleanup_abandoned_capture(
+                writer,
+                partial_path,
+                Some(system_partial_path),
+                live_preview,
+                None,
+                None,
+                None,
+            );
+            return Err(error);
+        }
         match SystemAudioCapture::start(
             system_partial_path.clone(),
             system_final_path.clone(),
             Duration::ZERO,
+            authorization.clone(),
         ) {
             Ok(capture) => {
+                if let Err(error) = check_capture_authorization(authorization.as_ref()) {
+                    cleanup_abandoned_capture(
+                        writer,
+                        partial_path,
+                        Some(system_partial_path),
+                        live_preview,
+                        None,
+                        Some(capture),
+                        None,
+                    );
+                    return Err(error);
+                }
                 if live_preview_available {
                     system_live_preview = Some(start_system_live_transcript_preview(
                         app.clone(),
@@ -524,22 +593,7 @@ pub fn start_capture_with_cancel(
         );
         return Err(capture_start_timeout_error());
     }
-    stream
-        .play()
-        .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
-    if capture_start_abandoned(&handshake) {
-        cleanup_abandoned_capture(
-            writer,
-            partial_path,
-            system_partial_path,
-            live_preview,
-            system_live_preview,
-            system_capture,
-            Some(stream),
-        );
-        return Err(capture_start_timeout_error());
-    }
-    let started = Instant::now();
+    let mut started = Instant::now();
     let status = RecordingStatusDto {
         session_id: session_id.clone(),
         note_id: Some(note_id.clone()),
@@ -569,15 +623,58 @@ pub fn start_capture_with_cancel(
         ),
         warnings: Vec::new(),
     };
-    let mut active = ACTIVE_RECORDING
-        .lock()
-        .map_err(|_| AppError::new("recording_lock_failed", "Recording state is unavailable."))?;
+    // The watchdog must be able to abandon while the native driver is stuck.
+    // Check authority immediately before the native effect, then recheck under
+    // the publication locks after it returns.
+    let started_result = super::control_admission::start_native_capture(
+        &ACTIVE_RECORDING,
+        &handshake,
+        authorization.as_ref(),
+        || {
+            stream
+                .play()
+                .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
+            started = Instant::now();
+            Ok(())
+        },
+    );
+    if let Err(error) = started_result {
+        cleanup_abandoned_capture(
+            writer,
+            partial_path,
+            system_partial_path,
+            live_preview,
+            system_live_preview,
+            system_capture,
+            Some(stream),
+        );
+        return Err(error);
+    }
+    let mut active = match ACTIVE_RECORDING.lock() {
+        Ok(active) => active,
+        Err(_) => {
+            cleanup_abandoned_capture(
+                writer,
+                partial_path,
+                system_partial_path,
+                live_preview,
+                system_live_preview,
+                system_capture,
+                Some(stream),
+            );
+            return Err(AppError::new(
+                "recording_lock_failed",
+                "Recording state is unavailable.",
+            ));
+        }
+    };
     // Commit-or-abandon happens atomically with the publish below (lock
     // order: ACTIVE_RECORDING, then the handshake; the watchdog only ever
     // takes the handshake). Past this block the watchdog treats the build as
     // successfully published and returns it as success.
     {
         let Ok(mut state) = handshake.lock() else {
+            drop(active);
             cleanup_abandoned_capture(
                 writer,
                 partial_path,
@@ -592,8 +689,13 @@ pub fn start_capture_with_cancel(
                 "Recording state is unavailable.",
             ));
         };
-        if *state == CaptureStartState::Abandoned {
+        if let Err(error) =
+            admit_capture_start(&mut state, active.is_some(), authorization.as_ref(), || {
+                Ok(())
+            })
+        {
             drop(state);
+            drop(active);
             cleanup_abandoned_capture(
                 writer,
                 partial_path,
@@ -603,22 +705,8 @@ pub fn start_capture_with_cancel(
                 system_capture,
                 Some(stream),
             );
-            return Err(capture_start_timeout_error());
+            return Err(error);
         }
-        if active.is_some() {
-            drop(state);
-            cleanup_abandoned_capture(
-                writer,
-                partial_path,
-                system_partial_path,
-                live_preview,
-                system_live_preview,
-                system_capture,
-                Some(stream),
-            );
-            return Err(recording_already_active_error());
-        }
-        *state = CaptureStartState::Published;
     }
 
     *active = Some(ActiveRecording {
@@ -629,6 +717,7 @@ pub fn start_capture_with_cancel(
         source_mode,
         system_final_path: system_final_path.clone(),
         system_capture,
+        video_capture: None,
         started,
         active_since: Some(started),
         accumulated_active: Duration::ZERO,
@@ -714,34 +803,90 @@ pub fn set_mic_ducked(ducked: bool) {
     }
 }
 
-pub fn pause_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
+/// Attach only after audio and its durable rows are ready. The worker never delays microphone startup.
+pub fn attach_video(
+    session_id: &str,
+    repos: crate::db::repositories::Repositories,
+    partial: PathBuf,
+    final_path: PathBuf,
+    window_id: u32,
+    runtime: tokio::runtime::Handle,
+) -> Result<(), AppError> {
     let mut active = lock_active()?;
     let recording = active_for_session(active.as_mut(), session_id)?;
-    if !recording.paused {
-        if let Some(active_since) = recording.active_since.take() {
-            recording.accumulated_active += active_since.elapsed();
-        }
-        recording.paused = true;
-        recording.paused_flag.store(true, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.pause();
-        }
+    let capture = video::VideoCapture::start(
+        repos,
+        session_id.to_string(),
+        partial,
+        final_path,
+        window_id,
+        recording.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        runtime,
+    );
+    if recording.paused {
+        capture.pause();
     }
-    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    recording.video_capture = Some(capture);
+    Ok(())
 }
 
-pub fn resume_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
-    let mut active = lock_active()?;
-    let recording = active_for_session(active.as_mut(), session_id)?;
-    if recording.paused {
-        recording.active_since = Some(Instant::now());
-        recording.paused = false;
-        recording.paused_flag.store(false, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.resume();
+// ACTIVE_RECORDING serializes transitions, so the fixed control records retain call order.
+fn publish_video_before_audio(
+    video: Option<&video::VideoCapture>,
+    paused: bool,
+    transition: impl FnOnce(),
+) {
+    if let Some(video) = video {
+        if paused {
+            video.pause();
+        } else {
+            video.resume();
         }
     }
-    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    transition();
+}
+
+pub(crate) fn pause_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<CaptureRecoverySnapshot, AppError> {
+    super::control_admission::with_control_admission(&ACTIVE_RECORDING, authorization, |active| {
+        let recording = active_for_session(active.as_mut(), session_id)?;
+        if !recording.paused {
+            crate::meeting_assist::invalidate_preview(false);
+            if let Some(active_since) = recording.active_since.take() {
+                recording.accumulated_active += active_since.elapsed();
+            }
+            recording.paused = true;
+            publish_video_before_audio(recording.video_capture.as_ref(), true, || {
+                recording.paused_flag.store(true, Ordering::Release);
+                if let Some(system) = recording.system_capture.as_mut() {
+                    system.pause();
+                }
+            });
+        }
+        Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    })
+}
+
+pub(crate) fn resume_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<CaptureRecoverySnapshot, AppError> {
+    super::control_admission::with_control_admission(&ACTIVE_RECORDING, authorization, |active| {
+        let recording = active_for_session(active.as_mut(), session_id)?;
+        if recording.paused {
+            recording.active_since = Some(Instant::now());
+            recording.paused = false;
+            publish_video_before_audio(recording.video_capture.as_ref(), false, || {
+                recording.paused_flag.store(false, Ordering::Release);
+                if let Some(system) = recording.system_capture.as_mut() {
+                    system.resume();
+                }
+            });
+        }
+        Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    })
 }
 
 pub fn capture_status(session_id: &str) -> Result<RecordingStatusDto, AppError> {
@@ -765,10 +910,28 @@ pub fn is_capture_active() -> bool {
         .unwrap_or(false)
 }
 
+/// A finished recording is still writing its files (or a start is waiting on
+/// that lock). An update install must not end the app in between.
+pub fn is_capture_finalizing() -> bool {
+    matches!(
+        RECORDING_FINALIZATION.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    )
+}
+
+/// Takes the active recording and finalizes it. Blocks for as long as the
+/// writer and system capture take to stop, so async callers run it on a
+/// blocking thread; status readers are not held up because the recording
+/// leaves `ACTIVE_RECORDING` before finalization starts.
 pub fn finish_active_capture() -> Result<Option<FinishedRecording>, AppError> {
-    let mut active = lock_active()?;
-    let Some(recording) = active.take() else {
-        return Ok(None);
+    let _finalization = lock_finalization()?;
+    let recording = {
+        let mut active = lock_active()?;
+        let Some(recording) = active.take() else {
+            return Ok(None);
+        };
+        crate::meeting_assist::invalidate_preview(true);
+        recording
     };
     finalize_recording(recording).map(Some)
 }
@@ -782,25 +945,38 @@ pub fn current_status() -> Option<RecordingStatusDto> {
     active.as_ref().map(|recording| recording.status())
 }
 
-pub fn finish_capture(session_id: &str) -> Result<FinishedRecording, AppError> {
-    let mut active = lock_active()?;
-    let Some(recording) = active.take() else {
-        return Err(AppError::new(
-            "recording_not_found",
-            "Recording session was not found.",
-        ));
-    };
-    if recording.session_id != session_id {
-        let status = recording.status();
-        *active = Some(recording);
-        return Err(AppError::new(
-            "recording_not_found",
-            format!(
-                "Active recording is {}, not {}",
-                status.session_id, session_id
-            ),
-        ));
-    }
+/// Takes and finalizes the recording for `session_id`; see
+/// [`finish_active_capture`] for why it blocks and what it does not block.
+pub(crate) fn finish_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<FinishedRecording, AppError> {
+    let _finalization = lock_finalization()?;
+    let recording = super::control_admission::with_control_admission(
+        &ACTIVE_RECORDING,
+        authorization,
+        |active| {
+            let Some(recording) = active.take() else {
+                return Err(AppError::new(
+                    "recording_not_found",
+                    "Recording session was not found.",
+                ));
+            };
+            if recording.session_id != session_id {
+                let status = recording.status();
+                *active = Some(recording);
+                return Err(AppError::new(
+                    "recording_not_found",
+                    format!(
+                        "Active recording is {}, not {}",
+                        status.session_id, session_id
+                    ),
+                ));
+            }
+            crate::meeting_assist::invalidate_preview(true);
+            Ok(recording)
+        },
+    )?;
     finalize_recording(recording)
 }
 
@@ -826,6 +1002,7 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         final_path,
         source_mode,
         system_capture,
+        video_capture,
         system_final_path,
         stream_error,
         last_callback_at,
@@ -838,6 +1015,9 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         ..
     } = recording;
     paused_flag.store(true, Ordering::Release);
+    if let Some(video) = video_capture {
+        video.stop();
+    }
     drop(_stream);
     let dropped_samples = writer.stats().dropped_samples;
     let microphone_finalized = (|| -> Result<_, AppError> {
@@ -933,6 +1113,12 @@ fn write_input_data<I>(
     // stack work and atomics; all allocation, preview fan-out, and WAV I/O live
     // on the writer task.
     input.write(data, paused, mic_ducked);
+}
+
+fn lock_finalization() -> Result<std::sync::MutexGuard<'static, ()>, AppError> {
+    RECORDING_FINALIZATION
+        .lock()
+        .map_err(|_| AppError::new("recording_lock_failed", "Recording state is unavailable."))
 }
 
 fn lock_active() -> Result<std::sync::MutexGuard<'static, Option<ActiveRecording>>, AppError> {
@@ -1345,6 +1531,53 @@ mod tests {
         assert!(hint.is_some());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn video_control_is_visible_before_audio_pause_without_worker_progress() {
+        use std::{io::Read, os::unix::fs::OpenOptionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join("window.partial.mp4");
+        let video = video::VideoCapture::test_control_pipe(&partial);
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(partial.with_extension("control.pipe"))
+            .unwrap();
+        let audio_paused = AtomicBool::new(false);
+        publish_video_before_audio(Some(&video), true, || {
+            assert!(!audio_paused.load(Ordering::Acquire));
+            let mut event = [0_u8; 24];
+            reader.read_exact(&mut event).unwrap();
+            assert_eq!(u64::from_le_bytes(event[16..24].try_into().unwrap()), 1);
+            audio_paused.store(true, Ordering::Release);
+        });
+        assert!(audio_paused.load(Ordering::Acquire));
+        publish_video_before_audio(Some(&video), false, || {
+            let mut event = [0_u8; 24];
+            reader.read_exact(&mut event).unwrap();
+            assert_eq!(u64::from_le_bytes(event[16..24].try_into().unwrap()), 0);
+            assert!(audio_paused.load(Ordering::Acquire));
+            audio_paused.store(false, Ordering::Release);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_control_failure_never_prevents_audio_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let video =
+            video::VideoCapture::test_control_pipe(&dir.path().join("absent/session.partial.mp4"));
+        let audio_paused = AtomicBool::new(false);
+        publish_video_before_audio(Some(&video), true, || {
+            audio_paused.store(true, Ordering::Release)
+        });
+        assert!(audio_paused.load(Ordering::Acquire));
+        publish_video_before_audio(Some(&video), false, || {
+            audio_paused.store(false, Ordering::Release)
+        });
+        assert!(!audio_paused.load(Ordering::Acquire));
+    }
+
     fn test_writer(dir: &tempfile::TempDir) -> (CaptureInput, MicrophoneWriter) {
         let writer = WavWriter::create(
             dir.path().join("mic.wav"),
@@ -1651,5 +1884,71 @@ mod avfoundation_link_tests {
     #[test]
     fn avcapturedevice_class_resolves() {
         assert!(super::macos_microphone_authorization_status().is_some());
+    }
+}
+
+#[cfg(test)]
+mod host_admission_tests {
+    use super::*;
+    use crate::domain::turn_authority::TurnAuthority;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn revoked_start_waiting_for_final_lock_never_starts_or_publishes() {
+        let authority = TurnAuthority::new();
+        let authority_for_gate = authority.clone();
+        let gate: CaptureStartAuthorization = Arc::new(move || authority_for_gate.check_live());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let final_lock = Arc::new(Mutex::new(()));
+        let held = final_lock.lock().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let final_lock = final_lock.clone();
+            let effects = effects.clone();
+            std::thread::spawn(move || {
+                entered_tx.send(()).unwrap();
+                let _final_lock = final_lock.lock().unwrap();
+                let mut state = CaptureStartState::Pending;
+                let result = admit_capture_start(&mut state, false, Some(&gate), || {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
+                (state, result)
+            })
+        };
+        entered_rx.recv().unwrap();
+        authority.revoke();
+        drop(held);
+        let (state, result) = worker.join().unwrap();
+        assert_eq!(result.unwrap_err().code, "turn_expired");
+        assert_eq!(state, CaptureStartState::Pending);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn live_start_publishes_once_and_later_revocation_does_not_undo_the_effect() {
+        let authority = TurnAuthority::new();
+        let copy = authority.clone();
+        let gate: CaptureStartAuthorization = Arc::new(move || copy.check_live());
+        let effects = AtomicUsize::new(0);
+        let mut state = CaptureStartState::Pending;
+        admit_capture_start(&mut state, false, Some(&gate), || {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        authority.revoke();
+        assert_eq!(state, CaptureStartState::Published);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn watchdog_abandonment_cannot_cross_the_same_effect_gate() {
+        let mut state = CaptureStartState::Abandoned;
+        let mut effects = 0;
+        let result = admit_capture_start(&mut state, false, None, || {
+            effects += 1;
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().code, "capture_start_timeout");
+        assert_eq!(effects, 0);
     }
 }

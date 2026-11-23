@@ -1,20 +1,38 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const buildScript = readFileSync("scripts/build-agent-runtime.mjs", "utf8");
-const entitlements = readFileSync("src-tauri/AgentRuntimeEntitlements.plist", "utf8");
+const read = (path: string) => readFileSync(path, "utf8");
 
-describe("agent runtime macOS signing", () => {
-  it("grants only the executable-memory exceptions required by Node V8", () => {
-    expect(entitlements).toContain("com.apple.security.cs.allow-jit");
-    expect(entitlements).toContain("com.apple.security.cs.allow-unsigned-executable-memory");
-    expect(entitlements).not.toContain("com.apple.security.cs.disable-executable-page-protection");
-    expect(entitlements).not.toContain("com.apple.security.cs.disable-library-validation");
+describe("CLI-only desktop packaging", () => {
+  it("does not build or bundle a native agent sidecar on either platform", () => {
+    for (const path of [
+      "package.json",
+      "pnpm-workspace.yaml",
+      "src-tauri/build.rs",
+      "src-tauri/tauri.conf.json",
+      "src-tauri/tauri.macos.conf.json",
+      "src-tauri/tauri.windows.conf.json",
+      "scripts/tauri-before-dev.mjs",
+      "scripts/build-macos-release.sh",
+      "scripts/build-windows.ps1",
+      "scripts/qualify-windows-build.ps1",
+    ]) {
+      expect(read(path), path).not.toMatch(/agent-runtime|AGENT_RUNTIME|AgentRuntimeEntitlements/);
+    }
+    for (const path of [
+      "agent-runtime/package.json",
+      "scripts/build-agent-runtime.mjs",
+      "scripts/benchmark-agent-runtime.mjs",
+      "src-tauri/AgentRuntimeEntitlements.plist",
+    ]) {
+      expect(existsSync(path), path).toBe(false);
+    }
   });
 
-  it("applies and verifies the runtime entitlements during hardened signing", () => {
-    expect(buildScript).toContain('"--options",\n    "runtime",');
-    expect(buildScript).toContain('"--entitlements",\n    macRuntimeEntitlements,');
-    expect(buildScript).toContain("verifyMacRuntimeEntitlements(executable)");
+  it("rejects stale sidecars in the final Windows installer", () => {
+    const verifier = read("scripts/verify-windows-artifacts.ps1");
+    expect(verifier).toContain("clovy-agent-runtime");
+    expect(verifier).toContain("Retired agent runtime payload found");
+    expect(verifier).not.toContain('Require-One "clovy-agent-runtime.exe"');
   });
 });

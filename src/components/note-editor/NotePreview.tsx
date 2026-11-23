@@ -5,6 +5,7 @@ import { IconBold } from "central-icons/IconBold";
 import { IconBulletList } from "central-icons/IconBulletList";
 import { IconH1 } from "central-icons/IconH1";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { t as translate, useLocale, useT } from "../../i18n";
 
 type NotePreviewProps = {
   noteId: string;
@@ -34,6 +35,13 @@ export function NotePreview({
   onBlur,
   emptyPlaceholder,
 }: NotePreviewProps) {
+  const t = useT();
+  const locale = useLocale();
+  // The editor is built once per note, so its placeholder and aria-label read
+  // through a ref / the bare translator at render time rather than capturing
+  // the strings of the render that created it.
+  const emptyPlaceholderRef = useRef(emptyPlaceholder);
+  emptyPlaceholderRef.current = emptyPlaceholder;
   const wrapRef = useRef<HTMLDivElement>(null);
   const [toolbar, setToolbar] = useState<{ x: number; y: number } | null>(null);
   const initialHtml = useMemo(() => markdownToHtml(markdown), [noteId]);
@@ -65,19 +73,18 @@ export function NotePreview({
           },
         }),
         Placeholder.configure({
-          placeholder:
-            emptyPlaceholder ??
-            "Hit record to capture a conversation, or just start typing your thoughts here",
+          placeholder: () =>
+            emptyPlaceholderRef.current ?? translate("notes.editor.emptyPlaceholder"),
         }),
       ],
       content: initialHtml,
       editorProps: {
-        attributes: {
+        attributes: () => ({
           class: "note-preview",
           role: "textbox",
-          "aria-label": "Generated note",
+          "aria-label": translate("notes.preview.label"),
           "aria-multiline": "true",
-        },
+        }),
       },
       onUpdate: ({ editor, transaction }) => {
         if (!transaction.docChanged) return;
@@ -86,7 +93,7 @@ export function NotePreview({
         serializationState.editorDirty = true;
         onChange(noteId, editorMarkdown);
       },
-      onBlur: () => {
+      onBlur: ({ editor }) => {
         // ProseMirror flushes an active IME composition through onUpdate
         // before invoking onBlur, so this cache includes its final text.
         // `noteId` here is the value at editor-creation time — the
@@ -95,16 +102,23 @@ export function NotePreview({
         // to, even when blur fires during teardown.
         const pendingExternalMarkdown = serializationState.focusedExternalMarkdown;
         serializationState.focusedExternalMarkdown = null;
-        if (serializationState.editorDirty || pendingExternalMarkdown) {
-          if (pendingExternalMarkdown) {
+        if (pendingExternalMarkdown) {
+          if (serializationState.editorDirty) {
             const mergedMarkdown = mergeFocusedExternalMarkdown(
               serializationState.lastSerializedMarkdown,
               pendingExternalMarkdown,
             );
             onChange(noteId, mergedMarkdown);
+          } else {
+            // An external replacement is already persisted. A clean editor
+            // must adopt it without writing its old focused snapshot back.
+            editor.commands.setContent(markdownToHtml(pendingExternalMarkdown.externalMarkdown), {
+              emitUpdate: false,
+            });
+            serializationState.lastSerializedMarkdown = pendingExternalMarkdown.externalMarkdown;
           }
-          serializationState.editorDirty = false;
         }
+        serializationState.editorDirty = false;
         // onUpdate already queued the exact latest user edit. Blur only
         // reconciles a focused external append, then flushes that queue.
         onBlur?.(noteId);
@@ -136,6 +150,21 @@ export function NotePreview({
     };
   }, [editor]);
 
+  // Re-render the editor's own DOM (aria-label, placeholder) when the
+  // interface language changes: an empty transaction recomputes both without
+  // touching the document.
+  const renderedLocaleRef = useRef(locale);
+  useEffect(() => {
+    if (renderedLocaleRef.current === locale) return;
+    renderedLocaleRef.current = locale;
+    if (!editor || editor.isDestroyed) return;
+    try {
+      editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
+    } catch {
+      // Mid-teardown; the next editor is built with the current language.
+    }
+  }, [editor, locale]);
+
   // Backend writes (transcribe → generate) arrive after the editor has
   // already mounted, so we have to pull new markdown in by hand. Skip
   // if the user is actively editing — clobbering focused content would
@@ -147,6 +176,9 @@ export function NotePreview({
     try {
       const current = serializationState.lastSerializedMarkdown.trim();
       if (current === markdown.trim()) return;
+      // Keep the focused document and selection stable, including when an
+      // external append arrives just before the first keystroke. Clean blur
+      // adopts the persisted text; dirty blur reconciles the local edit.
       if (editor.isFocused) {
         serializationState.focusedExternalMarkdown = {
           editorMarkdown: serializationState.lastSerializedMarkdown,
@@ -185,7 +217,7 @@ export function NotePreview({
         <div
           className="selection-toolbar"
           role="toolbar"
-          aria-label="Format selection"
+          aria-label={t("notes.preview.formatSelection")}
           style={{ left: toolbar.x, top: toolbar.y }}
           onMouseDown={(event) => event.preventDefault()}
         >
@@ -194,8 +226,8 @@ export function NotePreview({
             data-active={editor?.isActive("heading", { level: 1 }) || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("h1")}
-            title="Heading"
-            aria-label="Heading"
+            title={t("notes.preview.heading")}
+            aria-label={t("notes.preview.heading")}
           >
             <IconH1 size={16} />
           </button>
@@ -204,8 +236,8 @@ export function NotePreview({
             data-active={editor?.isActive("bulletList") || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("bullet")}
-            title="Bullet list"
-            aria-label="Bullet list"
+            title={t("notes.preview.bulletList")}
+            aria-label={t("notes.preview.bulletList")}
           >
             <IconBulletList size={16} />
           </button>
@@ -215,8 +247,8 @@ export function NotePreview({
             data-active={editor?.isActive("bold") || undefined}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => applyFormat("bold")}
-            title="Bold"
-            aria-label="Bold"
+            title={t("notes.preview.bold")}
+            aria-label={t("notes.preview.bold")}
           >
             <IconBold size={16} />
           </button>
@@ -243,7 +275,9 @@ function mergeFocusedExternalMarkdown(
       ? appendMarkdown(editorMarkdown, external)
       : pending.externalMarkdown;
   }
-  if (!external.startsWith(base)) return editorMarkdown;
+  // A replacement cannot be reduced to an appended suffix. Retain the local
+  // edit and the external text rather than silently losing the user's work.
+  if (!external.startsWith(base)) return appendMarkdown(editorMarkdown, external);
 
   const appended = external.slice(base.length).trim();
   if (!appended || editorMarkdown.trimEnd().endsWith(appended)) {

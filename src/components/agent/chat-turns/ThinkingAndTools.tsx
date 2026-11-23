@@ -2,6 +2,7 @@ import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconConsoleSimple } from "central-icons/IconConsoleSimple";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
+import { useT } from "../../../i18n";
 import type { AgentChatPart } from "../../../lib/agent-chat-runtime";
 import { DotSpinner } from "../../DotSpinner";
 
@@ -16,6 +17,7 @@ export function AgentThinkingGroup({
   reasoning: Extract<AgentChatPart, { type: "reasoning" }>[];
   running: boolean;
 }) {
+  const t = useT();
   const reduceMotion = useReducedMotion();
   // Collapsed by default to a short label — "Thinking" while it works, "Thought"
   // once done (terracotta while live). Expanding reveals only the reasoning
@@ -31,7 +33,7 @@ export function AgentThinkingGroup({
       open={open}
       onToggle={(event) => onOpenChange(event.currentTarget.open)}
     >
-      <summary aria-label={running ? "Thinking" : "Thought"}>
+      <summary aria-label={running ? t("chat.thinking.running") : t("chat.thinking.done")}>
         <span className="agent-reasoning-label-swap" aria-hidden="true">
           <AnimatePresence initial={false}>
             <motion.span
@@ -46,7 +48,7 @@ export function AgentThinkingGroup({
                 ease: [0.22, 1, 0.36, 1],
               }}
             >
-              {running ? "Thinking" : "Thought"}
+              {running ? t("chat.thinking.running") : t("chat.thinking.done")}
             </motion.span>
           </AnimatePresence>
         </span>
@@ -75,6 +77,7 @@ function AgentToolDisclosure({
   text?: string | null;
   redacted?: boolean;
 }) {
+  const t = useT();
   const body = text && text.trim() ? text : null;
   const summary = (expandable: boolean) => (
     <>
@@ -92,7 +95,7 @@ function AgentToolDisclosure({
       </span>
       <span className="agent-tool-name">{name}</span>
       {statusNode}
-      {redacted ? <span className="agent-redacted">Redacted</span> : null}
+      {redacted ? <span className="agent-redacted">{t("chat.tools.redacted")}</span> : null}
     </>
   );
   if (!body) {
@@ -111,6 +114,7 @@ function AgentToolDisclosure({
 }
 
 function AgentToolPartRow({ part }: { part: Extract<AgentChatPart, { type: "tool" }> }) {
+  const t = useT();
   return (
     <AgentToolDisclosure
       name={part.name}
@@ -118,12 +122,21 @@ function AgentToolPartRow({ part }: { part: Extract<AgentChatPart, { type: "tool
       text={part.text}
       statusNode={
         part.status === "running" ? (
-          <span className="agent-tool-spinner" role="status" aria-label="Running" title="Running">
+          <span
+            className="agent-tool-spinner"
+            role="status"
+            aria-label={t("chat.tools.running")}
+            title={t("chat.tools.running")}
+          >
             <DotSpinner />
           </span>
         ) : part.status === "failed" ? (
           <span className="agent-tool-live-status" data-status="failed">
-            Failed
+            {t("chat.tools.failed")}
+          </span>
+        ) : part.status === "interrupted" ? (
+          <span className="agent-tool-live-status" data-status="interrupted">
+            {t("chat.tools.interrupted")}
           </span>
         ) : null
       }
@@ -132,12 +145,13 @@ function AgentToolPartRow({ part }: { part: Extract<AgentChatPart, { type: "tool
 }
 
 // Long tool runs stop growing the transcript a row per call: past this many
-// rows, settled (complete/failed) calls fold behind a single count line while
+// rows, settled calls fold behind a single count line while
 // running calls stay visible below it, so what Clovy is doing right now is
 // never hidden and failures are still called out on the fold itself.
 const AGENT_TOOL_STACK_FOLD_THRESHOLD = 3;
 
 export function AgentToolStack({ parts }: { parts: Extract<AgentChatPart, { type: "tool" }>[] }) {
+  const t = useT();
   const settled = parts.filter((part) => part.status !== "running");
   const folded = parts.length > AGENT_TOOL_STACK_FOLD_THRESHOLD && settled.length >= 2;
   if (!folded) {
@@ -151,13 +165,14 @@ export function AgentToolStack({ parts }: { parts: Extract<AgentChatPart, { type
   }
   const running = parts.filter((part) => part.status === "running");
   const failedCount = settled.filter((part) => part.status === "failed").length;
+  const interruptedCount = settled.filter((part) => part.status === "interrupted").length;
   return (
     <div className="agent-tool-stack">
       {/* Uncontrolled like the per-row disclosures: the browser owns the open
        * state, so rows settling into the fold don't snap it shut. */}
       <details
         className="agent-tool-disclosure agent-tool-fold"
-        data-status={failedCount > 0 ? "failed" : "complete"}
+        data-status={failedCount > 0 ? "failed" : interruptedCount > 0 ? "interrupted" : "complete"}
       >
         <summary>
           <span className="agent-tool-icon">
@@ -165,10 +180,17 @@ export function AgentToolStack({ parts }: { parts: Extract<AgentChatPart, { type
             <span className="agent-tool-icon-expand">+</span>
             <span className="agent-tool-icon-minimize">−</span>
           </span>
-          <span className="agent-tool-name">{settled.length} actions</span>
+          <span className="agent-tool-name">
+            {t("chat.tools.actions", { count: settled.length })}
+          </span>
           {failedCount > 0 ? (
             <span className="agent-tool-live-status" data-status="failed">
-              {failedCount} failed
+              {t("chat.tools.failedCount", { count: failedCount })}
+            </span>
+          ) : null}
+          {interruptedCount > 0 ? (
+            <span className="agent-tool-live-status" data-status="interrupted">
+              {t("chat.tools.interruptedCount", { count: interruptedCount })}
             </span>
           ) : null}
         </summary>

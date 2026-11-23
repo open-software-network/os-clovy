@@ -65,9 +65,16 @@ describe("humanizeSchedule", () => {
     expect(humanizeSchedule("cron: 0 8 * * *")).toBe(`Every day at ${time(8, 0)}`);
   });
 
+  it("phrases the stored interval grammar", () => {
+    expect(humanizeSchedule("every 30m")).toBe("Every 30 minutes");
+    expect(humanizeSchedule("every 1m")).toBe("Every minute");
+    expect(humanizeSchedule("every 1h")).toBe("Every hour");
+    expect(humanizeSchedule("every 2h")).toBe("Every 2 hours");
+    expect(humanizeSchedule("every 90 minutes")).toBe("Every 90 minutes");
+  });
+
   it("passes non-cron schedules through unchanged", () => {
     expect(humanizeSchedule("every day at 9:00")).toBe("every day at 9:00");
-    expect(humanizeSchedule("every 30m")).toBe("every 30m");
     expect(humanizeSchedule("2026-06-12T09:00:00")).toBe("2026-06-12T09:00:00");
     expect(humanizeSchedule("")).toBe("");
   });

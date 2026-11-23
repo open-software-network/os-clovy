@@ -67,7 +67,7 @@ Recipe — a dev-only HTML entry (e.g. `app-preview.html`) NOT listed in `vite.c
 
 Scope note: this pipeline produces lightweight, PR-embeddable GIFs of a
 browser session. For QA-grade evidence — full walkthrough charter, compressed
-MP4, os-platform upload, PASS/FAIL report — use the `agent-e2e-qa` skill,
+MP4, PASS/FAIL report — use the `agent-e2e-qa` skill,
 which owns that process and its scripts.
 
 **Recording needs more than screenshots do, so if the user asks for a recording, first prompt to install every tool it needs** — check each, and install only with the user's go-ahead (one of these failing midway wastes the slow recording pass):
@@ -103,7 +103,7 @@ See `walkthrough-recorder.template.mjs` in this skill dir for a full recorder (r
 Use the **Read** tool on a PNG — it renders the image so you can confirm the surface looks right (not just "a file exists"). For a GIF, Read shows only the **first frame**, so verify a recording by extracting mid-points with `ffmpeg -ss <t> -i out.gif -frames:v 1 frame.png` and reading those. This is how you catch blank/broken renders, error toasts, and blank poster frames.
 
 ## Worked example
-`open-software-network/os-clovy` (Clovy, a Tauri 2 + React app): instantiate the
+`os-clovy` (Clovy, a Tauri 2 + React app): instantiate the
 two templates in this skill dir as a dev-only `*-preview.html` that fakes the
 bridge and routes the single `hermes_admin_request` command to the repo's
 `FakeHermesServer` (`src/test/fixtures/`), plus a Playwright driver that visits

@@ -449,7 +449,7 @@ Node 26 frontend tests use
 
 ## Deployment and rollout
 
-This is a desktop-only change and requires no Clovy API deployment.
+This is a desktop-only change and requires no backend deployment.
 
 Rollout should begin with the development app, then an internal build. The
 release check must confirm:
@@ -471,7 +471,7 @@ Do not silently retain both credential systems.
 - Selected-team enforcement.
 - Linear webhooks, polling routines, or away-mode relay.
 - Provider-side administration or permission management.
-- Clovy API changes.
+- Adding a hosted backend.
 - Starting another development app process.
 - Any operation against the installed production app.
 

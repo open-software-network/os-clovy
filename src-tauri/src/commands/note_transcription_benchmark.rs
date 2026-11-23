@@ -116,10 +116,15 @@ impl RequestEvents {
         }
     }
 
-    fn record(&self, path: &str) {
+    fn record(&self, path: &str, body: &[u8]) {
         let slot = match path {
-            "/v1/notes/transcribe" => Some(&self.first_note_transcription_ms),
-            "/v1/notes/generate" => Some(&self.first_generation_ms),
+            "/openai/v1/audio/transcriptions" => Some(&self.first_note_transcription_ms),
+            "/api/v1/chat/completions"
+                if serde_json::from_slice::<serde_json::Value>(body)
+                    .is_ok_and(|body| body.get("temperature").is_none()) =>
+            {
+                Some(&self.first_generation_ms)
+            }
             _ => None,
         };
         if let Some(slot) = slot {
@@ -270,33 +275,27 @@ async fn read_http_request(stream: &mut TcpStream, events: &RequestEvents) -> (S
                 .then(|| value.trim().parse::<usize>().expect("content length"))
         })
         .unwrap_or(0);
-    events.record(&path);
     while bytes.len() - header_end < content_length {
         let mut chunk = [0_u8; 32_768];
         let read = stream.read(&mut chunk).await.expect("read request body");
         assert!(read > 0, "connection closed before request body");
         bytes.extend_from_slice(&chunk[..read]);
     }
-    (
-        path,
-        bytes[header_end..header_end + content_length].to_vec(),
-    )
+    let body = bytes[header_end..header_end + content_length].to_vec();
+    events.record(&path, &body);
+    (path, body)
 }
 
 async fn handle_fake_request(mut stream: TcpStream, events: RequestEvents) {
     let (path, _body) = read_http_request(&mut stream, &events).await;
     let (delay, body) = match path.as_str() {
-        "/v1/notes/transcribe" => (
+        "/openai/v1/audio/transcriptions" => (
             Duration::from_millis(100),
-            r#"{"success":true,"data":{"text":"benchmark transcript","language":"en","provider":"benchmark"}}"#,
+            r#"{"text":"benchmark transcript","language":"en","segments":[{"start":0.0,"end":1.0,"text":"benchmark transcript"}]}"#,
         ),
-        "/v1/dictate/cleanup" => (
+        "/api/v1/chat/completions" => (
             Duration::from_millis(25),
-            r#"{"success":true,"data":{"text":"benchmark transcript"}}"#,
-        ),
-        "/v1/notes/generate" => (
-            Duration::ZERO,
-            r#"{"success":true,"data":{"content":"Benchmark note","titleSuggestion":null,"provider":"benchmark","promptVersion":"notes-mvp-v5"}}"#,
+            r#"{"choices":[{"message":{"role":"assistant","content":"Benchmark note"}}]}"#,
         ),
         _ => panic!("unexpected benchmark route: {path}"),
     };
@@ -313,7 +312,26 @@ async fn handle_fake_request(mut stream: TcpStream, events: RequestEvents) {
     stream.shutdown().await.expect("close response");
 }
 
-pub(super) async fn spawn_fake_clovy_api(
+pub(super) fn configure_fake_note_provider_keys() {
+    use crate::providers::BuiltinProvider;
+    let store = crate::llm::secrets::store();
+    store
+        .set(BuiltinProvider::Groq.secret_account(), "fixture-groq-key")
+        .unwrap();
+    store
+        .set(
+            BuiltinProvider::OpenRouter.secret_account(),
+            "fixture-openrouter-key",
+        )
+        .unwrap();
+    let mut settings = crate::providers::default_settings_for_tests();
+    settings.provider_api_keys_configured.groq = true;
+    settings.provider_api_keys_configured.openrouter = true;
+    settings.llm_usage.notes = crate::llm::registry::ProviderRef::OpenRouter;
+    crate::providers::replace_current_settings_for_tests(settings);
+}
+
+pub(super) async fn spawn_fake_note_providers(
     events: RequestEvents,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -519,8 +537,12 @@ async fn run_benchmark_iteration(
 
     let clock = BenchmarkClock::default();
     let request_events = RequestEvents::new(clock.clone());
-    let (address, api_handle) = spawn_fake_clovy_api(request_events.clone()).await;
-    std::env::set_var("CLOVY_API_URL", format!("http://{address}"));
+    let (address, api_handle) = spawn_fake_note_providers(request_events.clone()).await;
+    std::env::set_var(
+        "CLOVY_TEST_NOTE_PROVIDER_ORIGIN",
+        format!("http://{address}"),
+    );
+    configure_fake_note_provider_keys();
     let dequeued_ms = Arc::new(Mutex::new(None));
     register_benchmark_observer(
         &recording_session_id,
@@ -744,14 +766,7 @@ async fn benchmark_post_finalization_note_transcription_latency() {
     // This release-only harness uses a dynamic loopback API address. Its Make target is the
     // supported entry point and isolates the exact ignored test with one test-harness thread,
     // so these process-global values cannot race unrelated tests.
-    let previous = [
-        "CLOVY_API_URL",
-        "OS_CLOVY_LOCAL_DEV",
-        "OS_CLOVY_LOCAL_DEV_BEARER_TOKEN",
-    ]
-    .map(|name| (name, std::env::var_os(name)));
-    std::env::set_var("OS_CLOVY_LOCAL_DEV", "1");
-    std::env::set_var("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "benchmark-token");
+    let previous = ["CLOVY_TEST_NOTE_PROVIDER_ORIGIN"].map(|name| (name, std::env::var_os(name)));
 
     for (case, case_fixtures) in fixtures {
         let mut measured = Vec::new();

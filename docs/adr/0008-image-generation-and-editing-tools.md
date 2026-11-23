@@ -302,3 +302,52 @@ that cannot provide a gateway-local path. Preview thumbnail generation stays a
 separate bounded operation and is not reused as model input. A rejected native
 path does not silently downgrade to the byte fallback because doing so would
 bypass Rust's path-validation boundary.
+
+## Addendum - 2026-10-08 (fal replaces Venice for images)
+
+Venice is retired (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`). Image generation and editing
+run on fal endpoints through the same Clovy API routes and tools. The curated
+generation list is `fal-ai/flux/dev` (default), `fal-ai/flux/schnell`, and
+`fal-ai/qwen-image`; the edit default is `fal-ai/flux-2/edit`. The three-place
+sync rule stays: `src/lib/image-models.ts` (`IMAGE_MODELS`),
+`src-tauri/src/providers/mod.rs` (`KNOWN_IMAGE_MODELS`, which now also moves a
+persisted pick outside the set back to the default on load), and the clovy-api
+`image_pricing` / `image_edit_pricing` allowlists. Safe mode now maps to fal's
+`enable_safety_checker`: on asks fal to filter adult content (a flagged result
+is a rejection, never a black image passed off as success); off is a request
+fal honors only for accounts it authorizes, so turning safe mode off does not
+guarantee unfiltered output. Edit sources travel as data URIs, with no public
+upload. A user's own fal key travels as `x-fal-api-key` on the image routes
+only. The privacy labels the Venice list carried (`private`, `anonymized`) are
+dropped: fal is a third-party processor and Clovy makes no retention claim for
+it.
+
+## Addendum - 2026-10-08 (desktop image replay narrowed)
+
+Supersedes, for the desktop command, the last sentence of point 2 of the
+2026-07-03 addendum. The request ledger only protects a replay of a request
+that already settled inside the same Clovy API process. A transport failure, a
+502, a 504, or any other unclear answer can follow a fal submit that already
+happened, and resending it could start and charge a second job even with the
+same `requestId`. The desktop therefore resends the identical payload only for
+the two answers Clovy API gives before fal sees the request, each matched as
+its full canonical envelope: HTTP 429 with `error_code` 4401 and
+`authorization_denied`, and HTTP 503 with `error_code` 5031 and
+`metering_provider_failed` (numbers pinned by the client-contract
+`error-codes.json`). A divergent or malformed tuple, such as a 503
+`server_busy` or a refusal reason without its code, is not resent. There are at
+most three sends; every other answer reaches the user as it is. The only other
+resend is the existing token refresh after a 401, which Clovy API answers before
+any provider call. Video creation follows the same rule: the desktop never
+resends it before a job id comes back, and status polls of a returned job id are
+safe to repeat.
+
+
+## Addendum - 2026-10-28: direct providers only
+
+The server transport, funding and model-classifier portions are superseded for this fork by
+[ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
+on CLI engines and Clovy tools remain local through MCP. The server is removed,
+not replaced or deployed with a breaking contract. Earlier decisions above
+remain as historical records; current behavior follows ADR-0073 and ADR-0072.

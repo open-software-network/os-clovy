@@ -81,15 +81,6 @@ describe("setBuildVersionContents", () => {
     expect(Object.values(next).every((contents) => contents.includes("0.0.25"))).toBe(true);
   });
 
-  it("stamps historical release sources whose Cargo.lock has only the legacy package", () => {
-    const legacyFiles = {
-      ...files,
-      cargoLock: files.cargoLock.replace('name = "clovy"', 'name = "os-june"'),
-    };
-    const next = setBuildVersionContents(legacyFiles, "0.0.25");
-    expect(next.cargoLock).toContain('name = "os-june"\nversion = "0.0.25"');
-  });
-
   it("does not enforce monotonic increase (rc sorts below its base)", () => {
     // 0.0.24-rc.1 < 0.0.24, which bump-version.mjs would reject; here it's fine.
     const next = setBuildVersionContents(files, "0.0.24-rc.1");
@@ -172,37 +163,6 @@ describe("set-build-version CLI", () => {
         { cwd: root, encoding: "utf8" },
       );
       expect(JSON.parse(metadata).packages[0].version).toBe(version);
-      expect(readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8")).toBe(lockAfterStamp);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("stamps a historical os-june package and preserves locked Cargo metadata", () => {
-    const version = "0.0.25";
-    const { root } = writeFixture("0.0.24", "os-june");
-    try {
-      execFileSync(process.execPath, [scriptPath, version], { cwd: root });
-      const lockAfterStamp = readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8");
-      const metadata = JSON.parse(
-        execFileSync(
-          "cargo",
-          [
-            "metadata",
-            "--manifest-path",
-            "src-tauri/Cargo.toml",
-            "--locked",
-            "--no-deps",
-            "--format-version",
-            "1",
-          ],
-          { cwd: root, encoding: "utf8" },
-        ),
-      );
-
-      expect(metadata.packages).toHaveLength(1);
-      expect(metadata.packages[0]).toMatchObject({ name: "os-june", version });
-      expect(lockAfterStamp).toContain(`name = "os-june"\nversion = "${version}"`);
       expect(readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8")).toBe(lockAfterStamp);
     } finally {
       rmSync(root, { recursive: true, force: true });

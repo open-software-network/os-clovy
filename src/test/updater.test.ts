@@ -1,13 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DownloadEvent } from "../lib/updater";
-import {
-  checkClovyUpdate,
-  getReleaseChannel,
-  reconcileToStable,
-  relaunchClovy,
-  setReleaseChannel,
-} from "../lib/updater";
+import { checkClovyUpdate, relaunchClovy, updatesEnabled } from "../lib/updater";
 
 // A minimal stand-in for @tauri-apps/api/core's Channel: the install command
 // drives progress by calling the channel's onmessage, exactly as Rust's
@@ -31,29 +25,35 @@ beforeEach(() => {
   invokeMock.mockReset();
 });
 
+describe("updatesEnabled", () => {
+  it("asks the native shell whether this build checks for updates", async () => {
+    invokeMock.mockResolvedValueOnce(false);
+
+    expect(await updatesEnabled()).toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith("updates_enabled");
+  });
+});
+
 describe("checkClovyUpdate", () => {
   it("returns null when fetch_update reports nothing", async () => {
     invokeMock.mockResolvedValueOnce(null);
 
     expect(await checkClovyUpdate()).toBeNull();
-    // No channel argument (fetch_update reads the persisted channel in Rust);
-    // reconcile=false keeps a routine check forward-only.
-    expect(invokeMock).toHaveBeenCalledWith("fetch_update", {
-      reconcile: false,
-    });
+    // One channel: the endpoint lives in tauri.conf.json, so no arguments.
+    expect(invokeMock).toHaveBeenCalledWith("fetch_update");
   });
 
   it("returns a synthetic update carrying version and notes", async () => {
-    invokeMock.mockResolvedValueOnce({ version: "1.2.3-rc.4", body: "notes" });
+    invokeMock.mockResolvedValueOnce({ version: "0.1.1", body: "notes" });
 
     const update = await checkClovyUpdate();
 
-    expect(update?.version).toBe("1.2.3-rc.4");
+    expect(update?.version).toBe("0.1.1");
     expect(update?.body).toBe("notes");
   });
 
   it("installs through install_update, forwarding progress events", async () => {
-    invokeMock.mockResolvedValueOnce({ version: "1.2.3" });
+    invokeMock.mockResolvedValueOnce({ version: "0.1.1" });
     const update = await checkClovyUpdate();
 
     const seen: DownloadEvent[] = [];
@@ -76,53 +76,15 @@ describe("checkClovyUpdate", () => {
   });
 });
 
-describe("reconcileToStable", () => {
-  it("checks with reconcile=true so an older stable can install", async () => {
-    invokeMock.mockResolvedValueOnce({ version: "1.2.2" });
-
-    const update = await reconcileToStable();
-
-    expect(update?.version).toBe("1.2.2");
-    expect(invokeMock).toHaveBeenCalledWith("fetch_update", {
-      reconcile: true,
-    });
-  });
-
-  it("returns null when stable has nothing to reconcile onto", async () => {
-    invokeMock.mockResolvedValueOnce(null);
-
-    expect(await reconcileToStable()).toBeNull();
-  });
-});
-
-describe("release channel setting", () => {
-  it("reads the channel through get_release_channel", async () => {
-    invokeMock.mockResolvedValueOnce("rc");
-
-    expect(await getReleaseChannel()).toBe("rc");
-    expect(invokeMock).toHaveBeenCalledWith("get_release_channel");
-  });
-
-  it("persists the channel through set_release_channel", async () => {
-    invokeMock.mockResolvedValueOnce(undefined);
-
-    await setReleaseChannel("rc");
-
-    expect(invokeMock).toHaveBeenCalledWith("set_release_channel", {
-      channel: "rc",
-    });
-  });
-});
-
 describe("relaunchClovy", () => {
   it("routes through the Rust command that tears down children first", async () => {
     invokeMock.mockResolvedValueOnce(undefined);
 
     await relaunchClovy();
 
-    // Not the plugin `relaunch()`: the command runs the dictation-helper and
-    // agent runtime teardown before restarting so the relaunched instance is not
-    // blocked by an orphaned helper (JUN-338).
+    // Not a bare process relaunch: the command runs the dictation-helper and
+    // agent runtime teardown before restarting so the relaunched instance is
+    // not blocked by an orphaned helper.
     expect(invokeMock).toHaveBeenCalledWith("relaunch_for_update");
   });
 });

@@ -109,7 +109,7 @@ describe("pending action card styles", () => {
   it("frames the split button as an outlined container with gray-filled segments", () => {
     // The container is just a hairline outline (transparent bg) binding the two
     // segments; the gray fill lives on the buttons themselves. Approve reads as
-    // primary by being filled, against the ghost Deny/Explain — no dark or
+    // primary by being filled, against the ghost Deny — no dark or
     // colored weight. The risk lives in the request, not the button.
     const split = cssRuleFor(".agent-approval-split");
     expect(split).toContain("background: transparent;");
@@ -169,11 +169,8 @@ describe("pending action card styles", () => {
     expect(cssRuleFor(".agent-clarify-form div")).toContain("margin-top: var(--sp-1);");
   });
 
-  it("keeps Explain and Deny as plain neutral ghost buttons (only Approve is colored)", () => {
-    // Explain is no longer brand-themed — no svg brand rule, no open-state brand.
-    expect(() => cssRuleFor(".agent-approval-explain svg")).toThrow();
-    expect(() => cssRuleFor('.agent-approval-explain[aria-expanded="true"]')).toThrow();
-    // Both footer ghost buttons share a soft neutral gray hover (no exclusion
+  it("keeps Deny as a plain neutral ghost button (only Approve is colored)", () => {
+    // Footer ghost buttons share a soft neutral gray hover (no exclusion
     // for Deny, which is no longer red).
     const ghostHover = cssRuleFor(".agent-approval-actions .btn-ghost:hover:not(:disabled)");
     expect(ghostHover).toContain("background: var(--surface-subtle);");
@@ -220,25 +217,6 @@ describe("pending action card styles", () => {
     expect(cleared).toContain("padding-bottom: var(--sp-2);");
     // The base turn body carries no such padding (text turns stay tight).
     expect(cssRuleFor(".agent-turn-actions-inner")).toContain("padding-top: var(--sp-px);");
-  });
-});
-
-describe("inline notice centering", () => {
-  it("centers the tier-card credits notice via an override that outranks the base rule", () => {
-    // The base rule aligns notice copy with action-label baselines while
-    // wrapped copy grows downward from the first line.
-    expect(cssRuleFor(".inline-notice")).toContain("align-items: first baseline;");
-    // The credits override centers its taller tier card — and because the base
-    // rule sits LATER in this flat stylesheet, the override must carry higher
-    // specificity (a two-class compound, 0,2,0) to beat the single-class base
-    // (0,1,0).
-    expect(cssRuleFor(".inline-notice.agent-credits-notice")).toContain("align-items: center;");
-    const baseIndex = appCss.indexOf(".inline-notice {");
-    const overrideIndex = appCss.indexOf(".inline-notice.agent-credits-notice {");
-    expect(overrideIndex).toBeGreaterThan(-1);
-    // Guard the diagnosis: the base really is later in the file, so equal
-    // specificity would lose — the compound override is what makes it hold.
-    expect(baseIndex).toBeGreaterThan(overrideIndex);
   });
 });
 

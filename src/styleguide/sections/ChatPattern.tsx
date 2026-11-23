@@ -19,11 +19,8 @@ export function ChatPattern() {
           here.
         </p>
         <p className="sg-note">
-          Instead, view the full gallery inside the running app: open the browser console and run{" "}
-          <code>__agentGallery(true)</code> (and <code>__agentErrors(true)</code> for the error
-          surfaces). It renders every part type and status through the real `AgentChatTurnRow`,
-          exactly what ships. The fixtures live in `src/lib/agent-chat-gallery.ts`. Close with{" "}
-          <code>__agentGallery(false)</code>.
+          To inspect turns, open an agent session in the running app: they render through the real
+          `AgentChatTurnRow`, exactly what ships.
         </p>
       </div>
     </div>

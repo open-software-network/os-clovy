@@ -1,7 +1,22 @@
 # Implementation plan: Private connectors & away-mode relay
 
+> **Historical document (2026-10-28).** Server, Auto/funding, hosted relay and
+> native-agent claims below describe an earlier design, not the current app.
+> The inference server is removed; chat/routines use installed CLI engines,
+> Groq/OpenRouter/fal operations use the user's keys directly, and sharing has
+> no replacement. Current boundaries are in
+> [ADR-0073](adr/0073-desktop-calls-user-providers-without-a-clovy-server.md),
+> [llm-providers.md](llm-providers.md), and [configuration.md](configuration.md).
+
+
 **Owner:** CTO · **Date:** 2026-07-09 · **Status:** Draft for review · **PRD:** [private-connectors-prd.md](private-connectors-prd.md)
 **Repos:** `os-clovy` (app + Clovy API), `os-accounts` (metering/action slugs), `os-marketing-page` (verify page, comparison copy)
+
+> **Hosting note (2026-10-21).** Away mode assumed the TEE-attested Clovy API
+> on Phala, reproducible builds and `/verify`. The `desvincular-repo-ci` change
+> removed that hosted infrastructure: Clovy API now runs only locally. Local
+> mode is unaffected; away mode has no hosting target until a new one is
+> decided.
 
 > **Stale integration point.** This plan predates the runtime migration:
 > "Hermes" and "the Hermes bridge" refer to the removed embedded Hermes

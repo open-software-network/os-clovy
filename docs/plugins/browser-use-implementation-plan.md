@@ -1,148 +1,68 @@
 # Implementation plan: Browser use plugin
 
-> **Stale integration point.** This plan predates the runtime migration:
-> "Hermes" (and any Hermes bridge commands such as
-> `import_hermes_bridge_file`) refer to the removed embedded Hermes runtime.
-> Agent-facing MCP registration is now Clovy-owned per
-> [ADR-0038](../adr/0038-june-owned-openai-agents-runtime.md) and
-> [ADR-0039](../adr/0039-june-owned-routines-and-mcp.md); read "Hermes" below
-> as "the Clovy agent runtime" and route MCP registration through the ADR-0039
-> mechanism. The MCP-server integration shape itself is superseded: Clovy-owned
-> capabilities are built as in-loop host tools per
-> [ADR-0040](../adr/0040-plugin-capabilities-as-host-tools.md).
-
-- **Mode:** CTO
-- **Date:** 2026-07-13
-- **Status:** Accepted workstream; implementation active
-- **PRD:** [browser-use-prd.md](browser-use-prd.md)
-- **Decision:** [ADR-0017](../adr/0017-browser-use-via-clovy-extension.md)
-
-## Technical objective
-
-Expose one app-owned `june_browser` MCP contract through a Rust policy broker
-with two transports: the user's explicitly bounded browser for attended tasks,
-and a fresh public-web-only profile for sandboxed routines.
-
-This plan is a portfolio summary. The detailed tool, transport, policy,
-distribution, and test decisions remain canonical in
-[browser-computer-use-prd.md](../browser-computer-use-prd.md) and the JUN-286
-through JUN-299 implementation Issues.
+Updated 2026-11-01. The approved OpenSpec change
+`melhorias-agente-audio-automacao`, design D6 and `browser-control` delta own the
+cutover scope. The [detailed PRD](../browser-computer-use-prd.md) owns the
+13-tool contract and trust boundary. Historical ADR-0017 is retained as history;
+its extension/native-messaging transport is replaced by the integrated engine.
 
 ## Architecture
 
 ```text
-Hermes -> june_browser MCP -> authenticated loopback -> Rust browser broker
-                                                    |-> native shim -> MV3 extension -> task tabs
-                                                    `-> headless system Chromium -> ephemeral profile
+Bound CLI turn / authorized routine
+  -> Clovy MCP browser group (13 tools)
+  -> native browser broker + central approvals
+  -> authenticated private typed host
+  -> pinned agent-browser engine + Chrome for Testing
+       | attended: exclusive separate persistent profile
+       | routine: anonymous ephemeral profile + public-network policy
 ```
 
-The broker owns the stored grant, session leases, URL policy, task-tab scope,
-reference expiry, consequential-action classification, approval journal,
-artifact references, and teardown. The extension and headless driver execute
-commands but do not decide policy.
+The host creates session ownership, namespace, profile and lifecycle state.
+Models cannot choose or override them. Every call rechecks ownership and grants,
+and approvals revalidate after waiting. Tab ids are integers identifying exact
+owned targets. Snapshot references include document/epoch identity; guarded
+input checks the exact origin/document/node/element, without name recovery.
+`fill` uses `text`; `press` requires its target `ref`; `back` requires `tab_id`.
+See the detailed PRD for the complete required-argument table.
 
-The broker is not merely where policy is written; it is the only place it can
-be *enforced*. The agent runtime can read its own loopback token out of its
-config and call the broker's routes directly, so gating at the runtime's tool
-layer gates nothing. See the 2026-07-13 addendum to
-[ADR-0017](../adr/0017-browser-use-via-clovy-extension.md). Concretely: the
-Browser access grant, re-checked in the broker on every request, is the sole
-authorization gate, and every consequential-action approval (JUN-297) is
-enforced broker-side.
+## Delivery slices
 
-## MCP contract
+1. Build the pinned downstream engine with authenticated private typed host,
+   exact-reference guards and disabled public/streaming/plugin paths.
+2. Wire the production transport at startup, artifact/outcome roots, access
+   flag and cancellation/shutdown supervision from session reservation.
+3. Lease the attended profile exclusively until both processes exit; retain
+   logins on Stop. Isolate routine profiles, grants and DNS/IP-pinned network.
+4. Connect host UI grant/session commands, mode display, human takeover and
+   explicit resume. Suspend captures and actions during human login.
+5. Remove extension package, pairing/share-tab APIs and old transport. Package
+   pinned engine/browser resources with hashes and provenance.
+6. Verify the real adapter/engine with synthetic pages and frontend controls;
+   record native macOS/Windows and genuine external-login acceptance separately.
 
-- Session: `start_session`, `close_session`.
-- Navigation: `navigate`, `back`.
-- Perception: `snapshot`, `screenshot`.
-- Interaction: `click`, `fill`, `press`.
-- Tabs: `list_tabs`, `open_tab`, `switch_tab`, `close_tab`,
-  `accept_shared_tab`.
+## Failure and privacy
 
-Interactive references expire after navigation or relevant page mutation. A
-fresh snapshot follows every action. Large screenshots and snapshots return
-workspace file references rather than native-messaging payloads.
+Background is default. Visible mode can be selected before an effect or after
+an explicit unsupported/not-attempted result, never as replay after delivered
+or uncertain input. Cancellation invalidates authority and reaps engine/browser
+processes; no startup orphan or premature profile-lease release is acceptable.
+Anonymous startup recovery and Stop/reaper now share the physical collector:
+existing exclusive lease, durable `Starting` cancellation, original-tree and
+boot checks for `Owned`, and a locked root terminal record before controls are
+retired. Unix uses a physical holder; Windows pins the original UUID directory
+in place because open descendants prevent its rename. The version-2 terminal
+location explicitly distinguishes these placements. The same collector retires
+controls and empty directories under the locked terminal; only then may Windows
+release the pin and acquire DELETE by the same physical handle. Cancelled
+publication closes/replaces/revalidates its receipt under the original lease.
+Recovery does not kill or replay. Unknown/legacy/corrupt objects and
+unexpected terminal payload are preserved. The browser ADR's 2026-11-02
+addendum documents the holder/terminal format and platform limits.
+Closed tabs and stale references fail explicitly. Saved logins never revive
+old handles. No generic upstream MCP, arbitrary eval, personal-browser attach,
+profile/cookie import or sensitive-field automation is exposed.
 
-## Attended transport
-
-- TypeScript MV3 extension with a pinned id and protocol version.
-- Per-tab debugger control only for Clovy-created task tabs and explicitly
-  shared tabs.
-- Signed native-messaging shim inside the app bundle; authenticated local
-  socket to the broker.
-- Browser-owned debugging banner plus Clovy tab grouping as visible indicators.
-- Extension detaches and clears state on broker/native-host loss.
-- Transport loss (extension reload or store update, browser exit, shim or
-  broker death) ends every attended session; a reconnect is a fresh pairing,
-  and session-restored tabs are orphaned, never re-adopted.
-- Parked approvals are bound to their tab; tab loss discards the action and
-  resolves the approval as not executed.
-
-## Routine transport
-
-- Detect Chrome, Edge, Brave, then Chromium.
-- Launch headless with a fresh temp profile per run.
-- Resolve, validate, and pin public destinations; reject private, loopback,
-  link-local, non-HTTP, and rebinding targets, including after redirects.
-- Hard-block consequential actions because no user is present to approve.
-- Require an explicit per-routine opt-in.
-
-## Action safety
-
-- Park consequential actions before execution with a stable action id.
-- Allow "approve all on this site for this task" only for an exact normalized
-  origin and only in broker memory.
-- Never automate password, one-time code, or payment fields.
-- Retried turns resume a parked action and do not replay completed work.
-- Revoke in order: refuse commands, detach tabs, invalidate credentials and
-  approvals, stop sessions, delete ephemeral profiles.
-
-## Delivery map
-
-| Slice | Issue | Exit |
-| --- | --- | --- |
-| Grant and MCP skeleton | JUN-286 | Disabled/enabled contract and broker lease |
-| Extension pairing | JUN-287 | Versioned native-messaging round trip |
-| Managed read browser | JUN-289 | Navigate, snapshot, screenshot under URL policy |
-| In-chat request | JUN-290 | Grant request card and safe turn retry |
-| Attended read browser | JUN-291 | Task tabs only |
-| Distribution | JUN-292 | Store listing and reproducible zip |
-| Managed interactions | JUN-294 | Reference actions and redirect policy |
-| Shared tab | JUN-295 | Explicit handoff and revoke |
-| Attended approvals | JUN-297 | Parked consequential actions |
-| Routine opt-in | JUN-298 | Anonymous per-routine lease |
-| Plugin tile | JUN-299 | Guided connect and disconnect |
-
-## Verification
-
-- Rust policy tests for grants, exact-origin allows, action classes,
-  idempotency, URL resolution, redirects, and revoke ordering.
-- Cross-language protocol fixtures for framing, version mismatch, reconnect,
-  and file-reference payloads.
-- Extension integration tests against hostile fixture pages and navigation
-  races. Best-effort in v1 and deliberately not a release gate (the canonical
-  PRD's testing decisions); the committed gates are the Rust policy tests, the
-  protocol fixtures, and the MCP schema fixtures.
-- MCP schema fixtures plus pinned-runtime live smoke.
-- Live macOS walkthrough: install, pair, create task tab, share one tab, approve
-  an action, deny an action, human takeover, stop, disconnect, crash the broker
-  while attached, close a task tab mid-action, detach the debugger from the
-  banner, rename or ungroup the Clovy tab group, restart the browser mid-task,
-  and update the extension mid-task.
-- Security test that unrelated tabs, local network targets, and sensitive
-  fields stay unreachable.
-
-## Rollout
-
-Dogfood with unpacked builds, then rc through the Chrome Web Store, then stable
-after store/update compatibility and two weeks of action approval telemetry.
-Keep one remote kill switch for the attended transport and one for the managed
-transport. Do not log URLs, page text, screenshots, or field values.
-
-## Open gate
-
-Public release depends on publisher verification and store approval. A
-debugger-permission rejection holds the attended launch; the answer is a
-revised submission, not a reduced-permission build (the canonical PRD's
-distribution section). The implementation direction itself requires no new
-ADR unless the work departs from ADR-0017.
+Only synthetic, run-owned data is used for automated proof. Native packaging,
+permissions and actual provider login require native acceptance. Browser-shim
+screenshots establish frontend rendering only.

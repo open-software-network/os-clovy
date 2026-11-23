@@ -12,7 +12,7 @@ import urllib.request
 REGISTRY_URL = "https://registry.npmjs.org/pnpm"
 USER_AGENT = (
     "clovy-pnpm-release-age-check "
-    "(https://github.com/open-software-network/os-clovy)"
+    "(https://github.com/guilhermexp/os-clovy)"
 )
 
 

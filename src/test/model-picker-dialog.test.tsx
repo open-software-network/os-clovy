@@ -1,31 +1,19 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { VIDEO_MODELS } from "../lib/video-models";
-import {
-  ModelPickerDialog,
-  modelOptions,
-  selectedModel,
-} from "../components/settings/ModelPickerDialog";
+import { ModelPickerDialog, modelOptions } from "../components/settings/ModelPickerDialog";
 
 describe("ModelPickerDialog", () => {
-  it("presents the automatic router as Auto while preserving its model id", () => {
-    const catalogModel = {
+  it("does not offer the retired automatic router", () => {
+    const automatic = {
       provider: "open-software",
       id: "open-software/auto",
-      name: "OpenSoftware Auto",
+      name: "Auto",
       modelType: "text",
       traits: [],
       capabilities: [],
     };
-
-    expect(modelOptions([catalogModel], catalogModel.id)[0]).toMatchObject({
-      id: "open-software/auto",
-      name: "Auto",
-    });
-    expect(selectedModel([], catalogModel.id)).toMatchObject({
-      id: "open-software/auto",
-      name: "Auto",
-    });
+    expect(modelOptions([automatic], automatic.id)).toEqual([]);
   });
 
   it("shows curated video descriptions", () => {

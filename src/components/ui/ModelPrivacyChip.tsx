@@ -2,7 +2,7 @@ import { IconAnonymous } from "central-icons/IconAnonymous";
 import { IconGhost2 } from "central-icons/IconGhost2";
 import { IconLock } from "central-icons/IconLock";
 import { modelPrivacyBadge, type ModelPrivacyBadge } from "../../lib/model-privacy";
-import type { VeniceModelDto } from "../../lib/tauri";
+import type { ProviderModelDto } from "../../lib/tauri";
 import { HoverTip } from "./HoverTip";
 
 /** The privacy mode's mascot: the lock for E2EE, the ghost for private, the
@@ -92,7 +92,7 @@ export function ModelPrivacyChip({
  * row details live in the hover card. Anonymous/E2EE models keep their privacy
  * detail in the hover card instead of adding a trailing row icon.
  */
-export function ModelRowPrivacyBadge({ model }: { model: VeniceModelDto }) {
+export function ModelRowPrivacyBadge({ model }: { model: ProviderModelDto }) {
   const badge = modelPrivacyBadge(model);
   if (badge?.mode !== "private") return null;
   return (

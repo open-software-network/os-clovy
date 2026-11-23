@@ -11,6 +11,8 @@
 import { IconBolt } from "central-icons/IconBolt";
 import { IconChecklist } from "central-icons/IconChecklist";
 import { IconEyeOpen } from "central-icons/IconEyeOpen";
+import { getInterfaceLocale } from "../i18n/locale";
+import { formatList, type MessageKey, t } from "../i18n/translate";
 import { errorCode } from "./errors";
 import type {
   ConnectorAccountStatus,
@@ -49,69 +51,44 @@ export type ConnectorBundleMeta = {
   feature: string;
 };
 
+/** Copy fields that read the interface language on every access, so the
+ * frozen maps below keep their shape while following a language switch. */
+function localizedFields<K extends string>(keys: Record<K, MessageKey>): Record<K, string> {
+  const fields = {} as Record<K, string>;
+  for (const [field, key] of Object.entries(keys) as [K, MessageKey][]) {
+    Object.defineProperty(fields, field, { enumerable: true, get: () => t(key) });
+  }
+  return fields;
+}
+
+function bundleCopy(name: string): ConnectorBundleMeta {
+  return localizedFields({
+    label: `lib.connectors.${name}.label` as MessageKey,
+    description: `lib.connectors.${name}.description` as MessageKey,
+    feature: `lib.connectors.${name}.feature` as MessageKey,
+  });
+}
+
 /** Renderer-only copy. Bundle ownership and scopes come from Rust. */
 export const BUNDLE_META: Readonly<Partial<Record<ConnectorScopeBundle, ConnectorBundleMeta>>> =
   Object.freeze({
-    gmail_read: {
-      label: "Read mail",
-      description: "Search and read your email for briefings and triage.",
-      feature: "read your mail",
-    },
-    gmail_draft: {
-      label: "Draft replies",
-      description: "Write draft replies for you to review. Never sends.",
-      feature: "draft replies",
-    },
-    gmail_modify: {
-      label: "Organize mail",
-      description: "Label and archive your mail. Never deletes.",
-      feature: "label and archive mail",
-    },
-    gmail_send: {
-      label: "Send mail",
-      description: "Send email on your behalf. Only used when you allow it per routine.",
-      feature: "send mail",
-    },
-    calendar_read: {
-      label: "Read calendar",
-      description: "Read your events and find free slots for briefings and prep.",
-      feature: "read your calendar",
-    },
-    calendar_events: {
-      label: "Manage calendar",
-      description: "Create events and respond to invites on your behalf.",
-      feature: "manage your calendar",
-    },
-    linear_read: {
-      label: "Read workspace",
-      description: "Read teams, projects, cycles, and issues for planning and status briefs.",
-      feature: "read your Linear workspace",
-    },
-    linear_write: {
-      label: "Create and update issues",
-      description:
-        "Draft issues, comments, and project updates. Nothing is written without your approval.",
-      feature: "create and update issues",
-    },
-    github_read: {
-      label: "Read repositories, issues, and pull requests",
-      description:
-        "Read code, issues, pull requests, and comments in the repositories chosen during GitHub App installation.",
-      feature: "read your GitHub repositories",
-    },
-    github_write: {
-      label: "Create and update issues and comments",
-      description:
-        "Clovy allows drafting issues and comments on your behalf. Every write asks for your approval before it runs.",
-      feature: "create and update issues",
-    },
+    gmail_read: bundleCopy("gmailRead"),
+    gmail_draft: bundleCopy("gmailDraft"),
+    gmail_modify: bundleCopy("gmailModify"),
+    gmail_send: bundleCopy("gmailSend"),
+    calendar_read: bundleCopy("calendarRead"),
+    calendar_events: bundleCopy("calendarEvents"),
+    linear_read: bundleCopy("linearRead"),
+    linear_write: bundleCopy("linearWrite"),
+    github_read: bundleCopy("githubRead"),
+    github_write: bundleCopy("githubWrite"),
   });
 
 export function bundleMeta(bundle: ConnectorScopeBundle): ConnectorBundleMeta {
   return (
     BUNDLE_META[bundle] ?? {
       label: bundle.replace(/_/g, " "),
-      description: "Connector capability.",
+      description: t("lib.connectors.bundleFallbackDescription"),
       feature: bundle.replace(/_/g, " "),
     }
   );
@@ -208,38 +185,35 @@ export type ConnectorStatusMeta = {
 };
 
 const STATUS_LABELS: Readonly<
-  Record<ConnectorAccountStatus, { label: string; tone: "ok" | "attention" }>
+  Record<ConnectorAccountStatus, { labelKey: MessageKey; tone: "ok" | "attention" }>
 > = Object.freeze({
-  connected: { label: "Connected", tone: "ok" },
-  reconnect_required: { label: "Reconnect needed", tone: "attention" },
-  unavailable: { label: "Status unavailable", tone: "attention" },
+  connected: { labelKey: "lib.connectors.status.connected", tone: "ok" },
+  reconnect_required: { labelKey: "lib.connectors.status.reconnectRequired", tone: "attention" },
+  unavailable: { labelKey: "lib.connectors.status.unavailable", tone: "attention" },
 });
 
 /** Connected blurb is shared across providers; reconnect names the provider
  * and what it gates ("this account" for Google, "this workspace" for
  * Linear) so the prompt reads correctly for either. */
-const CONNECTED_BLURB = "This account is ready. Tokens stay in your Mac's Keychain.";
-
-const RECONNECT_BLURB: Readonly<Record<ConnectorProvider, string>> = Object.freeze({
-  google: "Google needs you to sign in again before Clovy can use this account.",
-  linear: "Linear needs you to sign in again before Clovy can use this workspace.",
-  notion: "Notion needs you to connect again before Clovy can use its hosted MCP tools.",
-  github: "GitHub needs you to sign in again before Clovy can use this account.",
+const RECONNECT_BLURB: Readonly<Record<ConnectorProvider, MessageKey>> = Object.freeze({
+  google: "lib.connectors.blurb.reconnectGoogle",
+  linear: "lib.connectors.blurb.reconnectLinear",
+  notion: "lib.connectors.blurb.reconnectNotion",
+  github: "lib.connectors.blurb.reconnectGithub",
 });
-const UNAVAILABLE_BLURB = "Clovy could not confirm the Notion connection. Try again in a moment.";
 
 function accountStatusBlurb(status: ConnectorAccountStatus, provider: ConnectorProvider): string {
-  if (status === "reconnect_required") return RECONNECT_BLURB[provider];
-  if (status === "unavailable") return UNAVAILABLE_BLURB;
-  return CONNECTED_BLURB;
+  if (status === "reconnect_required") return t(RECONNECT_BLURB[provider]);
+  if (status === "unavailable") return t("lib.connectors.blurb.unavailable");
+  return t("lib.connectors.blurb.connected");
 }
 
 export function accountStatusMeta(
   status: ConnectorAccountStatus,
   provider: ConnectorProvider,
 ): ConnectorStatusMeta {
-  const { label, tone } = STATUS_LABELS[status];
-  return { label, tone, blurb: accountStatusBlurb(status, provider) };
+  const { labelKey, tone } = STATUS_LABELS[status];
+  return { label: t(labelKey), tone, blurb: accountStatusBlurb(status, provider) };
 }
 
 /** True for the Rust "connector_not_configured" error: this build ships no
@@ -282,21 +256,27 @@ export function autonomyRuntimeNeedsRestart(input: {
 }
 
 export const TRUST_MODE_META: Readonly<Record<RoutineTrustMode, TrustModeMeta>> = Object.freeze({
-  read_only: {
-    label: "Read only",
-    description: "The routine can read mail and calendar but never change anything.",
-    icon: IconEyeOpen,
-  },
-  approval: {
-    label: "Approval",
-    description: "Drafts, sends, and event changes wait for your approval before they run.",
-    icon: IconChecklist,
-  },
-  autonomous: {
-    label: "Autonomous",
-    description: "Tools you grant run without asking. Unlocked after a few runs under approval.",
-    icon: IconBolt,
-  },
+  read_only: Object.assign(
+    localizedFields({
+      label: "lib.connectors.trust.readOnly.label",
+      description: "lib.connectors.trust.readOnly.description",
+    }),
+    { icon: IconEyeOpen },
+  ),
+  approval: Object.assign(
+    localizedFields({
+      label: "lib.connectors.trust.approval.label",
+      description: "lib.connectors.trust.approval.description",
+    }),
+    { icon: IconChecklist },
+  ),
+  autonomous: Object.assign(
+    localizedFields({
+      label: "lib.connectors.trust.autonomous.label",
+      description: "lib.connectors.trust.autonomous.description",
+    }),
+    { icon: IconBolt },
+  ),
 });
 
 /**
@@ -315,18 +295,17 @@ export function canSelectAutonomous(policy: ConnectorPolicyCatalog, runCount: nu
  * "Runs 2 more times under approval to unlock autonomous". */
 export function autonomyUnlockHint(policy: ConnectorPolicyCatalog, runCount: number): string {
   const remaining = Math.max(0, policy.earnedAutonomyMinApprovalRuns - runCount);
-  if (remaining === 0) return "Autonomous is unlocked for this routine.";
-  const times = remaining === 1 ? "1 more time" : `${remaining} more times`;
-  return `Runs ${times} under approval to unlock autonomous.`;
+  if (remaining === 0) return t("lib.connectors.autonomyUnlocked");
+  return t("lib.connectors.autonomyUnlockHint", { count: remaining });
 }
 
 /** Progress label for the detail page: "Run 2 of 3 under approval before
  * autonomy unlocks". Clamped once the threshold is met. */
 export function autonomyProgressLabel(policy: ConnectorPolicyCatalog, runCount: number): string {
-  if (canSelectAutonomous(policy, runCount)) return "Autonomy unlocked.";
+  if (canSelectAutonomous(policy, runCount)) return t("lib.connectors.autonomyProgressDone");
   const threshold = policy.earnedAutonomyMinApprovalRuns;
   const next = Math.min(runCount + 1, threshold);
-  return `Run ${next} of ${threshold} under approval before autonomy unlocks.`;
+  return t("lib.connectors.autonomyProgress", { next, threshold });
 }
 
 // ---------------------------------------------------------------------------
@@ -343,23 +322,25 @@ export type ConnectorActionTool = {
 };
 
 /** Labels only. Tool/server ownership and grantability come from Rust. */
-const ACTION_TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  "june_gmail_actions:create_draft": "Create drafts",
-  "june_gmail_actions:send_email": "Send email",
-  "june_gmail_actions:modify_labels": "Change labels",
-  "june_gmail_actions:archive": "Archive mail",
-  "june_gcal_actions:create_event": "Create events",
-  "june_gcal_actions:respond_to_invite": "Respond to invites",
-  "june_linear_actions:create_issue": "Create issues",
-  "june_linear_actions:update_issue": "Update issues",
-  "june_linear_actions:add_comment": "Comment on issues",
-  "june_linear_actions:create_project_update": "Post project updates",
-  "june_notion_actions:notion-create-pages": "Create Notion pages",
-  "june_notion_actions:notion-update-page": "Update Notion pages",
-  "june_github_actions:create_issue": "Create issue",
-  "june_github_actions:update_issue": "Update issue",
-  "june_github_actions:add_comment": "Add comment",
-});
+const ACTION_TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze(
+  localizedFields({
+    "june_gmail_actions:create_draft": "lib.connectors.action.gmailCreateDraft",
+    "june_gmail_actions:send_email": "lib.connectors.action.gmailSendEmail",
+    "june_gmail_actions:modify_labels": "lib.connectors.action.gmailModifyLabels",
+    "june_gmail_actions:archive": "lib.connectors.action.gmailArchive",
+    "june_gcal_actions:create_event": "lib.connectors.action.gcalCreateEvent",
+    "june_gcal_actions:respond_to_invite": "lib.connectors.action.gcalRespondToInvite",
+    "june_linear_actions:create_issue": "lib.connectors.action.linearCreateIssue",
+    "june_linear_actions:update_issue": "lib.connectors.action.linearUpdateIssue",
+    "june_linear_actions:add_comment": "lib.connectors.action.linearAddComment",
+    "june_linear_actions:create_project_update": "lib.connectors.action.linearCreateProjectUpdate",
+    "june_notion_actions:notion-create-pages": "lib.connectors.action.notionCreatePages",
+    "june_notion_actions:notion-update-page": "lib.connectors.action.notionUpdatePage",
+    "june_github_actions:create_issue": "lib.connectors.action.githubCreateIssue",
+    "june_github_actions:update_issue": "lib.connectors.action.githubUpdateIssue",
+    "june_github_actions:add_comment": "lib.connectors.action.githubAddComment",
+  }),
+);
 
 export function connectorActionTools(policy: ConnectorPolicyCatalog): ConnectorActionTool[] {
   return policy.actionTools.map((tool) => ({
@@ -497,16 +478,20 @@ export type TriggerMeta = {
 };
 
 export const TRIGGER_META: Readonly<Record<ConnectorTriggerKind, TriggerMeta>> = Object.freeze({
-  email_received: {
-    label: "When new email arrives",
-    description: "Runs when new mail lands in the connected inbox.",
-    configFields: [],
-  },
-  event_upcoming: {
-    label: "Before an upcoming meeting",
-    description: "Runs a set number of minutes before a calendar event starts.",
-    configFields: ["leadMinutes", "externalOnly"],
-  },
+  email_received: Object.assign(
+    localizedFields({
+      label: "lib.connectors.trigger.emailReceived.label",
+      description: "lib.connectors.trigger.emailReceived.description",
+    }),
+    { configFields: [] },
+  ),
+  event_upcoming: Object.assign(
+    localizedFields({
+      label: "lib.connectors.trigger.eventUpcoming.label",
+      description: "lib.connectors.trigger.eventUpcoming.description",
+    }),
+    { configFields: ["leadMinutes", "externalOnly"] },
+  ),
 });
 
 /** The routine editor's "When" model: a plain schedule, or a connector event
@@ -554,8 +539,12 @@ export function triggerScopeWarning(
   if (bundles.length === 0) return null;
   if (accountScopes == null) return null;
   if (scopesCoverBundles(policy, accountScopes, bundles)) return null;
-  const features = bundles.map((bundle) => bundleMeta(bundle).label.toLowerCase()).join(" and ");
-  return `This trigger needs ${features} access on your connected Google account. Add it in Settings under Plugins.`;
+  const labels = bundles.map((bundle) => bundleMeta(bundle).label.toLowerCase());
+  const features =
+    getInterfaceLocale() === "en"
+      ? labels.join(" and ")
+      : formatList(labels, { type: "conjunction" });
+  return t("lib.connectors.triggerScopeWarning", { features });
 }
 
 /** Contract check for the renderer-only presentation maps. */

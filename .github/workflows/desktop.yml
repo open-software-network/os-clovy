@@ -11,7 +11,6 @@ on:
       - "index.html"
       - "meeting-hud.html"
       - "biome.json"
-      - "extension/**"
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -34,7 +33,6 @@ on:
       - "index.html"
       - "meeting-hud.html"
       - "biome.json"
-      - "extension/**"
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -64,7 +62,7 @@ jobs:
       needs.changes.outputs.frontend == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-frontend-ci'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -96,7 +94,7 @@ jobs:
     name: Biome check
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -124,7 +122,7 @@ jobs:
   # open to "changed" so the suite can never be skipped by accident.
   changes:
     name: Changed paths
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.diff.outputs.frontend }}
       rust: ${{ steps.diff.outputs.rust }}
@@ -151,7 +149,7 @@ jobs:
           changed_files="$(git diff --name-only "$BASE" HEAD)"
           # Frontend checks (biome, typecheck, vitest) read src/ and scripts/, never
           # src-tauri/, so a src-tauri-only diff skips them and vice versa.
-          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/actions/setup-pnpm/|\.github/workflows/desktop\.yml$|biome\.json$|extension/|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|public/|scripts/|src/|tsconfig\.json$|vite\.config\.ts$)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/actions/setup-pnpm/|\.github/workflows/desktop\.yml$|biome\.json$|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|public/|scripts/|src/|tsconfig\.json$|vite\.config\.ts$)'; then
             echo "frontend=true" >> "$GITHUB_OUTPUT"
           else
             echo "frontend=false" >> "$GITHUB_OUTPUT"
@@ -182,7 +180,7 @@ jobs:
     name: Tauri Rust format
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -198,7 +196,7 @@ jobs:
     name: Companion crates format, clippy, and tests
     needs: changes
     if: needs.changes.outputs.companion == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -246,7 +244,7 @@ jobs:
       needs.changes.outputs.rust == 'true' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'run-macos-ci'))
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -274,6 +272,9 @@ jobs:
           restore-keys: |
             tauri-cargo-target-${{ runner.os }}-
 
+      - name: Prepare the real pinned Computer use engine and helper
+        run: node scripts/prepare-computer-use.mjs
+
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
@@ -284,7 +285,7 @@ jobs:
     name: Tauri Windows build
     needs: changes
     if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.desktop_bundle == 'true'
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -303,11 +304,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Windows packaging tools
+      - name: Install Windows packaging and SQLCipher tools
         shell: pwsh
         run: |
-          choco install nsis 7zip -y --no-progress
+          choco install nsis 7zip strawberryperl nasm -y --no-progress
           "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Cache cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -328,15 +331,52 @@ jobs:
           restore-keys: |
             tauri-cargo-target-${{ runner.os }}-
 
-      - name: Build and verify unsigned Windows installer
+      - name: Prepare the Windows signing identity on the ephemeral runner
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./scripts/prepare-windows-release-certificate.ps1
+
+      - name: Prepare the real pinned Computer use engine and helper
+        shell: pwsh
+        run: node scripts/prepare-computer-use.mjs
+
+      # CLI resolution, process trees, and the chat engine run before the
+      # activity suite, whose known clipboard/OCR failures would skip them.
+      - name: Test Windows CLI resolution
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked llm
+
+      - name: Test Windows CLI chat engine
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked chat_engine
+
+      - name: Test Windows process trees
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked process_group
+
+      - name: Test Windows dictation helper
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/native/windows-dictation-helper/Cargo.toml --locked
+
+      - name: Test Windows meeting detection
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked meeting_detection
+
+      - name: Test Windows activity capture
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked activity
+
+      - name: Build and verify signed Windows installer
         shell: pwsh
         run: ./scripts/build-windows.ps1
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: clovy-windows-unsigned-release-nsis
-          path: artifacts/windows-unsigned/*-setup.exe
+          name: clovy-windows-signed-release-nsis
+          path: artifacts/windows-signed/*-setup.exe
           if-no-files-found: error
 
 # Coverage reruns of these suites live in coverage.yml (manual-only). They

@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { useT } from "../i18n";
 import { isPrimaryShortcut } from "../lib/platform";
 import type {
   BootstrapResponse,
@@ -9,6 +10,7 @@ import type {
   RecordingStatusDto,
 } from "../lib/tauri";
 export function SidebarToggleGlyph() {
+  const t = useT();
   return (
     <svg
       className="sidebar-toggle-glyph"
@@ -19,7 +21,7 @@ export function SidebarToggleGlyph() {
       xmlns="http://www.w3.org/2000/svg"
       aria-hidden
     >
-      <title>Toggle sidebar</title>
+      <title>{t("app.sidebar.toggle")}</title>
       <path
         d="M3 8C3 6.34315 4.34315 5 6 5H18C19.6569 5 21 6.34315 21 8V16C21 17.6569 19.6569 19 18 19H6C4.34315 19 3 17.6569 3 16V8Z"
         stroke="currentColor"
@@ -82,10 +84,6 @@ export function isMicrophoneRecordingBlocked(
 // non-blocking so the banner doesn't flash before the helper's first report.
 export function isAccessibilityBlocked(state?: string) {
   return state !== undefined && state !== "granted";
-}
-
-export function isNewSessionShortcut(event: KeyboardEvent) {
-  return event.key.toLowerCase() === "n" && isPrimaryShortcut(event);
 }
 
 export function isCreateNoteShortcut(event: KeyboardEvent) {
@@ -244,13 +242,4 @@ export function withFakeRecovery(payload: BootstrapResponse): {
     },
     fakeNote,
   };
-}
-
-export function isAppErrorCode(err: unknown, code: string) {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    "code" in err &&
-    String((err as { code: unknown }).code) === code
-  );
 }

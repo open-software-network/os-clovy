@@ -251,9 +251,10 @@ Every launch plugin must satisfy the same contract:
    itself make a provider mutation idempotent. After an ambiguous timeout Clovy
    must reconcile provider state using a stable action fingerprint, or block
    replay and ask the user to confirm.
-10. No plugin introduces an upstream provider key into the desktop binary or
-    routes provider content through Clovy API unless a separately approved
-    away-mode design requires it.
+10. No plugin embeds a service-managed provider key or introduces a hosted
+    intermediary for provider content. User keys and connector grants stay in
+    the local credential store and go only to their own provider. The retired
+    hosted/away-mode proposals do not authorize a replacement server.
 
 ## Business model
 

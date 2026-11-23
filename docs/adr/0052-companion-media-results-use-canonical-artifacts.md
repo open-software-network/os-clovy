@@ -58,3 +58,7 @@ cannot show a canonical preview before download completes. That cost is
 accepted to avoid derivative-cache ambiguity. A future thumbnail tier must
 define its own canonical identity, integrity, and retention before changing
 the wire contract.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

@@ -194,3 +194,15 @@ and legacy artifacts remain published.
 - **Copy legacy state once and delete it.** Rejected because a crash can split
   the migration and a rollback would read stale or missing state, especially
   after refresh-token rotation.
+
+Superada pela change desvincular-repo-ci na linha do ambiente do Clovy API: `JUNE__*` deixou de ser lido; o restante da ponte continua.
+
+2026-10-21: superada pela [ADR-0068](0068-clovy-takes-its-own-identity-with-a-one-time-migration.md). O fork troca o identificador para `dev.guilhermexp.clovy`, copia uma vez o perfil e as credenciais June e remove a ponte.
+
+## Addendum - 2026-10-28 (agent executable retired)
+
+[ADR-0072](0072-cli-chat-replaces-the-native-agent.md) retires the agent harness
+package/executable row above, including its build environment aliases and
+owner-process lifecycle. Those names describe historical releases only; the
+current desktop packages the MCP relay and runs installed CLI engines. This
+addendum does not change identity migration or authorize deleting migrations.

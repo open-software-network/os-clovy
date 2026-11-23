@@ -19,6 +19,53 @@ function note(overrides: Partial<NoteDto> = {}): NoteDto {
 }
 
 describe("notesReducer", () => {
+  it("fences confirmed deletions across stale list and detail producers while retaining other notes", () => {
+    const deleted = note();
+    const kept = note({ id: "kept", title: "Keep me" });
+    let state = notesReducer(createInitialState(), { type: "notesLoaded", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "noteDeleted", noteId: deleted.id });
+    state = notesReducer(state, { type: "notesLoaded", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "notesInvalidated", notes: [deleted, kept] });
+    state = notesReducer(state, { type: "noteLoaded", note: deleted });
+    state = notesReducer(state, { type: "noteUpdated", note: deleted });
+    state = notesReducer(state, { type: "noteProcessingUpdated", note: deleted });
+    expect(state.notes).toEqual([kept]);
+    expect(state.selectedNoteId).toBe(kept.id);
+    state = notesReducer(state, {
+      type: "noteLoaded",
+      note: { ...kept, title: "Fresh kept title" },
+    });
+    expect(state.selectedNote?.title).toBe("Fresh kept title");
+  });
+  it("clears a deleted selection even when a later batch refresh concerns another note", () => {
+    const selected = note({ id: "deleted-first" });
+    const initial = notesReducer(createInitialState(), { type: "noteLoaded", note: selected });
+    const removed = notesReducer(initial, { type: "noteDeleted", noteId: selected.id });
+    const refreshed = notesReducer(removed, {
+      type: "notesInvalidated",
+      notes: [],
+      deletedId: "deleted-last",
+    });
+    expect(refreshed.selectedNoteId).toBeUndefined();
+    expect(refreshed.selectedNote).toBeUndefined();
+    expect(refreshed.notes).toHaveLength(0);
+  });
+  it("refreshes the note list without losing selection, and clears a deleted selection", () => {
+    const selected = note({ id: "note-1", title: "Current" });
+    const initial = notesReducer(createInitialState(), { type: "noteLoaded", note: selected });
+    const refreshed = notesReducer(initial, {
+      type: "notesInvalidated",
+      notes: [selected, note({ id: "note-2" })],
+    });
+    expect(refreshed.selectedNote).toEqual(selected);
+    const deleted = notesReducer(refreshed, {
+      type: "notesInvalidated",
+      notes: [note({ id: "note-2" })],
+      deletedId: "note-1",
+    });
+    expect(deleted.selectedNote).toBeUndefined();
+    expect(deleted.selectedNoteId).toBeUndefined();
+  });
   it("loads bootstrap data and selects the first note", () => {
     const payload: BootstrapResponse = {
       folders: [
@@ -26,7 +73,6 @@ describe("notesReducer", () => {
       ],
       notes: [note({ id: "note-2", title: "Second" }), note({ id: "note-1", title: "First" })],
       activeRecoveries: [],
-      providerConfigured: true,
     };
 
     const state = notesReducer(createInitialState(), {
@@ -37,7 +83,6 @@ describe("notesReducer", () => {
     expect(state.folders).toHaveLength(1);
     expect(state.notes.map((item) => item.id)).toEqual(["note-2", "note-1"]);
     expect(state.selectedNoteId).toBe("note-2");
-    expect(state.providerConfigured).toBe(true);
   });
 
   it("upserts a folder when a concurrent import returns an existing folder", () => {
@@ -362,7 +407,6 @@ describe("notesReducer", () => {
           },
         ],
         activeRecoveries: [],
-        providerConfigured: false,
       },
     });
 

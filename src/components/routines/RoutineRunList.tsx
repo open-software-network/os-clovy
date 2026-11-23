@@ -4,9 +4,10 @@ import {
   sessionTimestamp,
   type RoutineRunSession,
 } from "../../lib/agent-routine-history";
+import { clockTimeOptions, formatDate, t as translate, useT } from "../../i18n";
+import { isSameLocalDay } from "../../lib/date-format";
 
-/** Past runs of one or all routines: each row is a cron-sourced session,
- * opened in the agent view on click so the whole conversation is readable. */
+/** Past runs of one or all routines. Each row opens the run result. */
 export function RoutineRunList({
   runs,
   label,
@@ -34,18 +35,26 @@ function RunRow({
   label: string;
   onOpen: () => void;
 }) {
+  const t = useT();
   const running = isRunningRoutineSession(run);
-  const preview = run.preview?.trim() || (running ? "Running now" : "");
+  const preview = run.preview?.trim() || (running ? t("routines.run.runningNow") : "");
   return (
     <li className="routines-run">
-      <button type="button" className="routines-run-button" onClick={onOpen}>
+      <button
+        id={`routine-run-${run.id}`}
+        type="button"
+        className="routines-run-button"
+        onClick={onOpen}
+      >
         <span className="routines-item-icon" aria-hidden>
           <IconZap size={14} />
         </span>
         <span className="routines-run-body">
           <span className="routines-run-title">
             <span className="routines-run-name">{label}</span>
-            {running ? <span className="routines-run-status">Running</span> : null}
+            {running ? (
+              <span className="routines-run-status">{t("routines.run.running")}</span>
+            ) : null}
           </span>
           {preview ? <span className="routines-run-preview">{preview}</span> : null}
         </span>
@@ -59,29 +68,19 @@ export function formatRunTime(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   const now = new Date();
-  const time = date.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
+  const time = formatDate(date, {
+    ...clockTimeOptions(),
   });
-  if (isSameDate(date, now)) return `today ${time}`;
+  if (isSameLocalDay(date, now)) return translate("routines.run.today", { time });
   const tomorrow = new Date(now);
   tomorrow.setDate(now.getDate() + 1);
-  if (isSameDate(date, tomorrow)) return `tomorrow ${time}`;
+  if (isSameLocalDay(date, tomorrow)) return translate("routines.run.tomorrow", { time });
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (isSameDate(date, yesterday)) return `yesterday ${time}`;
-  return date.toLocaleString(undefined, {
+  if (isSameLocalDay(date, yesterday)) return translate("routines.run.yesterday", { time });
+  return formatDate(date, {
     month: "short",
     day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
+    ...clockTimeOptions(),
   });
-}
-
-function isSameDate(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
 }

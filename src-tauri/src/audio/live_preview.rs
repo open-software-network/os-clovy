@@ -1,7 +1,7 @@
 use crate::{
     audio::turns::normalize_wav_for_transcription,
-    clovy_api::{transcribe_saved_audio, TranscriptionRequest},
     domain::types::{RecordingSource, RecordingSourceMode},
+    providers::groq::TranscriptionRequest,
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::Serialize;
@@ -251,10 +251,11 @@ async fn run_live_preview_worker(params: LivePreviewWorkerParams) {
             // it off mid-recording stops new preview requests (and their
             // billing) promptly; turning it back on resumes the stream.
             // (JUN-375)
-            if !crate::providers::live_transcription() {
+            let Ok(epoch) = crate::meeting_assist::preview_chunk_epoch(&note_id, &session_id)
+            else {
                 segment_index += 1;
                 continue;
-            }
+            };
             let segment_id = preview_segment_id(source, segment_index);
             if let Some(event) = transcribe_preview_chunk(PreviewChunkRequest {
                 note_id: &note_id,
@@ -273,7 +274,9 @@ async fn run_live_preview_worker(params: LivePreviewWorkerParams) {
                 if cancelled.load(Ordering::Acquire) {
                     return;
                 }
-                let _ = app.emit(LIVE_TRANSCRIPT_EVENT, event);
+                crate::meeting_assist::publish_preview(event, epoch, |event| {
+                    app.emit(LIVE_TRANSCRIPT_EVENT, event).is_ok()
+                });
             }
             segment_index += 1;
         }
@@ -336,10 +339,12 @@ async fn run_system_live_preview_worker(
                     // Same live setting check as the microphone lane: turning
                     // Live transcription off mid-recording stops new preview
                     // requests promptly (JUN-375).
-                    if !crate::providers::live_transcription() {
+                    let Ok(epoch) =
+                        crate::meeting_assist::preview_chunk_epoch(&note_id, &session_id)
+                    else {
                         segment_index += 1;
                         continue;
-                    }
+                    };
                     let segment_id = preview_segment_id(RecordingSource::System, segment_index);
                     if let Some(event) = transcribe_preview_chunk(PreviewChunkRequest {
                         note_id: &note_id,
@@ -358,7 +363,9 @@ async fn run_system_live_preview_worker(
                         if cancelled.load(Ordering::Acquire) {
                             return;
                         }
-                        let _ = app.emit(LIVE_TRANSCRIPT_EVENT, event);
+                        crate::meeting_assist::publish_preview(event, epoch, |event| {
+                            app.emit(LIVE_TRANSCRIPT_EVENT, event).is_ok()
+                        });
                     }
                     segment_index += 1;
                 }
@@ -592,6 +599,12 @@ async fn transcribe_preview_chunk(
         channels,
         samples,
     } = request;
+    // The preview shares the provider account with the final transcription:
+    // it takes a request only when one is free now and within its part of
+    // the hour's audio, and otherwise drops the chunk (ADR-0002 lets preview
+    // audio be dropped). The chunk then goes with the same key whose pacer
+    // gave it the request.
+    let route = crate::domain::processing::live_preview_route(end_ms - start_ms)?;
     let temp_path = preview_chunk_path(session_id, segment_id);
     if let Err(error) = write_preview_wav(&temp_path, sample_rate, channels, samples) {
         let _ = std::fs::remove_file(&temp_path);
@@ -616,7 +629,7 @@ async fn transcribe_preview_chunk(
     };
 
     let request = preview_transcription_request(audio_path.clone(), session_id, segment_id);
-    let result = transcribe_saved_audio(request).await;
+    let result = crate::domain::processing::transcribe_on_route(route, request).await;
     let _ = std::fs::remove_file(&temp_path);
     if audio_path != temp_path {
         let _ = std::fs::remove_file(&audio_path);
@@ -679,7 +692,7 @@ fn preview_transcription_request(
 
 fn preview_chunk_path(session_id: &str, segment_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "os-june-live-preview-{}-{}-{}.wav",
+        "clovy-live-preview-{}-{}-{}.wav",
         session_id,
         segment_id,
         Uuid::new_v4()

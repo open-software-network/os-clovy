@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useClovyDataChanged } from "../../lib/clovy-data-events";
 import type { AgentSkillDto } from "../../lib/agent-runtime-contract";
 import {
   listAgentSkills,
@@ -8,25 +9,15 @@ import {
   type FolderDto,
 } from "../../lib/tauri";
 import {
-  AGENT_HUD_VISIBILITY_CHANGED_EVENT,
-  getAgentHudEnabled,
-  getAgentHudPlacement,
-  setAgentHudEnabled,
-  setAgentHudPlacement,
-  type AgentHudPlacement,
-  type AgentHudVisibilityChangedDetail,
-} from "../../lib/agent-hud-settings";
-import {
   AGENT_SOUNDS_CHANGED_EVENT,
   getAgentSoundsEnabled,
   setAgentSoundsEnabled,
   type AgentSoundsChangedDetail,
 } from "../../lib/agent-sound-settings";
+import { t as translate, useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
-import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { SettingsPageHeader } from "./AppSettings";
-import { ClovyPersonalitySettingsSection } from "./ClovyPersonalitySettingsSection";
 
 /** Settings owned by Clovy's local agent harness. Messaging compatibility,
  * raw runtime diagnostics, and the legacy filesystem browser are
@@ -41,8 +32,7 @@ export function AgentSettingsSection({
   folders?: FolderDto[];
   onFoldersImported?: (folders: FolderDto[]) => void;
 } = {}) {
-  const [hudEnabled, setHudEnabledState] = useState(getAgentHudEnabled);
-  const [hudPlacement, setHudPlacementState] = useState(getAgentHudPlacement);
+  const t = useT();
   const [soundsEnabled, setSoundsEnabledState] = useState(getAgentSoundsEnabled);
   const [skills, setSkills] = useState<AgentSkillDto[]>();
   const [savingSkillId, setSavingSkillId] = useState<string>();
@@ -50,73 +40,113 @@ export function AgentSettingsSection({
   const [skillDraft, setSkillDraft] = useState("");
   const [skillSaving, setSkillSaving] = useState(false);
   const [error, setError] = useState<string>();
-
-  useEffect(() => {
-    void listAgentSkills()
-      .then(setSkills)
-      .catch((cause) => setError(messageFromError(cause)));
+  const [actionError, setActionError] = useState<string>();
+  const skillsReadVersion = useRef(0);
+  const editReadVersion = useRef(0);
+  const mounted = useRef(true);
+  const refreshSkills = useCallback(async (eventIsCurrent: () => boolean = () => true) => {
+    const version = ++skillsReadVersion.current;
+    const isCurrent = () =>
+      mounted.current && version === skillsReadVersion.current && eventIsCurrent();
+    try {
+      const next = await listAgentSkills();
+      if (isCurrent()) {
+        setSkills(next);
+        setError(undefined);
+      }
+    } catch (cause) {
+      if (isCurrent()) setError(messageFromError(cause));
+    }
   }, []);
+  useClovyDataChanged("skills", (_change, isCurrent) => refreshSkills(isCurrent), true);
 
   useEffect(() => {
-    const handleHud = (event: Event) => {
-      const detail = (event as CustomEvent<AgentHudVisibilityChangedDetail>).detail;
-      if (detail) setHudEnabledState(detail.enabled);
+    mounted.current = true;
+    void refreshSkills();
+    return () => {
+      mounted.current = false;
+      skillsReadVersion.current += 1;
     };
+  }, [refreshSkills]);
+
+  function beginSkillMutation() {
+    skillsReadVersion.current += 1;
+    return () => mounted.current;
+  }
+
+  function reconcileFailedSkillMutation(isCurrent: () => boolean, cause: unknown) {
+    if (!isCurrent()) return;
+    setActionError(messageFromError(cause));
+    // Installation-wide skills still reconcile after a refused mutation. Keep
+    // the editable draft and mutation error independent of catalog reads.
+    void refreshSkills();
+  }
+
+  function applySkillMutation(updated: AgentSkillDto) {
+    if (!mounted.current) return;
+    skillsReadVersion.current += 1;
+    setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
+    setError(undefined);
+    setActionError(undefined);
+    void refreshSkills();
+  }
+
+  useEffect(() => {
     const handleSounds = (event: Event) => {
       const detail = (event as CustomEvent<AgentSoundsChangedDetail>).detail;
       if (detail) setSoundsEnabledState(detail.enabled);
     };
-    window.addEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleHud);
     window.addEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
     return () => {
-      window.removeEventListener(AGENT_HUD_VISIBILITY_CHANGED_EVENT, handleHud);
       window.removeEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
     };
   }, []);
 
-  function changeHud(enabled: boolean) {
-    setHudEnabledState(enabled);
-    setAgentHudEnabled(enabled);
-  }
-
-  function changeHudPlacement(placement: AgentHudPlacement) {
-    setHudPlacementState(placement);
-    setAgentHudPlacement(placement);
-  }
-
   async function changeSkill(skill: AgentSkillDto, enabled: boolean) {
     setSavingSkillId(skill.id);
+    const isCurrent = beginSkillMutation();
     try {
       const updated = await setAgentSkillEnabled(skill.id, enabled);
-      setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
+      applySkillMutation(updated);
     } catch (cause) {
-      setError(messageFromError(cause));
+      reconcileFailedSkillMutation(isCurrent, cause);
     } finally {
-      setSavingSkillId(undefined);
+      if (isCurrent()) setSavingSkillId(undefined);
     }
   }
 
   async function editSkill(skill: AgentSkillDto) {
+    const version = ++editReadVersion.current;
+    const isCurrent = () => mounted.current && version === editReadVersion.current;
     try {
       const document = await readAgentSkill(skill.id);
+      if (!isCurrent()) return;
+      // A successful explicit read starts a new editor flow. Catalog repair
+      // alone never clears the previous action's failure or draft.
+      setActionError(undefined);
       setSkillDraft(document.content);
       setEditingSkill(skill);
     } catch (cause) {
-      setError(messageFromError(cause));
+      // The latest explicit action supersedes an older save/toggle failure;
+      // a background catalog response must not hide this read failure either.
+      if (isCurrent()) setActionError(messageFromError(cause));
     }
   }
 
   async function saveSkill() {
     if (!editingSkill) return;
     setSkillSaving(true);
+    const isCurrent = beginSkillMutation();
     try {
       const updated = await updateAgentSkill(editingSkill.id, skillDraft);
-      setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
-      setEditingSkill(undefined);
+      if (isCurrent()) {
+        applySkillMutation(updated);
+        setEditingSkill(undefined);
+      }
     } catch (cause) {
-      setError(messageFromError(cause));
+      reconcileFailedSkillMutation(isCurrent, cause);
     } finally {
-      setSkillSaving(false);
+      if (isCurrent()) setSkillSaving(false);
     }
   }
 
@@ -125,65 +155,25 @@ export function AgentSettingsSection({
       <section className="settings-group" aria-labelledby="agent-heading">
         <SettingsPageHeader
           id="agent-heading"
-          title="Agent"
-          blurb="Configure Clovy's personality and local agent experience."
+          title={t("settingsPanels.agent.title")}
+          blurb={t("settingsPanels.agent.blurb")}
         />
-        <ClovyPersonalitySettingsSection />
       </section>
 
       <section className="settings-group" aria-labelledby="agent-experience-heading">
         <h2 id="agent-experience-heading" className="settings-group-heading">
-          Experience
+          {t("settingsPanels.agent.experience")}
         </h2>
         <p className="settings-group-description">
-          Control how Clovy keeps you informed while she works.
+          {t("settingsPanels.agent.experienceDescription")}
         </p>
         <div className="settings-card">
           <div className="settings-rows">
             <div className="settings-row">
               <div className="settings-row-info">
-                <h3 className="settings-row-title">Sessions HUD</h3>
+                <h3 className="settings-row-title">{t("settingsPanels.agent.sounds")}</h3>
                 <p className="settings-row-description">
-                  Show a small pill with live session status while you are in other apps.
-                </p>
-              </div>
-              <div className="settings-row-control">
-                <Switch
-                  checked={hudEnabled}
-                  onCheckedChange={changeHud}
-                  aria-label="Show sessions HUD"
-                />
-              </div>
-            </div>
-            {hudEnabled ? (
-              <div className="settings-row">
-                <div className="settings-row-info">
-                  <h3 className="settings-row-title">HUD position</h3>
-                  <p className="settings-row-description">
-                    The screen corner where the pill parks.
-                  </p>
-                </div>
-                <div className="settings-row-control">
-                  <Select
-                    value={hudPlacement}
-                    options={[
-                      { value: "top-left", label: "Top left" },
-                      { value: "top-right", label: "Top right" },
-                      { value: "bottom-left", label: "Bottom left" },
-                      { value: "bottom-right", label: "Bottom right" },
-                    ]}
-                    placeholder="Top right"
-                    ariaLabel="Sessions HUD position"
-                    onChange={(value) => changeHudPlacement(value as AgentHudPlacement)}
-                  />
-                </div>
-              </div>
-            ) : null}
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">Agent sounds</h3>
-                <p className="settings-row-description">
-                  Play a sound when a session finishes or needs you.
+                  {t("settingsPanels.agent.soundsDescription")}
                 </p>
               </div>
               <div className="settings-row-control">
@@ -193,7 +183,7 @@ export function AgentSettingsSection({
                     setSoundsEnabledState(enabled);
                     setAgentSoundsEnabled(enabled);
                   }}
-                  aria-label="Play agent sounds"
+                  aria-label={t("settingsPanels.agent.soundsAria")}
                 />
               </div>
             </div>
@@ -203,11 +193,9 @@ export function AgentSettingsSection({
 
       <section className="settings-group" aria-labelledby="agent-skills-heading">
         <h2 id="agent-skills-heading" className="settings-group-heading">
-          Skills
+          {t("settingsPanels.agent.skills")}
         </h2>
-        <p className="settings-group-description">
-          Choose which skills Clovy can load during a session.
-        </p>
+        <p className="settings-group-description">{t("settingsPanels.agent.skillsDescription")}</p>
         <div className="settings-card">
           <div className="settings-rows">
             {skills?.map((skill) => (
@@ -223,32 +211,42 @@ export function AgentSettingsSection({
                       className="btn btn-ghost"
                       onClick={() => void editSkill(skill)}
                     >
-                      Edit
+                      {t("common.edit")}
                     </button>
                   ) : null}
                   <Switch
-                    checked={skill.enabled}
-                    disabled={savingSkillId === skill.id}
+                    checked={skill.configuredEnabled}
+                    disabled={savingSkillId === skill.id || !skill.editable}
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
-                    aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
+                    aria-label={
+                      skill.configuredEnabled
+                        ? t("settingsPanels.agent.disableSkill", { name: skill.name })
+                        : t("settingsPanels.agent.enableSkill", { name: skill.name })
+                    }
                   />
                 </div>
               </div>
             ))}
-            {skills?.length === 0 ? <p className="settings-empty">No skills found.</p> : null}
+            {skills?.length === 0 ? (
+              <p className="settings-empty">{t("settingsPanels.agent.noSkills")}</p>
+            ) : null}
           </div>
         </div>
-        {error ? (
+        {actionError || error ? (
           <p className="settings-row-error" role="alert">
-            {error}
+            {actionError ?? error}
           </p>
         ) : null}
       </section>
       <Dialog
         open={Boolean(editingSkill)}
         onClose={() => setEditingSkill(undefined)}
-        title={editingSkill ? `Edit ${editingSkill.name}` : "Edit skill"}
-        description="Update the managed instructions Clovy loads for this skill."
+        title={
+          editingSkill
+            ? t("settingsPanels.agent.editSkillName", { name: editingSkill.name })
+            : t("settingsPanels.agent.editSkill")
+        }
+        description={t("settingsPanels.agent.editSkillDescription")}
         footer={
           <>
             <button
@@ -256,7 +254,7 @@ export function AgentSettingsSection({
               className="primary-action"
               onClick={() => setEditingSkill(undefined)}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -264,14 +262,14 @@ export function AgentSettingsSection({
               disabled={skillSaving}
               onClick={() => void saveSkill()}
             >
-              {skillSaving ? "Saving..." : "Save skill"}
+              {skillSaving ? t("common.saving") : t("settingsPanels.agent.saveSkill")}
             </button>
           </>
         }
       >
         <textarea
           className="settings-skill-editor"
-          aria-label="Skill instructions"
+          aria-label={t("settingsPanels.agent.skillInstructions")}
           value={skillDraft}
           onChange={(event) => setSkillDraft(event.currentTarget.value)}
           rows={18}
@@ -283,9 +281,10 @@ export function AgentSettingsSection({
 }
 
 function messageFromError(error: unknown) {
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
   return error instanceof Error
     ? error.message
     : typeof error === "string"
       ? error
-      : "Unable to update agent settings.";
+      : translate("settingsPanels.agent.updateError");
 }

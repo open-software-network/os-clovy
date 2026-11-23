@@ -2,6 +2,7 @@
 @import "./fonts.css";
 @import "./dot-spinner.css";
 @import "./shimmer.css";
+@import "./activity-timeline.css";
 
 :root {
   color: var(--foreground);
@@ -245,7 +246,7 @@ input:focus-visible,
  * so .agent-scroll has a bounded height to scroll within. */
 .agent-workspace {
   position: relative;
-  /* Own stacking context so the warm fade below (z-index:-1) stays local —
+  /* Own stacking context so the background (z-index:-1) stays local —
    * above this element's own (transparent) background, beneath the hero
    * content. Without it the negative layer falls behind the opaque .main-panel
    * card and never shows. */
@@ -260,61 +261,33 @@ input:focus-visible,
   margin: 0 auto;
 }
 
-/* The new-session accent borrows the original bottom-rising ombre, but keeps
- * it inside the canvas. A broad linear horizon avoids the spotlight effect;
- * the side mask dissolves the wash before it reaches either panel edge. */
-.agent-workspace::before,
-.agent-workspace::after {
-  content: "";
+/* These two conversation surfaces also fit a narrow window. Other desktop
+ * surfaces retain their existing minimum width. */
+body[data-agent-surface="true"] {
+  min-width: 0;
+}
+
+/* One decorative field, isolated behind the conversation's HTML. */
+.agent-background {
+  --ascii-ink: var(--agent-background-ink);
+
   position: absolute;
-  top: 28%;
-  bottom: 0;
-  left: 50%;
-  width: min(var(--hero-wash-max-w), calc(100% - var(--sp-8) - var(--sp-8)));
+  /* The workspace is inside the panel body's horizontal padding. Extend only
+   * the decoration to its padding edges; .main-panel clips the rounded corners. */
+  inset: 0 calc(var(--sp-8) * -1);
   z-index: -1;
   pointer-events: none;
-  opacity: 0;
-  transform: translateX(-50%);
-  transition: opacity 280ms var(--ease-out);
+  border-radius: inherit;
 }
 
-.agent-workspace::before {
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    var(--hero-wash-soft) 42%,
-    var(--hero-wash) 100%
-  );
-  -webkit-mask-image: linear-gradient(
-    to right,
-    transparent,
-    #000 var(--hero-wash-side-fade),
-    #000 calc(100% - var(--hero-wash-side-fade)),
-    transparent
-  );
-  mask-image: linear-gradient(
-    to right,
-    transparent,
-    #000 var(--hero-wash-side-fade),
-    #000 calc(100% - var(--hero-wash-side-fade)),
-    transparent
-  );
-}
-
-.agent-workspace[data-hero="true"]::before {
-  opacity: 1;
-}
-
-/* Home keeps a real (if quiet) share of the hero's warm floor — the wash
- * rising from the composer is what makes the thread feel like Clovy's room
- * rather than a console. Hero owns the full-strength moment. Home re-curves
- * the gradient rather than opacity-scaling it: a taller, gentler ombre (felt
- * from mid-canvas, never loud at the floor). */
 /* Home's top dissolve lives inside the workspace (the card-level fade is
  * disabled for the home view, like the agent view): scrolled content melts at
  * the card's top edge, and the listening bloom (z 4) sits crisp above the
  * veil. The hero rim never renders in home, so its pseudo is free. */
 .agent-workspace[data-home="true"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
   top: 0;
   bottom: auto;
   left: calc(var(--sp-8) * -1);
@@ -340,48 +313,6 @@ input:focus-visible,
   .agent-workspace[data-home="true"]::after {
     animation: main-panel-fade-start linear both;
     animation-timeline: --main-panel-scroll;
-  }
-}
-
-.agent-workspace[data-home="true"]::before {
-  top: 0;
-  bottom: 0;
-  left: calc(var(--sp-8) * -1);
-  right: calc(var(--sp-8) * -1);
-  width: auto;
-  opacity: 1;
-  transform: none;
-  -webkit-mask-image: none;
-  mask-image: none;
-  /* Bottom-hugging: the top third stays pure canvas, then the warmth eases in
-   * and gathers at the floor (hero-strength at the very bottom). */
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    transparent 30%,
-    color-mix(in oklch, var(--brand) 1.5%, transparent) 55%,
-    color-mix(in oklch, var(--brand) 6%, transparent) 78%,
-    color-mix(in oklch, var(--brand) 14%, transparent) 100%
-  );
-}
-
-/* Dark canvas: full-chroma brand alpha over near-black greys into mud, so the
- * dark wash leans on --brand-wash (the chroma-capped surface-tint companion)
- * at lower strength - a quiet glow instead of a milky veil. */
-[data-theme="dark"] .agent-workspace[data-home="true"]::before {
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    transparent 35%,
-    color-mix(in oklch, var(--brand-wash) 3%, transparent) 62%,
-    color-mix(in oklch, var(--brand-wash) 8%, transparent) 100%
-  );
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-workspace::before,
-  .agent-workspace::after {
-    transition: none;
   }
 }
 
@@ -837,96 +768,6 @@ input:focus-visible,
    * copy/branch/timestamp controls also remain above that surface. */
   padding: var(--sp-2) calc(1px + var(--sp-1) + var(--sp-5))
     calc(var(--agent-turn-actions-h) + var(--sp-2));
-}
-
-/* Dev-tools response gallery (window.__agentGallery): a labeled catalog of every
- * agent response part type, rendered through the real turn components. */
-.agent-gallery {
-  overflow-y: auto;
-}
-
-.agent-gallery-banner {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  padding: var(--sp-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-  background: var(--surface-subtle);
-}
-
-.agent-gallery-banner strong {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--foreground);
-}
-
-.agent-gallery-banner p {
-  margin: var(--sp-1) 0 0;
-  font-size: var(--fs-sm);
-  color: var(--muted-foreground);
-}
-
-.agent-gallery-banner code,
-.agent-gallery-section-header code {
-  font-family: var(--font-mono, monospace);
-  font-size: 0.85em;
-}
-
-.agent-gallery-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  padding-top: var(--sp-5);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.agent-gallery-section-header h3 {
-  margin: 0;
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--foreground);
-}
-
-.agent-gallery-section-header p {
-  margin: var(--sp-1) 0 0;
-  font-size: var(--fs-sm);
-  color: var(--muted-foreground);
-  line-height: 1.35;
-}
-
-.agent-gallery-shimmer-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin: 0;
-}
-
-.agent-gallery-shimmer-sample {
-  display: grid;
-  grid-template-columns: calc(var(--sp-12) + var(--sp-2)) minmax(0, 1fr);
-  align-items: baseline;
-  gap: var(--sp-4);
-  padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-md);
-  background: var(--surface-subtle);
-}
-
-.agent-gallery-shimmer-sample dt {
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-}
-
-.agent-gallery-shimmer-sample dd {
-  min-width: 0;
-  margin: 0;
-}
-
-.agent-gallery-shimmer-text {
-  display: inline-block;
-  max-width: 100%;
-  vertical-align: bottom;
 }
 
 .agent-management-panel {
@@ -1975,30 +1816,9 @@ input:focus-visible,
   white-space: nowrap;
 }
 
-.agent-approval-explanation {
-  display: grid;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-  border-left: 2px solid color-mix(in oklch, var(--warm-strong) 52%, var(--border));
-  padding: var(--sp-1) 0 var(--sp-1) var(--sp-3);
-}
-
-.agent-approval-explanation p {
-  margin: 0;
-}
-
-/* Spinner + label sit flush without this — the glyph needs a gap from the
- * "Working out…" text and a shared baseline. */
-.agent-approval-explanation-loading {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
 /* Buttons come from the .btn system, but at the small control height and
  * smaller type so the row reads quiet. On the approval card, a split "Approve"
- * (with a scope caret) and a quiet "Deny" anchor the row, and "Explain first"
- * demotes to a plain text button pushed to the right edge. */
+ * (with a scope caret) and a quiet "Deny" anchor the row. */
 .agent-approval-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2017,7 +1837,7 @@ input:focus-visible,
   opacity: 0.55;
 }
 
-/* "Explain first" and "Deny" are plain neutral ghost buttons: only Approve
+/* "Deny" is a plain neutral ghost button: only Approve
  * carries color (green). The system .btn-ghost:hover fills --muted (a mid grey)
  * which jumps starkly from transparent on the near-white card, so the footer's
  * ghost buttons rest on the softer --surface-subtle instead. Denying is the
@@ -2027,13 +1847,7 @@ input:focus-visible,
   background: var(--surface-subtle);
 }
 
-/* Explain sits at the right edge of the footer, past the anchor actions. `auto`
- * still wraps cleanly when the row runs out of room. */
-.agent-approval-actions .agent-approval-explain {
-  margin-left: auto;
-}
-
-/* Deny is quieter than the Approve/Explain labels at rest (it is the secondary
+/* Deny is quieter than the Approve label at rest (it is the secondary
  * choice), firming to the shared subtle-gray hover. */
 .agent-approval-deny {
   color: var(--muted-foreground);
@@ -2076,7 +1890,7 @@ input:focus-visible,
   /* Concentric with the rail: inset by the 1px border + 2px gutter. */
   border-radius: calc(var(--r-md) - 3px);
   /* Solid gray fill (the system secondary surface); firms to --muted on hover.
-   * Approve reads as primary by being filled, against the ghost Deny/Explain. */
+   * Approve reads as primary by being filled, against the ghost Deny. */
   background: var(--surface-subtle);
   color: var(--secondary-foreground);
   font-size: var(--fs-md);
@@ -5623,8 +5437,7 @@ button.agent-user-attachment:hover {
  * instead: full-bleed to the card edges minus the scrollbar's lane,
  * stretched down to the card's bottom edge, beneath the frosted box (z -1)
  * but over the conversation. Anchoring it here also scopes it for free —
- * chat panel only, gone in the hero — and leaves the workspace's ::before
- * to the warm wash and its handoff fade. */
+ * chat panel only, gone in the hero — while the workspace owns its background. */
 .agent-composer:not([data-hero="true"])::before {
   content: "";
   position: absolute;
@@ -5640,31 +5453,17 @@ button.agent-user-attachment:hover {
   background: linear-gradient(to bottom, transparent, var(--card) 72%);
 }
 
-/* Home's dissolve must vanish into the warm floor, not paint a card-white
- * band over it. The card layer still dissolves the scrolling conversation;
- * the alpha-brand layer on top re-applies the wash's floor intensity with the
- * same compositing math (brand alpha over card) as the workspace wash, so
- * the veil is invisible against it. */
-.agent-workspace[data-home="true"] .agent-composer:not([data-hero="true"])::before {
-  background:
-    linear-gradient(
-      to bottom,
-      transparent,
-      color-mix(in oklch, var(--brand) 13.5%, transparent) 72%
-    ),
-    linear-gradient(to bottom, transparent, var(--card) 72%);
-}
-
-[data-theme="dark"]
-  .agent-workspace[data-home="true"]
-  .agent-composer:not([data-hero="true"])::before {
-  background:
-    linear-gradient(
-      to bottom,
-      transparent,
-      color-mix(in oklch, var(--brand-wash) 7.5%, transparent) 72%
-    ),
-    linear-gradient(to bottom, transparent, var(--card) 72%);
+/* Home keeps the neutral dissolve inside the composer card. Extending it to
+ * the panel bottom would paint over the field and leave a fixed empty band. */
+.agent-workspace[data-home="true"] .agent-composer::before {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  max-width: min(var(--chat-max), var(--content-max));
+  height: 100%;
+  margin-inline: auto;
+  border-radius: var(--r-xl);
 }
 
 /* Floating "jump to live edge" pill. Absolute (never fixed on its own: a
@@ -5741,7 +5540,7 @@ button.agent-user-attachment:hover {
  * composer) with the dot-grid spinner tying it to the working state. Same
  * surface recipe as the "Generating notes…" pill so the app's progress
  * statuses read as one family. (The recording-consent note left this family
- * for the funding-notice card chrome — it asks, it doesn't report progress.) */
+ * for the docked card chrome — it asks, it doesn't report progress.) */
 .agent-composer-notice {
   pointer-events: auto;
   display: inline-flex;
@@ -5762,236 +5561,6 @@ button.agent-user-attachment:hover {
 
 .agent-composer-notice .dot-spinner {
   flex-shrink: 0;
-}
-
-/* Out-of-credits notice (FundingNotice) --------------------------------
- * The persistent funding surface: one compact row docked above the chat
- * composers and reused inside the sidebar chip's popover. Never dismissible;
- * enforcement lives on the gated actions, this row explains the state and
- * offers the one way out. Nothing in the row goes above body size — the tier
- * card and the CTA's fill carry the emphasis. Same surface recipe as the
- * composer box below it (card, ring-in-shadow, --shadow-md) so the pair
- * reads as one floating unit, and the hero width cap matches the hero box. */
-.funding-notice {
-  pointer-events: auto;
-  display: flex;
-  flex-wrap: wrap;
-  /* First-line anchoring: the badge and the CTA pin to the first text line
-   * (top-right) instead of floating vertically centered when the body wraps
-   * to two lines. Single-line rows look identical to centered because the
-   * body's margin-top centers its one line inside the control-height zone. */
-  align-items: flex-start;
-  gap: var(--sp-2) var(--sp-3);
-  width: 100%;
-  max-width: min(var(--chat-max), var(--content-max));
-  /* sp-2 below, like every card docked on the composer box (the steer queue,
-   * the image warning), so a stacked column keeps one even rhythm. */
-  margin: 0 auto var(--sp-2);
-  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
-  /* Ring-in-shadow like the composer box: the transparent border only holds
-   * the layout box (see --composer-ring). */
-  --funding-notice-ring: 0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
-  border: 1px solid transparent;
-  border-radius: var(--r-xl);
-  background: var(--card);
-  box-shadow: var(--shadow-md), var(--funding-notice-ring);
-  animation: funding-notice-settle var(--t-med) var(--ease-out) both;
-}
-
-/* The hero composer deliberately caps at 640px (an invitation, not a reading
- * column); the notice above it tracks the same cap so their edges align. */
-.agent-composer[data-hero="true"] .funding-notice {
-  max-width: 640px;
-}
-
-@keyframes funding-notice-settle {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .funding-notice {
-    animation: none;
-  }
-}
-
-.funding-notice-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  /* Same height as the CTA so the badge centers on the first-line zone and
-   * stays there when the body wraps. */
-  height: var(--control-md);
-  color: var(--muted-foreground);
-}
-
-/* Tier mini card — the OS Accounts portal's engraved-metal tier badge at
- * glyph scale (bank-card proportions). Layered CSS metal: brushed
- * anisotropic lines over a tier-toned wash, cast-grain noise, and the tier
- * name engraved via text-shadow relief. The palettes are the portal's own
- * absolute oklch values — the card is a physical object, not a themed
- * surface, so it reads identically in light and dark. */
-.funding-tier-card {
-  position: relative;
-  display: inline-grid;
-  place-items: center;
-  width: 38px;
-  height: 24px;
-  flex: 0 0 auto;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  background:
-    repeating-linear-gradient(
-      100deg,
-      transparent 0 2px,
-      color-mix(in oklch, var(--tier-ink) 9%, transparent) 2px 3px
-    ),
-    linear-gradient(160deg, var(--tier-hi) 0%, var(--tier-base) 46%, var(--tier-lo) 100%);
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklch, white 40%, transparent),
-    inset 0 0 0 1px color-mix(in oklch, var(--tier-ink) 14%, transparent),
-    inset 0 -1px 0 color-mix(in oklch, var(--tier-ink) 24%, transparent),
-    0 1px 2px oklch(0% 0 none / 8%);
-  color: var(--tier-mark);
-  font-size: var(--fs-2xs);
-  font-weight: var(--fw-medium);
-  letter-spacing: 0.01em;
-  line-height: 1;
-  /* Engraved: a hairline of light catching the impression's lower edge. */
-  text-shadow: 0 1px 0 color-mix(in oklch, var(--tier-mark-relief) 60%, transparent);
-}
-
-/* Fine grain over the slab — reads as cast metal, kept faint so the brushed
- * gradient still leads. */
-.funding-tier-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 96px 96px;
-  mix-blend-mode: soft-light;
-  opacity: 0.9;
-  pointer-events: none;
-}
-
-/* A specular sheen drifting across the metal every few seconds — the static
- * cousin of the portal card's pointer-tracked reflection. The sweep occupies
- * a fraction of a long cycle so the card is at rest most of the time, and
- * soft-light keeps it at the edge of perception on the light slabs. */
-.funding-tier-card::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 55%;
-  background: linear-gradient(
-    105deg,
-    transparent 0%,
-    color-mix(in oklch, white 60%, transparent) 50%,
-    transparent 100%
-  );
-  transform: translateX(-140%) skewX(-16deg);
-  mix-blend-mode: soft-light;
-  pointer-events: none;
-  animation: funding-tier-sheen 6.5s var(--ease-out) infinite;
-}
-
-@keyframes funding-tier-sheen {
-  0%,
-  62% {
-    transform: translateX(-140%) skewX(-16deg);
-  }
-  86%,
-  100% {
-    transform: translateX(320%) skewX(-16deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .funding-tier-card::after {
-    animation: none;
-    opacity: 0;
-  }
-}
-
-.funding-tier-card[data-tier="free"] {
-  --tier-hi: oklch(96% 0.002 84.59);
-  --tier-base: oklch(90% 0.003 84.59);
-  --tier-lo: oklch(83% 0.004 84.59);
-  --tier-ink: oklch(40% 0.004 84.59);
-  --tier-mark: oklch(66% 0.004 84.59);
-  --tier-mark-relief: oklch(98% 0.002 84.59);
-}
-
-.funding-tier-card[data-tier="pro"] {
-  --tier-hi: oklch(93% 0.005 250);
-  --tier-base: oklch(84% 0.007 250);
-  --tier-lo: oklch(73% 0.009 250);
-  --tier-ink: oklch(32% 0.012 250);
-  --tier-mark: oklch(38% 0.018 250);
-  --tier-mark-relief: oklch(97% 0.004 250);
-}
-
-.funding-tier-card[data-tier="max"] {
-  --tier-hi: oklch(46% 0.02 60);
-  --tier-base: oklch(31% 0.018 60);
-  --tier-lo: oklch(22% 0.015 60);
-  --tier-ink: oklch(10% 0.01 60);
-  --tier-mark: oklch(82% 0.07 75);
-  --tier-mark-relief: oklch(16% 0.012 60);
-}
-
-.funding-notice-body {
-  flex: 1;
-  min-width: 16ch;
-  /* Centers a single line inside the control-height zone the badge and CTA
-   * occupy; a wrapped second line grows downward from there. */
-  margin: calc((var(--control-md) - 1.5 * var(--fs-md)) / 2) 0 0;
-  /* A shade under full foreground: present, but not competing with the
-   * conversation. */
-  color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
-  /* One step below conversation text: this annotates the chat rather than
-   * competing with it, while the CTA remains the clear action at the right.
-   * (Shared with the composer image warning — move them together.) */
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-
-.funding-notice-actions {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: var(--sp-1);
-  margin-left: auto;
-}
-
-.funding-notice-actions .btn {
-  white-space: nowrap;
-}
-
-/* Quiet second path ("Or go Max", reopen links) next to the filled CTA. */
-.funding-notice-actions .btn-ghost {
-  color: var(--muted-foreground);
-}
-
-.funding-notice-actions .btn-ghost:hover {
-  color: var(--foreground);
-}
-
-/* A failed portal launch drops to its own full-width line under the row. */
-.funding-notice-error {
-  flex-basis: 100%;
-  margin: 0;
-  padding: 0 var(--sp-2) var(--sp-1);
-  color: var(--destructive);
-  font-size: var(--fs-sm);
 }
 
 /* Feature 06: the steer input shown above the composer box while Clovy works.
@@ -6776,6 +6345,11 @@ button.agent-user-attachment:hover {
   white-space: nowrap;
 }
 
+/* Brand mark of the active chat engine, ahead of its name. */
+.agent-composer-model-trigger .runtime-logo {
+  overflow: visible;
+}
+
 /* The model is the only flexible value in the compact trigger. Preference and
  * Effort keep their complete one-word labels while a long model name yields. */
 .agent-composer-model-trigger-name {
@@ -6903,9 +6477,57 @@ button.agent-user-attachment:hover {
   color: var(--foreground);
 }
 
+.agent-composer-model-row:disabled,
+.agent-composer-model-row[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.agent-engine-popover {
+  width: 260px;
+  /* Three short sections: when the position hook caps the height, the whole
+   * menu scrolls. Rows never shrink, so a two-line row (name over its reason)
+   * cannot collapse to one control height and spill onto the next row. */
+  overflow-y: auto;
+}
+
+.agent-engine-popover .agent-composer-model-menu {
+  flex: none;
+  overflow: visible;
+}
+
+.agent-engine-popover .agent-composer-model-row {
+  flex: none;
+}
+
+.agent-engine-popover .agent-composer-model-choice-copy {
+  flex: 1 1 auto;
+}
+
+.agent-engine-popover .agent-composer-model-choice-desc {
+  overflow-wrap: anywhere;
+}
+
 .agent-composer-model-row-copy {
   display: grid;
   min-width: 0;
+}
+
+/* The coding CLIs whose state folders the access card names. */
+.agent-cli-access-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-inline-start: auto;
+  color: var(--muted-foreground);
+}
+
+/* RuntimeLogo's decorative wrapper: keeps the mark's box in a text row. */
+.runtime-logo {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
 }
 
 .agent-composer-model-row-logo {
@@ -7282,9 +6904,8 @@ button.agent-user-attachment:hover {
   border-bottom: 0;
 }
 
-/* Billing note under the Auto toggle while a Venice API key is saved: Auto
- * never uses the key, so the credits impact stays visible right where Auto
- * gets switched on. Quiet caption on the same gutter as the toggle label. */
+/* Quiet caption in the model picker (for example, which provider key to add),
+ * on the same gutter as the toggle label. */
 .agent-composer-model-auto-note {
   margin: 0;
   padding: 0 var(--sp-2) var(--sp-1) var(--sp-3);
@@ -7435,7 +7056,7 @@ button.agent-user-attachment:hover {
 }
 
 /* Non-vision model + image attachment: docks above the composer box in the
- * FundingNotice family — the same row anatomy (leading glyph, fs-sm body,
+ * docked-notice family — the same row anatomy (leading glyph, fs-sm body,
  * trailing CTA) on the composer box's own surface recipe (card,
  * ring-in-shadow, --shadow-md) so the pair reads as one floating unit. The
  * warm triangle carries the caution tone; the one-tap switch is the way out
@@ -7445,7 +7066,7 @@ button.agent-user-attachment:hover {
   pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
-  /* First-line anchoring, like the funding notice: the glyph and the CTA pin
+  /* First-line anchoring: the glyph and the CTA pin
    * to the first text line instead of floating centered if the body wraps. */
   align-items: flex-start;
   gap: var(--sp-2) var(--sp-3);
@@ -7461,9 +7082,9 @@ button.agent-user-attachment:hover {
     0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
 }
 
-/* Track the hero box's deliberate 640px cap so their edges align. */
+/* Track the hero box's --content-max cap so their edges align. */
 .agent-composer[data-hero="true"] .agent-composer-image-warning {
-  max-width: 640px;
+  max-width: var(--content-max);
 }
 
 .agent-composer-image-warning-icon {
@@ -7482,8 +7103,7 @@ button.agent-user-attachment:hover {
    * occupy; a wrapped second line grows downward from there. */
   margin: calc((var(--control-md) - 1.5 * var(--fs-md)) / 2) 0 0;
   color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
-  /* One step below conversation text, matching .funding-notice-body — the
-   * two dock on the same surface, so their bodies move together. */
+  /* One step below conversation text. */
   font-size: var(--fs-md);
   line-height: 1.5;
 }
@@ -8233,159 +7853,6 @@ button.agent-user-attachment:hover {
   bottom: calc(var(--control-md) + var(--sp-2));
 }
 
-/* Issue report dialog extras. Chrome, textarea, field labels, and the
- * footer come from the shared dialog-* classes; these cover the category
- * segmented control, attachment rows, and the drag-drop state. */
-.report-dialog-category.segmented {
-  display: flex;
-  width: 100%;
-}
-
-.report-dialog-category.segmented button {
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 0 var(--sp-2);
-}
-
-.report-dialog-category-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.report-dialog-drop {
-  position: relative;
-}
-
-/* Drag-over reads as a real drop zone: a dashed panel washes over the form
- * with a centered instruction (pointer-events: none keeps the drop landing
- * on the wrapper). */
-.report-dialog-drop[data-drop-active="true"]::after {
-  content: "Drop files to attach";
-  position: absolute;
-  inset: calc(-1 * var(--sp-2));
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  border: 1px dashed color-mix(in oklch, var(--muted-foreground) 45%, transparent);
-  border-radius: var(--r-lg);
-  background: color-mix(in oklch, var(--card) 92%, transparent);
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  pointer-events: none;
-}
-
-.report-dialog-file-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.report-dialog-diagnostics {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.4;
-  cursor: pointer;
-}
-
-.report-dialog-diagnostics input {
-  flex: 0 0 auto;
-  margin: var(--sp-1) 0 0;
-  accent-color: var(--brand);
-}
-
-.report-dialog-diagnostics[data-disabled="true"] {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.report-dialog-file {
-  display: grid;
-  /* 18px = the 14px file icon plus optical breathing room (a one-off; icon
-   * sizes are set as component props, not tokens). */
-  grid-template-columns: 18px minmax(0, 1fr) var(--control-sm);
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: var(--control-md);
-  padding: var(--sp-1) var(--sp-1) var(--sp-1) var(--sp-2);
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-}
-
-.report-dialog-file img {
-  width: 18px;
-  height: 18px;
-  border-radius: var(--r-xs);
-  object-fit: cover;
-}
-
-.report-dialog-file-name {
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--fs-sm);
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.report-dialog-file button {
-  display: inline-grid;
-  place-items: center;
-  width: var(--control-sm);
-  height: var(--control-sm);
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-}
-
-.report-dialog-file button:hover {
-  background: color-mix(in oklch, var(--muted) 58%, transparent);
-}
-
-.report-dialog-file button:disabled,
-.report-dialog-add-files:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.report-dialog-error {
-  margin: 0;
-  color: var(--destructive);
-  font-size: var(--fs-sm);
-  line-height: 1.35;
-}
-
-.report-dialog-sent {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-
-/* The footer reads attach-left, send-right (dialog-footer right-aligns). */
-.report-dialog-add-files {
-  margin-right: auto;
-  color: var(--muted-foreground);
-}
-
-.report-dialog-submit-spinner {
-  --spinner-color: currentColor;
-}
-
 /* Mic is the resting affordance — a light ghost button (matches our other ghost
  * icon buttons) that rounds to a circle on hover. */
 .agent-composer-mic {
@@ -8556,6 +8023,7 @@ button.agent-user-attachment:hover {
 
 .agent-hero-title {
   margin: 0;
+  text-align: center;
   font-family: var(--font-serif);
   font-weight: 400;
   font-size: var(--fs-display);
@@ -8563,8 +8031,7 @@ button.agent-user-attachment:hover {
 }
 
 /* In the hero the composer leaves its fixed bottom dock and sits inline at
- * the column's center — taller at rest and a touch narrower than the reading
- * column, so it reads as "start here" rather than "reply here". Relative so
+ * the column's center, with the shared compact editor height. Relative so
  * the sandbox menu can anchor to it; the dock's left/right/bottom offsets
  * must be cleared or relative re-applies them as a visual shift (static
  * ignored them for free). */
@@ -8578,22 +8045,25 @@ button.agent-user-attachment:hover {
   pointer-events: auto;
 }
 
+@media (max-width: 720px) {
+  .agent-workspace[data-hero="true"] .agent-composer-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
 .agent-composer[data-hero="true"] .agent-composer-box {
-  /* Deliberately compact — the hero box is an invitation, not a reading
-   * column, so it does not track --chat-max up on larger displays. */
-  max-width: 640px;
+  /* Match the routine composer's content measure. */
+  max-width: var(--content-max);
   box-shadow: var(--shadow-md), var(--composer-ring);
 }
 
-/* Big-box at rest: same two-row anatomy as the docked composer, just a
- * taller field so it reads as "start here". */
-.agent-composer[data-hero="true"] .agent-composer-editor {
-  min-height: 76px;
+/* Engine/model menus right-align to the hero box's --content-max column. */
+.agent-composer[data-hero="true"] .agent-composer-model-popover {
+  right: max(0px, calc(50% - var(--content-max) / 2));
 }
 
 /* Rotating suggestion chips under the hero composer. Three at a time from the
- * shuffled pool (see AGENT_SHORTCUTS) — three so the row never wraps, since a
- * row-count change mid-rotation would shove the footnote around. The hand
+ * shuffled pool (see AGENT_SHORTCUTS), wrapping when the window is narrow. The hand
  * cycles on an idle timer: a cascading fade out left-to-right (the [data-phase]
  * + --chip-i stagger below), deck advance, then the same wave back in.
  * Descriptions live in the tooltip. */
@@ -8610,6 +8080,7 @@ button.agent-user-attachment:hover {
 
 .agent-hero-chips {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: var(--sp-2);
 }
@@ -8696,12 +8167,6 @@ button.agent-user-attachment:hover {
   color: var(--primary);
 }
 
-.agent-hero-footnote {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-}
-
 /* Sandbox picker — a mode trigger in the hero composer's toolbar, styled
  * like Codex's permission control: a borderless ghost button (icon + current
  * mode + chevron) that opens a small menu of modes. Unrestricted tints the
@@ -8741,11 +8206,11 @@ button.agent-user-attachment:hover {
 }
 
 /* The menu drops below the composer box (a sibling, since the box clips its
- * overflow for the FLIP glide), left-aligned to the box's 640px column. */
+ * overflow for the FLIP glide), left-aligned to the box's --content-max column. */
 .agent-sandbox-menu {
   position: absolute;
   top: calc(100% + var(--sp-1));
-  left: max(0px, calc(50% - 320px));
+  left: max(0px, calc(50% - var(--content-max) / 2));
   z-index: 30;
   width: min(400px, 100%);
   padding: var(--sp-1);
@@ -9464,6 +8929,11 @@ button.agent-user-attachment:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* The sans face's line box is exactly 1em, so the ellipsis clip would shave
+     the accent off capitals like the Á in "Áudio". Grow the clip box without
+     moving the text. */
+  padding-block: 0.2em;
+  margin-block: -0.2em;
 }
 
 .sidebar-nav-shortcut {
@@ -9513,215 +8983,9 @@ button.agent-user-attachment:hover {
   border-top: 0;
 }
 
-.sidebar[data-collapsed="true"] .update-popover {
-  display: none;
-}
-
-/* Out-of-credits chip (FundingChip) — ambient presence for the funding state
- * on views with no composer in sight. Same card anatomy as the sidebar's
- * "Relaunch to update" row (leading visual, title + hint, chevron) so the
- * footer's attention cards read as one family; clicking it expands the card
- * in place to reveal the same FundingNotice. The wrap owns the card chrome
- * so the header row and the reveal share one surface. */
-.funding-chip-wrap {
-  position: relative;
-  overflow: hidden;
-  /* Same hairline as .update-relaunch-card: --popover-border at 10% washes
-   * out on a pure-white card over the sidebar. */
-  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
-  border-radius: var(--r-md);
-  background: var(--card);
-  transition: box-shadow var(--t-slow) var(--ease-spring);
-}
-
-.funding-chip-wrap:hover {
-  box-shadow: var(--shadow-sm);
-}
-
-.funding-chip {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: var(--sp-3);
-  width: 100%;
-  padding: var(--sp-2);
-  border: 0;
-  border-radius: var(--r-md);
-  background: transparent;
-  color: var(--foreground);
-  text-align: left;
-  cursor: pointer;
-}
-
-.funding-chip:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px var(--focus-ring);
-}
-
-.funding-chip-title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: var(--fw-medium);
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Up chevron at rest (the card expands to reveal more), flipping down once
- * open. */
-.funding-chip-arrow {
-  justify-self: end;
-  color: var(--muted-foreground);
-  transition: transform var(--t-slow) var(--ease-spring);
-}
-
-.funding-chip-wrap[data-expanded] .funding-chip-arrow {
-  transform: rotate(180deg);
-}
-
-/* In-place reveal: animatable intrinsic height via grid-template-rows
- * 0fr -> 1fr. The inner stays mounted while collapsed so both directions
- * animate; visibility flips after the collapse finishes (and `inert` on the
- * container keeps hidden content out of focus order and readers). */
-.funding-chip-reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows var(--t-slow) var(--ease-spring);
-}
-
-.funding-chip-wrap[data-expanded] .funding-chip-reveal {
-  grid-template-rows: 1fr;
-}
-
-.funding-chip-reveal-inner {
-  overflow: hidden;
-  min-height: 0;
-  visibility: hidden;
-  transition: visibility 0s var(--t-slow);
-}
-
-.funding-chip-wrap[data-expanded] .funding-chip-reveal-inner {
-  visibility: visible;
-  transition: visibility 0s;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .funding-chip-reveal,
-  .funding-chip-reveal-inner,
-  .funding-chip-arrow {
-    transition: none;
-  }
-}
-
-/* Inside the reveal the notice is body content of the chip's own card: no
- * chrome, no entrance animation, and no second tier card — the header row
- * already shows it. */
-.funding-chip-reveal .funding-notice {
-  margin: 0;
-  padding: var(--sp-1) var(--sp-2) var(--sp-2);
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  animation: none;
-}
-
-.funding-chip-reveal .funding-notice-icon {
-  display: none;
-}
-
-/* Reveal typography: the chip's title row above already carries the
- * emphasis, so the body drops to support color; no first-line margin here —
- * the icon slot is hidden and the actions sit on their own row below. */
-.funding-chip-reveal .funding-notice-body {
-  margin-top: 0;
-  color: var(--muted-foreground);
-}
-
-/* Actions own their row in the narrow column: full width, buttons splitting
- * the space evenly (one CTA fills it, a pair splits 50/50). */
-.funding-chip-reveal .funding-notice-actions {
-  display: flex;
-  flex: 1 1 100%;
-  margin-left: 0;
-}
-
-.funding-chip-reveal .funding-notice-actions .btn {
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-.sidebar[data-collapsed="true"] .funding-chip-wrap {
-  display: none;
-}
-
-/* Sidebar identity — the user's name doubles as the settings entry point.
- * Clicking it opens a small popover above the footer. */
+/* Sidebar footer row — the settings entry point. */
 .sidebar-identity-wrap {
   position: relative;
-}
-
-/* A tiny, theme-aware avatar in place of the generic account glyph. Layered
- * gradients create the cloudy depth without a canvas or render loop. */
-.account-avatar {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  border-radius: var(--r-pill);
-  background:
-    radial-gradient(
-      circle at var(--avatar-cloud-x, 24%) var(--avatar-cloud-y, 18%),
-      color-mix(in oklch, var(--brand-bright) 82%, transparent) 0 12%,
-      transparent 48%
-    ),
-    radial-gradient(
-      circle at calc(100% - var(--avatar-cloud-x, 24%)) calc(100% - var(--avatar-cloud-y, 18%)),
-      color-mix(in oklch, var(--brand) 72%, transparent) 0 18%,
-      transparent 54%
-    ),
-    linear-gradient(
-      var(--avatar-cloud-angle, 145deg),
-      color-mix(in oklch, var(--brand-bright) 28%, var(--brand)),
-      color-mix(in oklch, var(--brand) var(--avatar-cloud-strength, 54%), var(--sidebar))
-    );
-  box-shadow:
-    inset 0 0 0 var(--border-width) color-mix(in oklch, var(--on-solid) 24%, transparent),
-    inset 0 calc(-1 * var(--sp-1)) var(--sp-3)
-    color-mix(in oklch, var(--foreground) 20%, transparent);
-}
-
-.account-avatar::before {
-  position: absolute;
-  inset: -45%;
-  z-index: 0;
-  content: "";
-  background:
-    radial-gradient(
-      circle at var(--avatar-cloud-x, 31%) 42%,
-      color-mix(in oklch, var(--on-solid) 78%, transparent) 0 10%,
-      transparent 30%
-    ),
-    radial-gradient(
-      circle at var(--avatar-cloud-y, 55%) 53%,
-      color-mix(in oklch, var(--brand-bright) 86%, transparent) 0 14%,
-      transparent 36%
-    ),
-    radial-gradient(
-      circle at calc(100% - var(--avatar-cloud-x, 28%)) 38%,
-      color-mix(in oklch, var(--on-solid) 52%, transparent) 0 9%,
-      transparent 28%
-    );
-  filter: blur(var(--sp-1));
-  opacity: 0.58;
-  transform: translate3d(-4%, 3%, 0) rotate(var(--avatar-cloud-angle, -9deg));
-}
-
-.account-avatar-preview {
-  width: var(--control-lg);
-  height: var(--control-lg);
-  flex: 0 0 auto;
 }
 
 .sidebar-identity .sidebar-nav-label {
@@ -9762,22 +9026,6 @@ button.agent-user-attachment:hover {
 }
 
 .sidebar-identity-menu button > svg {
-  color: var(--muted-foreground);
-}
-
-/* The invite action carries the brand terracotta so it pops against the
- * otherwise-muted menu icons. */
-.sidebar-identity-menu button.sidebar-invite-item > svg {
-  color: var(--brand);
-}
-
-/* Report shortcuts stay muted in this menu (the category tints live on the
- * chips and the composer "+" popover); the icon is nested in this span so the
- * muted-svg rule above still applies to it. */
-.sidebar-report-icon {
-  display: inline-grid;
-  place-items: center;
-  flex: 0 0 auto;
   color: var(--muted-foreground);
 }
 
@@ -10069,15 +9317,6 @@ button.agent-user-attachment:hover {
   color: inherit;
 }
 
-.note-row-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  color: var(--muted-foreground);
-}
-
 .note-row-title {
   display: flex;
   align-items: center;
@@ -10097,20 +9336,6 @@ button.agent-user-attachment:hover {
 
 .note-row[data-selected="true"] .note-row-title {
   font-weight: 400;
-}
-
-.note-row-recovery-dot {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-pill);
-  background: var(--warm-strong);
-}
-
-.sidebar[data-collapsed="true"] .note-row-recovery-dot {
-  position: absolute;
-  top: 4px;
-  right: 4px;
 }
 
 .note-row-menu {
@@ -11526,6 +10751,94 @@ button.agent-user-attachment:hover {
   min-height: 0;
 }
 
+.recording-assist,
+.recording-assist-preview {
+  display: grid;
+  gap: var(--sp-3);
+  margin-block-end: var(--sp-5);
+  padding-block: var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.recording-assist-actions,
+.recording-assist-mark-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: var(--sp-2);
+}
+
+.recording-assist-actions {
+  gap: var(--sp-3);
+}
+
+.recording-assist-group {
+  display: grid;
+  justify-items: start;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.recording-assist .primary-action:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.recording-assist .primary-action:disabled:hover {
+  border-color: var(--border);
+  background: var(--card);
+}
+
+.recording-assist-hint,
+.recording-assist-question,
+.recording-assist-preview h2 {
+  margin: 0;
+}
+
+.recording-assist-hint {
+  color: var(--body-copy);
+  font-size: var(--fs-sm);
+  max-inline-size: 35ch;
+}
+
+.recording-assist-question {
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+
+.recording-assist-preview h2 {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.recording-assist-marks {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-md);
+}
+
+.recording-assist-marks li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+
+.recording-assist-marks time {
+  color: var(--body-copy);
+}
+
+@media print {
+  .recording-assist-actions,
+  .recording-assist-preview {
+    display: none;
+  }
+}
+
 .note-body,
 .transcript-view {
   width: 100%;
@@ -12279,7 +11592,7 @@ button.agent-user-attachment:hover {
 
 /* Scoped to .record-dock to outrank the later, equal-specificity base
  * .inline-notice rule, which would otherwise win on background/border/padding. */
-/* Same surface recipe as the chat funding notice (.funding-notice): card,
+/* Same surface recipe as the notices docked on the composer: card,
  * ring-in-shadow, --shadow-md, --r-xl — notices docked on the composer and on
  * the recorder read as one family. Move them together. */
 .record-dock .record-consent-note-surface {
@@ -12294,7 +11607,7 @@ button.agent-user-attachment:hover {
     0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
 }
 
-/* The Dismiss button hugs the corner radius like the funding notice's CTA. */
+/* The Dismiss button hugs the corner radius. */
 .record-dock .record-consent-note-surface-actions {
   padding-right: var(--sp-2);
 }
@@ -12314,8 +11627,7 @@ button.agent-user-attachment:hover {
   color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
 }
 
-/* Quiet secondary action, recolored like the funding notice's ghost buttons
- * ("Or go Max", reopen links). */
+/* Quiet secondary action, recolored as a muted ghost button. */
 .record-dock .record-consent-note-surface .inline-notice-actions .btn-ghost {
   color: var(--muted-foreground);
 }
@@ -12459,16 +11771,13 @@ button.agent-user-attachment:hover {
   background: color-mix(in oklch, var(--warm-strong) 12%, transparent);
 }
 
-/* Mic-blocked and needs-credits notices — persistent inline notices that sit
- * above the record pill. They occupy the same footer slot the FundingNotice
- * renders into, so they wear the same chrome (card, ring-in-shadow,
- * --shadow-md, --r-xl, content-max column) — see .funding-notice; move them
- * together. Scoped to .editor-footer to outrank the later, equal-specificity
- * base .inline-notice rule. */
+/* Mic-blocked notice — a persistent inline notice that sits above the record
+ * pill. It wears the docked-notice chrome (card, ring-in-shadow, --shadow-md,
+ * --r-xl, content-max column). Scoped to .editor-footer to outrank the
+ * later, equal-specificity base .inline-notice rule. */
 /* Inline notice layout slot for the editor footer — forces the notice
  * onto its own row so the recorder shell (if rendered) sits below. */
-.editor-footer .record-mic-blocked,
-.editor-footer .record-funding-blocked {
+.editor-footer .record-mic-blocked {
   flex: 0 0 100%;
   width: 100%;
   max-width: var(--content-max);
@@ -12483,19 +11792,8 @@ button.agent-user-attachment:hover {
     0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
 }
 
-.editor-footer .record-mic-blocked .inline-notice-body,
-.editor-footer .record-funding-blocked .inline-notice-body {
+.editor-footer .record-mic-blocked .inline-notice-body {
   color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
-}
-
-/* The out-of-credits notice in the editor footer sits on its own row above
- * the record pill and matches the note reading column (.note-editor's
- * --content-max), not the full footer span — the same surface it presents
- * above the chat composers, aligned to the text it interrupts. */
-.editor-footer .funding-notice {
-  flex: 0 0 100%;
-  max-width: var(--content-max);
-  margin: 0 auto;
 }
 
 /* Blur + fade + slide reveal. Row resolves out of a soft blur as the
@@ -13022,8 +12320,8 @@ button.agent-user-attachment:hover {
   flex: 0 0 auto;
 }
 
-/* Positive sibling of .error-banner for transient good news (billing
- * feedback like "You are on Max now"). Same geometry, success palette. */
+/* Positive sibling of .error-banner for transient good news. Same geometry,
+ * success palette. */
 .notice-banner {
   margin: 0 0 var(--sp-5);
   padding: var(--sp-3) var(--sp-4);
@@ -13095,43 +12393,8 @@ button.agent-user-attachment:hover {
   background: transparent;
 }
 
-/* Out-of-credits card in the transcript: no title, just the tone-colored
- * wallet glyph flowing inline with one sentence. The base notice lays its
- * pieces out as wrapping flex items, so long text drops wholesale onto its
- * own line the moment it can't fit — inline flow wraps mid-sentence like a
- * paragraph instead. */
-/* Single-line body + action: vertically center the icon/content in the row
- * rather than top-aligning against a one-line message. The base inline-notice
- * rule (align-items flex-start) sits LATER in this flat stylesheet, so at equal
- * specificity it would win and re-impose flex-start; pairing the base class
- * here bumps specificity (two classes) so the center override holds. */
-.inline-notice.agent-credits-notice {
-  align-items: center;
-}
-
-.agent-credits-notice .inline-notice-message {
-  display: block;
-}
-
-.agent-credits-notice .inline-notice-eyebrow {
-  margin-right: var(--sp-2);
-  /* Icon-only inline-flex has no text baseline — WebKit sits it too high
-   * against the adjacent text without this nudge. */
-  vertical-align: -2px;
-}
-
-.agent-credits-notice .inline-notice-body {
-  display: inline;
-}
-
-/* The stopped-turn card leads with the tier mini card, which is taller than
- * the base icon slot's one-text-line height. */
-.agent-credits-notice .inline-notice-icon {
-  height: auto;
-}
-
 /* The context-overflow notice (JUN-169) carries a longer sentence than the
- * credits card, so it needs the same inline flow: warning glyph + text
+ * base notice, so it needs an inline flow: warning glyph + text
  * wrapping like a paragraph instead of the base flex layout dropping the whole
  * sentence onto its own line. */
 .agent-context-overflow-notice .inline-notice-message {
@@ -13235,7 +12498,7 @@ button.agent-user-attachment:hover {
 }
 
 /* NoteRecoveryPrompt adds this class only after measuring one rendered body
- * line. Wrapped and funding-blocked prompts retain the shared first-line and
+ * line. Wrapped prompts retain the shared first-line and
  * top alignment above. */
 .inline-notice.note-recovery-prompt-single-line {
   align-items: center;
@@ -13261,8 +12524,7 @@ button.agent-user-attachment:hover {
 }
 
 .note-failure-message {
-  /* Fills the row so the leading tier card (balance failures) hugs left and
-   * the actions stay pinned right. */
+  /* Fills the row so the actions stay pinned right. */
   flex: 1;
   margin: 0;
   min-width: 0;
@@ -13810,6 +13072,45 @@ button.agent-user-attachment:hover {
   letter-spacing: 0;
 }
 
+/* A row title led by the brand mark of the runtime it names. */
+.settings-row-title-with-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-mcp-client {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-mcp-snippet {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.settings-mcp-snippet-code {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--muted);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.settings-mcp-snippet-copy {
+  flex-shrink: 0;
+  gap: var(--sp-1);
+}
+
 .settings-row-description {
   margin: 0;
   color: var(--muted-foreground);
@@ -14138,16 +13439,6 @@ button.agent-user-attachment:hover {
   }
 }
 
-.settings-row-stack {
-  align-items: start;
-}
-
-.settings-local-model-fields {
-  display: grid;
-  width: min(420px, 46vw);
-  gap: var(--sp-3);
-}
-
 .settings-field {
   display: grid;
   gap: var(--sp-1);
@@ -14191,36 +13482,6 @@ button.agent-user-attachment:hover {
   color: color-mix(in oklch, var(--warm-strong) 82%, var(--foreground));
   font-size: var(--fs-sm);
   line-height: 1.4;
-}
-
-.settings-local-model-status {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.4;
-}
-
-.settings-local-model-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-
-.settings-local-model-confirm {
-  display: grid;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
-  border: 1px solid color-mix(in oklch, var(--warm-strong) 40%, var(--border-subtle));
-  border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--warm-strong) 10%, transparent);
-}
-
-.settings-local-model-confirm .settings-row-error {
-  color: color-mix(in oklch, var(--warm-strong) 82%, var(--foreground));
-}
-
-.settings-local-model-confirm .btn {
-  justify-self: start;
 }
 
 .settings-row-mic-test {
@@ -14311,129 +13572,12 @@ button.agent-user-attachment:hover {
   margin-top: var(--sp-3);
 }
 
-/* Billing card — plan identity stacked over a labeled usage meter,
- * Cursor-style: quiet plan header, prominent percentage, full-width track. */
-.billing-card {
-  display: grid;
-  gap: var(--sp-5);
-}
-
-.billing-plan {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-}
-
-.billing-plan-info {
-  display: grid;
-  gap: var(--sp-px);
-  min-width: 0;
-}
-
-.billing-plan-name {
-  margin: 0;
-  color: var(--foreground);
-  font-size: var(--fs-lg);
-  font-weight: 400;
-  letter-spacing: 0;
-}
-
-.billing-plan-detail {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-
-.billing-plan-control {
-  display: inline-flex;
-  flex: none;
-  gap: var(--sp-2);
-}
-
-.billing-usage {
-  display: grid;
-  gap: var(--sp-2);
-  padding-top: var(--sp-5);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.billing-usage-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-}
-
-.billing-usage-label {
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-}
-
-.billing-usage-right {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-.billing-usage-value {
-  color: var(--foreground);
-  font-size: var(--fs-xl);
-  font-weight: var(--fw-medium);
-  letter-spacing: 0;
-}
-
-.usage-remaining-progress {
-  width: 100%;
-  height: 8px;
-  margin: 0;
-  overflow: hidden;
-  border-radius: var(--r-pill);
-  background: color-mix(in oklch, var(--muted) 72%, transparent);
-}
-
-.usage-remaining-progress-fill {
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  background: color-mix(in oklch, var(--success) 76%, var(--foreground));
-  transform-origin: left center;
-  transition: transform 160ms ease-out;
-}
-
-/* Near-empty allowance: warm the fill so green never reads as "plenty left". */
-.usage-remaining-progress.is-low .usage-remaining-progress-fill {
-  background: color-mix(in oklch, var(--destructive) 80%, var(--foreground));
-}
-
-/* Dev-only __billingDemo("all") gallery: each plan variant stacked under a
- * monospace caption so states are easy to compare side by side. */
-.billing-demo-gallery {
-  display: grid;
-  gap: var(--sp-5);
-}
-
-.billing-demo-variant {
-  display: grid;
-  gap: var(--sp-2);
-}
-
-.billing-demo-label {
-  margin: 0;
-  padding-left: var(--sp-1);
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-}
-
 .balance-refresh-icon {
   transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .balance-refresh-icon,
-  .usage-remaining-progress-fill {
+  .balance-refresh-icon {
     transition: none;
   }
 }
@@ -14505,9 +13649,7 @@ button.agent-user-attachment:hover {
 }
 
 .settings-model-row .settings-row-description,
-.settings-row-venice-key .settings-row-description,
-.settings-local-model-toggle-row .settings-row-description,
-.settings-local-model-fields-row .settings-row-description {
+.settings-row-provider-key .settings-row-description {
   display: block;
   overflow: visible;
   white-space: normal;
@@ -14539,14 +13681,13 @@ button.agent-user-attachment:hover {
   height: var(--control-md);
 }
 
-.settings-row-venice-key {
+.settings-row-provider-key {
   align-items: start;
 }
 
-.settings-row-venice-key .settings-row-info {
+.settings-row-provider-key .settings-row-info {
   max-width: 58ch;
 }
-
 .settings-row-substatus {
   color: color-mix(in oklch, var(--success) 70%, var(--foreground));
 }
@@ -19337,7 +18478,7 @@ button.memory-project:hover {
   max-width: 100%;
 }
 
-/* Hover callout card (HoverTip) — the Venice-style explainer behind privacy
+/* Hover callout card (HoverTip) — the explainer behind privacy
  * pills. Body-portaled at a fixed position, so it must sit above dialogs
  * (backdrop is z-index 112) and above the model picker popover (130), which
  * hosts a privacy-ghost tip inside its own rows. As the topmost transient
@@ -22677,6 +21818,13 @@ button.memory-project:hover {
   color: var(--muted-foreground);
 }
 
+.dictation-history-icon .app-icon-fallback,
+.transcript-dialog .dialog-leading .app-icon-fallback {
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+
 .dictation-history-body {
   display: flex;
   flex-direction: column;
@@ -23413,150 +22561,8 @@ button.memory-project:hover {
   font-size: var(--fs-md);
 }
 
-/* Referral dialog — a 50/50 split. The left is a terracotta hero (brand
- * gradient + the app's fractal-noise grain, the same recipe as
- * .dictation-hint) that carries the offer; the right is the borderless
- * action panel with the invite link and stats. The shared Dialog chrome is
- * suppressed via this class hook so the headline can live in the hero. */
-.referral-dialog {
-  padding: 0;
-  gap: 0;
-  overflow: hidden;
-}
-
-/* Float just the close button into the top-right corner. The accessible
- * title stays in the DOM (for aria-labelledby) but is visually hidden. */
-.referral-dialog .dialog-header {
-  position: absolute;
-  top: var(--sp-3);
-  right: var(--sp-3);
-  z-index: 3;
-  gap: 0;
-}
-
-.referral-dialog .dialog-leading {
-  display: none;
-}
-
-.referral-dialog .dialog-title {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-.referral-split {
-  display: grid;
-  /* minmax(0, …) lets columns shrink below content width so a long invite
-   * link ellipsizes instead of forcing the panel wider (preserves #319). */
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  min-height: 340px;
-}
-
-.referral-hero {
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--sp-4);
-  padding: var(--sp-7);
-  color: var(--on-solid);
-  /* Derived entirely from the fixed --brand terracotta (not --warm-* which
-   * flip lightness in dark mode) so the hero stays a rich, white-text-safe
-   * terracotta in both themes: a soft highlight top-left, brand mid, deep
-   * terracotta bottom-right. */
-  background:
-    radial-gradient(
-      120% 120% at 12% 8%,
-      color-mix(in oklch, var(--brand) 82%, white),
-      transparent 55%
-    ),
-    linear-gradient(152deg, var(--brand) 0%, color-mix(in oklch, var(--brand) 68%, black) 100%);
-}
-
-/* The app's signature grain (lifted from .dictation-hint) over the warm
- * gradient so the panel never reads as a flat fill. */
-.referral-hero::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.5;
-  mix-blend-mode: soft-light;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-.referral-hero > * {
-  position: relative;
-  z-index: 1;
-}
-
-/* Clovy brandmark, pinned to the top-left corner of the hero. Absolute so it
- * floats above the centered offer copy; white via currentColor against the
- * terracotta. Placed after the `> *` rule so this position wins. */
-.referral-hero-logo {
-  position: absolute;
-  top: var(--sp-6);
-  left: var(--sp-7);
-  display: inline-flex;
-  color: var(--on-solid);
-  opacity: 0.92;
-}
-
-.referral-hero-logo svg {
-  display: block;
-  width: 28px;
-  height: auto;
-}
-
-.referral-hero-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  width: max-content;
-  padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--r-sm);
-  background: color-mix(in oklch, var(--on-solid) 20%, transparent);
-  font-size: var(--fs-sm);
-  font-weight: 400;
-}
-
-.referral-hero-title {
-  margin: 0;
-  font-size: var(--fs-2xl);
-  font-weight: var(--fw-medium);
-  line-height: 1.2;
-  letter-spacing: -0.01em;
-}
-
-.referral-hero-copy {
-  margin: 0;
-  font-size: var(--fs-md);
-  line-height: 1.5;
-  color: color-mix(in oklch, var(--on-solid) 86%, transparent);
-}
-
-.referral-panel {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--sp-4);
-  padding: var(--sp-7);
-}
-
-.referral-panel-title {
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 400;
-}
-
-/* Shared borderless URL field with an inset Copy action. Referral and private
- * sharing use the same component so typography and feedback cannot drift. */
+/* Shared borderless URL field with an inset Copy action, used by private
+ * sharing. */
 .copy-link-field {
   display: flex;
   align-items: center;
@@ -23666,272 +22672,6 @@ button.memory-project:hover {
   }
 }
 
-.referral-copy-error,
-.referral-progress-note {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-}
-
-/* Borderless stat — a plain figure, no card chrome. */
-.referral-stats > div {
-  min-width: 0;
-}
-
-.referral-stat-value,
-.referral-stat-label {
-  display: block;
-}
-
-.referral-stat-value {
-  color: var(--foreground);
-  font-size: var(--fs-2xl);
-  font-weight: var(--fw-medium);
-}
-
-.referral-stat-label {
-  margin-top: var(--sp-1);
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-}
-
-/* Right-panel states (loading / unavailable / error) stay borderless. */
-.referral-dialog-status {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-}
-
-.referral-dialog-status p {
-  margin: 0;
-}
-
-.referral-error-card {
-  display: grid;
-  justify-items: start;
-  gap: var(--sp-3);
-}
-
-.referral-error-title {
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 400;
-}
-
-.referral-error-card p {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-}
-
-/* Referral delight nudge --------------------------------------------
-   A rare invite card parked bottom-left of the window at delight moments
-   (5th meeting note, first agent completion, 25th dictation). Fixed like
-   the connector approvals tray but in the opposite corner, so the two
-   never collide; under the dialog layer. Visually a small cousin of the
-   referral dialog above — the same terracotta hero recipe (gradient,
-   grain, Clovy mark) — so the click-through feels continuous. */
-.referral-nudge {
-  position: fixed;
-  /* Window bottom-left, on the main-panel card's equal --sp-3 inset so the
-     two share a bottom line. The compact overlay shadow preserves that
-     breathing room instead of visually filling it with a long downward blur.
-     Keep this a static inset: anchoring to the animated --sidebar-w-current
-     made the compositor move a blend-mode stack continuously, which
-     read as noise flashing on the hero. It overlaps the sidebar footer while
-     parked; Escape and the X both clear it. */
-  left: var(--sp-3);
-  bottom: var(--sp-3);
-  z-index: 60;
-  width: min(300px, calc(100vw - 2 * var(--sp-3)));
-  overflow: hidden;
-  border-radius: var(--r-xl);
-  background: var(--card);
-  color: var(--foreground);
-  box-shadow:
-    var(--shadow-hud),
-    0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
-  animation: referral-nudge-enter var(--t-med) var(--ease-out) both;
-  transition:
-    opacity var(--t-med) var(--ease-out),
-    transform var(--t-med) var(--ease-out);
-}
-
-/* With the sidebar collapsed, keep a small reveal between the nudge and the
-   main panel without changing the card's uniform r-xl corner treatment. */
-.app-shell[data-sidebar="collapsed"] .referral-nudge {
-  left: var(--sp-5);
-  bottom: var(--sp-5);
-  width: min(300px, calc(100vw - 2 * var(--sp-5)));
-}
-
-/* Dismissing: drop the (filled) enter animation so the exit transition can
-   drive the same properties, then fade back down. */
-.referral-nudge[data-leaving] {
-  animation: none;
-  opacity: 0;
-  transform: translateY(4px);
-}
-
-@keyframes referral-nudge-enter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .referral-nudge {
-    animation-name: referral-nudge-enter-reduced;
-  }
-
-  .referral-nudge[data-leaving] {
-    transform: none;
-  }
-}
-
-@keyframes referral-nudge-enter-reduced {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-/* The dialog hero's gradient recipe, shrunk to a banner that carries the
-   title. Inset and concentric with the card (r-xl minus the --sp-2 frame
-   = r-md), the steer queue's 6px-frame recipe. */
-.referral-nudge-hero {
-  position: relative;
-  overflow: hidden;
-  /* Contain the grain's soft-light blend to this hero's own stacking context
-     so the compositor never reads back through the card/canvas layers. */
-  isolation: isolate;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-end;
-  gap: var(--sp-2);
-  min-height: 128px;
-  margin: var(--sp-2) var(--sp-2) 0;
-  padding: var(--sp-4);
-  border-radius: var(--r-md);
-  color: var(--on-solid);
-  background:
-    radial-gradient(
-      120% 120% at 12% 8%,
-      color-mix(in oklch, var(--brand) 82%, white),
-      transparent 55%
-    ),
-    linear-gradient(152deg, var(--brand) 0%, color-mix(in oklch, var(--brand) 68%, black) 100%);
-}
-
-/* The signature grain, as on the dialog hero. */
-.referral-nudge-hero::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.5;
-  mix-blend-mode: soft-light;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* The flat gradient Clovy mark at gift scale, centered above the title. */
-.referral-nudge-brand-mark {
-  /* Above the grain ::after so the soft-light texture does not dull the mark. */
-  position: relative;
-  z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
-  width: 96px;
-  height: 96px;
-  line-height: 0;
-}
-
-.referral-nudge-brand-mark svg {
-  display: block;
-  width: 48px;
-  height: auto;
-}
-
-/* The per-moment title lives in the hero (the dialog hero's title, one
-   type step down for the card's width). */
-.referral-nudge-title {
-  position: relative;
-  z-index: 1;
-  margin: 0;
-  font-size: var(--fs-xl);
-  font-weight: var(--fw-medium);
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-}
-
-/* The system dismiss (.dialog-close's geometry and ghost hover), recolored
-   for the terracotta it floats over; its focus ring is on-solid rather
-   than the neutral --ring-focus for the same reason. */
-.referral-nudge-dismiss {
-  position: absolute;
-  top: var(--sp-4);
-  right: var(--sp-4);
-  z-index: 1;
-  display: inline-grid;
-  place-items: center;
-  width: var(--control-md);
-  height: var(--control-md);
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: color-mix(in oklch, var(--on-solid) 85%, transparent);
-  cursor: pointer;
-  transition:
-    background-color var(--t-fast) var(--ease-out),
-    color var(--t-fast) var(--ease-out);
-}
-
-.referral-nudge-dismiss:hover {
-  background: color-mix(in oklch, var(--on-solid) 18%, transparent);
-  color: var(--on-solid);
-}
-
-.referral-nudge-dismiss:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--on-solid) 80%, transparent);
-  outline-offset: 2px;
-}
-
-/* Body and footer share the hero text's left edge (--sp-2 frame + --sp-4
-   hero padding). */
-.referral-nudge-body {
-  padding: var(--sp-4) var(--sp-6) 0;
-}
-
-/* Same size as .funding-notice-body — the other floating card in this
-   region — so the two surfaces read as one family. */
-.referral-nudge-copy {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-
-/* The action is the stock solid primary button (.primary-action
-   .primary-solid), so only the footer's frame lives here. */
-.referral-nudge-footer {
-  display: flex;
-  justify-content: flex-start;
-  padding: var(--sp-4) var(--sp-6) var(--sp-5);
-}
-
 /* Generous padding (+ negative outer margin) so the inputs' focus
  * rings (3px outer box-shadow) can paint without being clipped by the
  * dialog-card or by overflow on inner scrollers. */
@@ -24006,6 +22746,13 @@ button.memory-project:hover {
   line-height: 1.45;
 }
 
+.recording-assist-mark-form .dialog-input {
+  flex: 1 1 12ch;
+  min-width: 0;
+  max-width: 20ch;
+  padding-block: 0;
+}
+
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -24026,307 +22773,6 @@ button.memory-project:hover {
   height: var(--sp-4);
   margin: 0;
   accent-color: var(--primary);
-}
-
-.update-popover {
-  width: 100%;
-  min-width: 0;
-  color: var(--foreground);
-  -webkit-app-region: no-drag;
-  animation: update-popover-in var(--t-med) var(--ease-spring) both;
-}
-
-.update-relaunch-card {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 16px;
-  align-items: start;
-  gap: var(--sp-3);
-  width: 100%;
-  padding: var(--sp-2);
-  /* Same transparent-over-foreground hairline as --popover-border, just a
-   * touch stronger (10% washes out on a pure-white card over the sidebar). */
-  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
-  border-radius: var(--r-md);
-  background: var(--card);
-  color: var(--foreground);
-  text-align: left;
-  cursor: pointer;
-  transition: box-shadow var(--t-slow) var(--ease-spring);
-}
-
-.update-relaunch-card:hover:not(:disabled) {
-  box-shadow: var(--shadow-sm);
-}
-
-.update-relaunch-card:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--focus-ring);
-}
-
-.update-relaunch-card:disabled {
-  cursor: default;
-}
-
-/* Bare Clovy mark, no tile: faint at rest, warms to brand on hover. The fixed
- * mark-sized box mirrors .update-status-mark, so swapping to the dot spinner
- * never reflows the copy; the spinner keeps its darker --spinner-neutral. */
-.update-relaunch-mark {
-  display: inline-grid;
-  place-items: center;
-  width: var(--sp-4);
-  height: var(--sp-4);
-  margin-top: 2px;
-  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
-  transition: color var(--t-slow) var(--ease-spring);
-}
-
-.update-relaunch-mark svg {
-  width: var(--sp-4);
-  height: auto;
-}
-
-.update-relaunch-card:hover:not(:disabled) .update-relaunch-mark {
-  color: var(--brand);
-}
-
-.update-relaunch-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.update-relaunch-title {
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.update-relaunch-copy > span:last-child {
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.update-relaunch-copy > .update-relaunch-status {
-  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
-}
-
-.update-relaunch-arrow {
-  align-self: center;
-  justify-self: end;
-  color: var(--muted-foreground);
-  transition: transform var(--t-slow) var(--ease-spring);
-}
-
-.update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
-  transform: translateX(3px);
-}
-
-/* Same card chrome as .update-relaunch-card, minus the hover shadow: this is a
- * non-interactive status card (only the close button acts). Left padding sits
- * a step wider so the mark/spinner slot doesn't hug the card edge. */
-.update-status-card {
-  display: grid;
-  gap: var(--sp-2);
-  width: 100%;
-  padding: var(--sp-2);
-  padding-left: var(--sp-3);
-  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
-  border-radius: var(--r-md);
-  background: var(--card);
-  color: var(--foreground);
-}
-
-.update-status-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--sp-3);
-}
-
-/* The fixed mark-sized box gives the busy dot spinner and settled Clovy mark
- * the same footprint, so swapping them never reflows the status text. The
- * static mark is muted; the spinner keeps its darker --spinner-neutral. */
-.update-status-mark {
-  display: inline-grid;
-  place-items: center;
-  width: var(--sp-4);
-  height: var(--sp-4);
-  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
-}
-
-.update-status-mark svg {
-  width: var(--sp-4);
-  height: auto;
-}
-
-.update-status-text {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Failed checks/downloads tint the text destructive, like .update-relaunch-status;
- * the mark stays muted. */
-.update-status-text-failed {
-  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
-}
-
-.update-status-close {
-  display: inline-grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-}
-
-.update-status-close:hover {
-  background: var(--surface-subtle);
-  color: var(--foreground);
-}
-
-.update-progress {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--sp-3);
-  /* Start the track under the copy column (mark slot + row gap) so it
-   * lines up with the status text rather than the mark. */
-  padding-left: calc(var(--sp-4) + var(--sp-3));
-}
-
-.update-progress-track {
-  height: 5px;
-  overflow: hidden;
-  border-radius: var(--r-pill);
-  background: var(--surface-subtle);
-}
-
-.update-progress-fill {
-  height: 100%;
-  width: 100%;
-  border-radius: inherit;
-  /* Lighter than --foreground so the bar reads quiet; --muted-foreground stays
-   * clearly ahead of the --surface-subtle track in both themes. */
-  background: var(--muted-foreground);
-  clip-path: inset(0 var(--update-progress-clip, 100%) 0 0 round var(--r-pill));
-  transition: clip-path var(--t-fast) var(--ease-out);
-}
-
-.update-progress-percent {
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-  line-height: 1;
-}
-
-/* Number pop-in for the download percent: each digit is keyed by
- * position+character in React, so only a digit that actually changed remounts
- * and replays the rise — the ones digit ticks, the tens digit only rolls over.
- * Vars are scoped here (flat global stylesheet), tuned short for a 1%-per-tick
- * counter but kept tunable. */
-.update-digit-group {
-  --update-digit-dur: calc(var(--t-med) + var(--t-med));
-  --update-digit-distance: var(--sp-3);
-  --update-digit-blur: var(--sp-px);
-  --update-digit-ease: var(--ease-pop);
-
-  display: inline-flex;
-  align-items: baseline;
-}
-
-.update-digit {
-  display: inline-block;
-  animation: update-digit-pop-in var(--update-digit-dur) var(--update-digit-ease) both;
-  will-change: transform, opacity, filter;
-}
-
-@keyframes update-digit-pop-in {
-  from {
-    transform: translateY(var(--update-digit-distance));
-    opacity: 0;
-    filter: blur(var(--update-digit-blur));
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-    filter: blur(0);
-  }
-}
-
-@keyframes update-popover-in {
-  from {
-    opacity: 0;
-    transform: translateY(var(--sp-2)) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-/* Timed auto-dismiss of the up-to-date confirmation: mirror the entrance so
- * the card fades and slides back down instead of blinking out. The status
- * clears just after this finishes (UP_TO_DATE_EXIT_MS in App.tsx). Manual
- * close-button dismisses stay instant. */
-.update-popover[data-leaving="true"] {
-  animation: update-popover-out var(--t-med) var(--ease-out) both;
-}
-
-@keyframes update-popover-out {
-  from {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(var(--sp-2)) scale(0.98);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* The attribute selector outranks the bare class, so the exit needs its own
-   * entry here: the timed hide becomes an instant disappearance. */
-  .update-popover,
-  .update-popover[data-leaving="true"] {
-    animation: none;
-  }
-
-  .update-popover[data-leaving="true"] {
-    visibility: hidden;
-  }
-
-  .update-digit {
-    animation: none;
-  }
-
-  .update-relaunch-card {
-    transition: none;
-  }
-
-  .update-relaunch-arrow {
-    transition: none;
-  }
-
-  .update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
-    transform: none;
-  }
 }
 
 @keyframes dialog-backdrop-in {
@@ -24530,40 +22976,6 @@ button.memory-project:hover {
   text-align: center;
 }
 
-/* Welcome (sign-in gate) ---------------------------------------------- */
-
-.welcome-screen {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: var(--sp-8);
-  --welcome-bg-start: color-mix(in oklch, var(--background) 78%, var(--warm-soft));
-  --welcome-bg-end: color-mix(in oklch, var(--background) 92%, var(--warm-soft));
-  background: linear-gradient(
-    180deg,
-    var(--welcome-bg-start) 0%,
-    var(--background) 52%,
-    var(--welcome-bg-end) 100%
-  );
-}
-
-.welcome-screen-loading {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  color: var(--muted-foreground);
-}
-
-.welcome-screen-loading .spinner {
-  color: var(--brand);
-}
-
-.welcome-screen-loading p {
-  margin: 0;
-  font-size: var(--fs-sm);
-}
-
 .welcome-card {
   width: min(100%, 320px);
   display: flex;
@@ -24667,190 +23079,14 @@ button.memory-project:hover {
   opacity: 0.9;
 }
 
-.welcome-auth-progress {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  height: var(--control-xl);
-  margin: 0;
-  padding: 0 var(--sp-2) 0 var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--card);
-  font-size: var(--fs-sm);
-  color: var(--muted-foreground);
-}
-
-.welcome-progress-label {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-/* The wizard's in-flight rows (sign-in handoff, waiting states) keep the
-   terracotta primary's exact footprint but fade it flat: a disabled-feeling
-   tint of the button it replaces, not a raised control. Flows that still have
-   active backend work can keep a terracotta spinner as the live part. */
-.welcome-auth-progress.onboarding-waiting {
-  border-color: color-mix(in oklch, var(--brand) 16%, transparent);
-  border-radius: var(--r-lg);
-  background: color-mix(in oklch, var(--warm-soft) 38%, var(--card));
-  color: var(--muted-foreground);
-  font-size: var(--fs-md);
-}
-
-.onboarding-waiting .welcome-spinner {
-  color: var(--brand);
-}
-
-.onboarding-waiting .welcome-cancel-btn {
-  border: 0;
-  color: var(--warm-strong);
-}
-
-.onboarding-waiting .welcome-cancel-btn:hover {
-  background: color-mix(in oklch, var(--warm-soft) 70%, transparent);
-}
-
-.welcome-cancel-btn {
-  min-height: var(--control-sm);
-  padding: 0 var(--sp-3);
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--foreground);
-  font: inherit;
-  font-weight: 400;
-  cursor: pointer;
-  transition:
-    background-color var(--t-fast) var(--ease-out),
-    border-color var(--t-fast) var(--ease-out);
-}
-
-.welcome-cancel-btn:hover {
-  background: var(--muted);
-  border-color: var(--border-subtle);
-}
-
-.welcome-cancel-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.welcome-spinner {
-  color: var(--foreground);
-}
-
-.welcome-status {
-  margin: 0;
-  padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-md);
-  background: var(--destructive-soft);
-  color: var(--destructive);
-  font-size: var(--fs-sm);
-  text-align: center;
-}
-
-.welcome-status-info {
-  background: var(--surface-subtle);
-  color: var(--muted-foreground);
-}
-
-.welcome-terms {
-  margin: var(--sp-3) 0 0;
-  font-size: var(--fs-xs);
-  color: var(--muted-foreground);
-  text-align: center;
-  line-height: 1.5;
-}
-
-.welcome-terms a {
-  color: var(--foreground);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* Wider welcome-card variant for onboarding steps that need more room than
-   the sign-in gate. */
+/* Wider welcome-card variant for onboarding steps that need more room. */
 .wide-card {
   width: min(100%, 360px);
 }
 
-/* Welcome step gathers the four promises into one quiet, settings-like panel.
- * The shared perimeter and internal dividers make the group scan as a single
- * introduction instead of four unrelated callouts. */
-.welcome-card-intro {
-  width: min(100%, 520px);
-}
-
-.welcome-card-intro .onboarding-points {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-  margin-top: var(--sp-5);
-  overflow: hidden;
-  border: var(--border-width) solid var(--border-subtle);
-  border-radius: var(--r-xl);
-  background: color-mix(in oklch, var(--card) 84%, transparent);
-  box-shadow: var(--shadow-inset);
-}
-
-.welcome-card-intro .onboarding-points li {
-  align-items: start;
-  padding: var(--sp-6);
-}
-
-.welcome-card-intro .onboarding-point-icon {
-  margin-top: calc(var(--sp-1) * -1);
-}
-
-.welcome-card-intro .onboarding-points li:nth-child(odd) {
-  border-right: var(--border-width) solid var(--border-subtle);
-}
-
-.welcome-card-intro .onboarding-points li:nth-child(-n + 2) {
-  border-bottom: var(--border-width) solid var(--border-subtle);
-}
-
-.welcome-card-intro .onboarding-points li:last-child:nth-child(odd) {
-  grid-column: 1 / -1;
-  border-right: 0;
-}
-
-/* The 2x2 grid wants the full card width, but the sign-in button and footer
- * shouldn't stretch with it — keep them in a centered, button-width column. */
-.welcome-card-intro .welcome-providers,
-.welcome-card-intro .welcome-status,
-.welcome-card-intro .welcome-terms {
-  width: 100%;
-  max-width: 320px;
-  margin-inline: auto;
-}
-
-.onboarding-card-privacy {
-  width: min(100%, 560px);
-}
-
-.onboarding-privacy-choice {
-  width: min(100%, 480px);
-  margin: var(--sp-2) auto 0;
-  text-align: left;
-}
-
-.onboarding-card-privacy .welcome-providers,
-.onboarding-card-privacy .welcome-status {
-  width: 100%;
-  max-width: 320px;
-  margin-inline: auto;
-}
-
 /* Onboarding wizard ---------------------------------------------------
- * Welcome-cards in a row: sign in, permissions, try it.
- * Each step reuses the account gate chrome (welcome-card,
- * welcome-mark, welcome-title) so first-run looks like the app greeting
- * the user, not a separate tour. */
+ * Welcome-cards in a row: area, mood, permissions. Each step shares the
+ * welcome-card chrome (welcome-card, welcome-mark, welcome-title). */
 
 .onboarding-screen {
   position: fixed;
@@ -24987,100 +23223,6 @@ button.memory-project:hover {
   color: var(--muted-foreground);
   box-shadow: none;
   cursor: default;
-}
-
-/* Welcome screen's what-is-Clovy rows: same 28px icon-chip anatomy as the
- * permission rows, minus the connectors. */
-.onboarding-points {
-  margin: var(--sp-2) 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  text-align: left;
-}
-
-.onboarding-points li {
-  display: grid;
-  grid-template-columns: var(--control-md) minmax(0, 1fr);
-  column-gap: var(--sp-3);
-  align-items: center;
-}
-
-.onboarding-point-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--control-md);
-  height: var(--control-md);
-  border: 0;
-  border-radius: 50%;
-  background: var(--warm-soft);
-  color: var(--warm-strong);
-}
-
-.onboarding-point-label {
-  display: block;
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-medium);
-  color: var(--foreground);
-}
-
-.onboarding-point-detail {
-  display: block;
-  margin-top: 2px;
-  font-size: var(--fs-md);
-  line-height: 1.5;
-  color: var(--muted-foreground);
-  text-wrap: pretty;
-}
-
-/* Not a boxed card — a quiet, content-width chip so it reads as an aside, not a
- * second button competing with the sign-in action below it. */
-.onboarding-community {
-  margin: var(--sp-1) 0 0;
-  text-align: center;
-}
-
-.onboarding-community-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin: 0 auto;
-  padding: var(--sp-1) var(--sp-3);
-  border: 0;
-  border-radius: var(--r-pill);
-  background: transparent;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 400;
-  cursor: pointer;
-  transition:
-    color var(--t-fast) var(--ease-out),
-    background-color var(--t-fast) var(--ease-out);
-}
-
-.onboarding-community-link svg {
-  flex-shrink: 0;
-  color: var(--brand);
-}
-
-/* Hover tints the background only (never a border) — the house rule. A
- * translucent brand veil (mixed with transparent, NOT --card) so it blends into
- * the warm welcome gradient this sits on at any point, instead of painting a
- * flat --card-based patch that mismatches the backdrop. Text lands on
- * --foreground for reliable contrast in both themes. */
-.onboarding-community-link:hover {
-  background: color-mix(in oklch, var(--brand) 10%, transparent);
-  color: var(--foreground);
-}
-
-.onboarding-community-link:focus-visible {
-  outline: none;
-  color: var(--foreground);
-  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .onboarding-skip {
@@ -25548,10 +23690,7 @@ button.memory-project:hover {
 /* Personality is one decision surface: character and greeting establish the
  * selected mood, then the integrated selector retargets that same character.
  * Inactive choices stay borderless so only the current selection reads as a
- * control surface. The stage is a real elevated card (the grey panel wash
- * read muddy on the warm backdrop) with the hero wash rising from its floor,
- * so the accent has a visible source under the picker without tinting the
- * character's headroom. */
+ * control surface. The stage is an elevated card with a neutral surface. */
 .onboarding-personality-stage {
   --onboarding-personality-character-size: calc(var(--onboarding-sticker-card-size) * 2);
 
@@ -25562,9 +23701,7 @@ button.memory-project:hover {
   padding: var(--sp-5) var(--sp-5) var(--sp-3);
   border: var(--border-width) solid var(--border-subtle);
   border-radius: var(--r-xl);
-  background:
-    linear-gradient(to top, var(--hero-wash), var(--hero-wash-soft) 34%, transparent 62%),
-    var(--card);
+  background: var(--card);
   box-shadow: var(--shadow-sm);
   text-align: center;
 }
@@ -25683,22 +23820,6 @@ button.memory-project:hover {
 }
 
 @media (max-width: 680px) {
-  .welcome-card-intro .onboarding-points {
-    grid-template-columns: 1fr;
-  }
-
-  .welcome-card-intro .onboarding-points li:nth-child(odd) {
-    border-right: 0;
-  }
-
-  .welcome-card-intro .onboarding-points li:not(:last-child) {
-    border-bottom: var(--border-width) solid var(--border-subtle);
-  }
-
-  .welcome-card-intro .onboarding-points li:last-child:nth-child(odd) {
-    grid-column: auto;
-  }
-
   .onboarding-mood-grid,
   .onboarding-personality-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -28580,6 +26701,13 @@ button.memory-project:hover {
   gap: var(--sp-2);
 }
 
+/* Where a connector's credential comes from ("via gh"): a quiet note beside
+ * the name, not a status. */
+.connector-source-tag {
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
 .connectors-notion-disclosures {
   display: flex;
   flex-direction: column;
@@ -28651,7 +26779,7 @@ button.memory-project:hover {
    the approval trust mode. Fixed bottom-right — the only fixed occupant of
    that corner, inset from it the way toasts are from the top-right (--sp-6) —
    under the dialog layer (z 112) and the panel resize handles. Wears the
-   floating-surface recipe the steer queue and funding notice share (solid
+   floating-surface recipe the steer queue uses (solid
    card, hairline ring folded into the shadow), and collapses to its header
    line so an unanswered batch stops covering the composer corner. */
 .shell-approvals-stack {
@@ -28772,7 +26900,7 @@ button.memory-project:hover {
   line-height: 1.4;
 }
 
-/* The funding notice's settle: a short rise as the tray appears. */
+/* A short rise as the tray appears. */
 @keyframes connector-approvals-settle {
   from {
     opacity: 0;
@@ -29132,179 +27260,6 @@ button.connector-approvals-info {
 
 /* PDF export uses the platform print sheet. Strip the application chrome and
  * release every viewport-bound scroller so the full formatted note paginates. */
-.companion-settings {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-5);
-}
-
-.companion-settings .settings-page-header {
-  margin-bottom: var(--sp-5);
-}
-
-.companion-pairing-card,
-.companion-device-heading,
-.companion-device-actions,
-.companion-pairing-flow,
-.companion-pairing-copy {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-}
-
-.companion-pairing-card,
-.companion-device-heading {
-  justify-content: space-between;
-}
-
-.companion-pairing-flow {
-  align-items: flex-start;
-  flex-wrap: wrap;
-  width: 100%;
-}
-
-.companion-pairing-copy {
-  align-items: flex-start;
-  flex: 1;
-  flex-direction: column;
-  min-width: var(--companion-pairing-copy-min-w);
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-}
-
-.companion-pairing-copy strong {
-  color: var(--foreground);
-  font-weight: var(--fw-medium);
-}
-
-.companion-manual-pairing {
-  width: 100%;
-  padding-top: var(--sp-1);
-}
-
-.companion-manual-pairing summary {
-  color: var(--foreground);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-}
-
-.companion-manual-pairing p {
-  margin: var(--sp-2) 0;
-}
-
-.companion-manual-pairing code {
-  display: block;
-  padding: var(--sp-3);
-  border: var(--line-width) solid var(--border-subtle);
-  border-radius: var(--r-md);
-  background: var(--surface-subtle);
-  color: var(--foreground);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
-.companion-manual-pairing .primary-action {
-  margin-top: var(--sp-2);
-}
-
-.companion-pairing-qr {
-  display: block;
-  width: min(var(--companion-pairing-qr-size), 100%);
-  border: var(--sp-1) solid var(--background);
-  border-radius: var(--r-lg);
-  background: var(--companion-pairing-qr-canvas);
-}
-
-.companion-device-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
-
-.companion-browse-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--sp-4);
-}
-
-.companion-root-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.companion-root-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  padding-top: var(--sp-3);
-  border-top: var(--line-width) solid var(--border-subtle);
-}
-
-.companion-root-path {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  overflow-wrap: anywhere;
-}
-
-.companion-device-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-5);
-}
-
-.companion-device-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.companion-capabilities {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.companion-capability {
-  padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--r-pill);
-  background: var(--surface-subtle);
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-  line-height: 1.4;
-}
-
-.companion-name-input {
-  height: var(--control-lg);
-  padding: 0 var(--sp-3);
-  border: var(--line-width) solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--background);
-  color: var(--foreground);
-  font: inherit;
-  font-size: var(--fs-md);
-}
-
-.companion-name-input:focus {
-  outline: none;
-  box-shadow: 0 0 0 var(--focus-outline-width) var(--focus-ring);
-}
-
-.companion-empty-device {
-  text-align: center;
-}
-
 @media print {
   @page {
     margin: 18mm;
@@ -29541,4 +27496,494 @@ button.connector-approvals-info {
   margin: 0;
   font-size: var(--fs-md);
   color: var(--muted-foreground);
+}
+
+/* Coding-agent lane of the "Today" view (CodingAgentLane): blocks on the
+ * shared 24 h track; the hover card carries agent, project, time, and
+ * summary. Tokens only. */
+.coding-agent-lane {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.coding-agent-lane-block {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+}
+
+.coding-agent-lane-anchor {
+  display: block;
+  height: 100%;
+}
+
+.coding-agent-lane-button {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: var(--border-width) solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--activity-coding);
+  cursor: default;
+}
+
+.coding-agent-lane-block[data-state="live"] .coding-agent-lane-button {
+  border-color: var(--foreground);
+}
+
+.coding-agent-lane-block:not([data-state="summarized"]) .coding-agent-lane-button {
+  opacity: 0.6;
+}
+
+.coding-agent-lane-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.coding-agent-lane-empty {
+  margin: 0;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--muted-foreground);
+}
+
+.coding-agent-lane-tip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.coding-agent-lane-tip-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--muted-foreground);
+}
+
+.coding-agent-lane-tip-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-weight: var(--fw-medium);
+  color: var(--foreground);
+}
+
+.coding-agent-lane-tip-summary,
+.coding-agent-lane-tip-status,
+.coding-agent-lane-tip-prompt {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.coding-agent-lane-tip-status,
+.coding-agent-lane-tip-prompt {
+  color: var(--muted-foreground);
+}
+
+/* In-app update card in the sidebar footer: offer, wait, restart and status.
+ * One quiet card at a time, the same chrome for every state. */
+.sidebar[data-collapsed="true"] .update-popover {
+  display: none;
+}
+
+.update-popover {
+  width: 100%;
+  min-width: 0;
+  color: var(--foreground);
+  -webkit-app-region: no-drag;
+  animation: update-popover-in var(--t-med) var(--ease-spring) both;
+}
+
+.update-relaunch-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 16px;
+  align-items: start;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2);
+  /* Same transparent-over-foreground hairline as --popover-border, a touch
+   * stronger: 10% washes out on a pure-white card over the sidebar. */
+  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-card:hover:not(:disabled) {
+  box-shadow: var(--shadow-sm);
+}
+
+.update-relaunch-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.update-relaunch-card:disabled {
+  cursor: default;
+}
+
+/* Bare Clovy mark, no tile: faint at rest, warms to brand on hover. The fixed
+ * mark-sized box mirrors .update-status-mark, so swapping to the dot spinner
+ * never reflows the copy. */
+.update-relaunch-mark {
+  display: inline-grid;
+  place-items: center;
+  width: var(--sp-4);
+  height: var(--sp-4);
+  margin-top: 2px;
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+  transition: color var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-mark svg {
+  width: var(--sp-4);
+  height: auto;
+}
+
+.update-relaunch-card:hover:not(:disabled) .update-relaunch-mark {
+  color: var(--brand);
+}
+
+.update-relaunch-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.update-relaunch-title {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-relaunch-copy > span:last-child {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-relaunch-copy > .update-relaunch-status {
+  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+}
+
+.update-relaunch-arrow {
+  align-self: center;
+  justify-self: end;
+  color: var(--muted-foreground);
+  transition: transform var(--t-slow) var(--ease-spring);
+}
+
+.update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
+  transform: translateX(3px);
+}
+
+/* Same chrome as .update-relaunch-card without the hover shadow: only its
+ * buttons act. Left padding sits a step wider so the mark slot does not hug
+ * the card edge. */
+.update-card {
+  display: grid;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  padding-left: var(--sp-3);
+  border: 1px solid color-mix(in oklch, var(--foreground) 15%, transparent);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+}
+
+.update-status-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* The fixed mark-sized box gives the busy dot spinner and the settled Clovy
+ * mark the same footprint, so swapping them never reflows the text. */
+.update-status-mark {
+  display: inline-grid;
+  place-items: center;
+  width: var(--sp-4);
+  height: var(--sp-4);
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+}
+
+.update-status-mark svg {
+  width: var(--sp-4);
+  height: auto;
+}
+
+.update-status-text,
+.update-card-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The wait message is a sentence: it wraps instead of truncating. */
+.update-card-text {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  text-wrap: pretty;
+}
+
+/* Failed checks and downloads tint the text destructive; the mark stays muted.
+ * The error names its cause, so it wraps (up to three lines) instead of
+ * truncating. */
+.update-status-text-failed {
+  display: -webkit-box;
+  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  text-wrap: pretty;
+}
+
+.update-card-failed .update-status-row {
+  align-items: start;
+}
+
+/* Actions sit under the copy column (mark slot plus row gap), the primary
+ * action last, so the card reads as one sentence with its answer. */
+.update-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+  padding-left: calc(var(--sp-4) + var(--sp-3));
+}
+
+.update-card-action {
+  height: var(--control-sm);
+  padding: 0 var(--sp-3);
+}
+
+.update-status-close {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.update-status-close:hover {
+  background: var(--surface-subtle);
+  color: var(--foreground);
+}
+
+.update-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-left: calc(var(--sp-4) + var(--sp-3));
+}
+
+.update-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--surface-subtle);
+}
+
+.update-progress-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: inherit;
+  /* Lighter than --foreground so the bar reads quiet; --muted-foreground stays
+   * clearly ahead of the --surface-subtle track in both themes. */
+  background: var(--muted-foreground);
+  clip-path: inset(0 var(--update-progress-clip, 100%) 0 0 round var(--r-pill));
+  transition: clip-path var(--t-fast) var(--ease-out);
+}
+
+.update-progress-percent {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  line-height: 1;
+}
+
+/* Number pop-in for the download percent: each digit is keyed by
+ * position+character in React, so only a digit that changed remounts and
+ * replays the rise. */
+.update-digit-group {
+  --update-digit-dur: calc(var(--t-med) + var(--t-med));
+  --update-digit-distance: var(--sp-3);
+  --update-digit-blur: var(--sp-px);
+  --update-digit-ease: var(--ease-pop);
+
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.update-digit {
+  display: inline-block;
+  animation: update-digit-pop-in var(--update-digit-dur) var(--update-digit-ease) both;
+  will-change: transform, opacity, filter;
+}
+
+@keyframes update-digit-pop-in {
+  from {
+    transform: translateY(var(--update-digit-distance));
+    opacity: 0;
+    filter: blur(var(--update-digit-blur));
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes update-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--sp-2)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Timed auto-dismiss of the up-to-date confirmation mirrors the entrance. The
+ * status clears just after this finishes (UP_TO_DATE_EXIT_MS). */
+.update-popover[data-leaving="true"] {
+  animation: update-popover-out var(--t-med) var(--ease-out) both;
+}
+
+@keyframes update-popover-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(var(--sp-2)) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The attribute selector outranks the bare class, so the exit needs its own
+   * entry here: the timed hide becomes an instant disappearance. */
+  .update-popover,
+  .update-popover[data-leaving="true"] {
+    animation: none;
+  }
+
+  .update-popover[data-leaving="true"] {
+    visibility: hidden;
+  }
+
+  .update-digit {
+    animation: none;
+  }
+
+  .update-relaunch-card,
+  .update-relaunch-arrow {
+    transition: none;
+  }
+
+  .update-relaunch-card:hover:not(:disabled) .update-relaunch-arrow {
+    transform: none;
+  }
+}
+
+/* One veil strength for both themes; the surface token supplies its color. */
+.agent-image-background {
+  --background-image-veil: 0.82;
+  overflow: hidden;
+}
+.agent-image-background img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+.agent-image-background::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--card);
+  opacity: var(--background-image-veil);
+}
+.background-settings-controls {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+.background-settings-choice {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.background-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.background-file-name {
+  overflow-wrap: anywhere;
+}
+
+/* Browser control uses the existing capability rows and approval tray. */
+.browser-use-details {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: var(--sp-3);
+}
+
+.browser-session-control {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+}
+
+.browser-session-state {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.browser-session-control .agent-approval-actions {
+  flex-wrap: wrap;
+}
+
+.browser-use-control .connector-subtitle,
+.browser-session-control .connector-subtitle {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }

@@ -16,22 +16,33 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
+import { sha256, verifyEngineArtifact, verifyEngineSbom } from "./agent-desktop-artifact.mjs";
+import { resolveComputerUseHost } from "./computer-use-host-path.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pin = readJson(path.join(rootDir, "src-tauri", "cua-driver-pin.json"));
-const contract = readJson(path.join(rootDir, "src-tauri", "cua-driver-contract.json"));
+const pin = readJson(path.join(rootDir, "src-tauri", "agent-desktop-pin.json"));
+const contract = readJson(path.join(rootDir, "src-tauri", "computer-use-contract.json"));
 const options = parseArguments(process.argv.slice(2));
 const bundleDir = path.resolve(
-  options.bundle || path.join(rootDir, ".tauri-helper", pin.bundleName),
+  options.bundle ||
+    path.join(
+      rootDir,
+      ".tauri-helper",
+      process.platform === "win32" ? "computer-use" : pin.bundleName,
+    ),
 );
-const executable = path.join(bundleDir, "Contents", "MacOS", pin.executable);
-const stampPath = path.join(bundleDir, "Contents", "Resources", "clovy-cua-driver-pin.json");
+const executable =
+  process.platform === "win32"
+    ? path.join(bundleDir, `${pin.executable}.exe`)
+    : path.join(bundleDir, "Contents", "MacOS", pin.executable);
+const stampPath =
+  process.platform === "win32"
+    ? path.join(bundleDir, "clovy-computer-use-pin.json")
+    : path.join(bundleDir, "Contents", "Resources", "clovy-computer-use-pin.json");
 
 async function main() {
-  if (process.platform !== "darwin") {
-    console.error("Skipping Computer use self-test: Computer use is macOS-only.");
-    return;
-  }
+  if (!["darwin", "win32"].includes(process.platform))
+    throw new Error("Computer use helper self-test requires macOS or Windows");
 
   if (options.promptPermissions && !options.live && !options.permissionsOnly) {
     throw new Error("--prompt-permissions requires --live or --permissions-only");
@@ -39,8 +50,19 @@ async function main() {
 
   let driver;
   try {
-    validateBundle();
+    if (process.platform === "win32") validateWindowsBundle();
+    else validateBundle();
     validateDirectLaunchRefusal();
+    if (options.requireReleaseProfile) {
+      if (options.live || options.permissionsOnly)
+        throw new Error("Native Computer use checks require a non-ad-hoc signed host and helper");
+      // The driver authenticates its host by Apple team (computer_use_driver.rs),
+      // so an ad hoc release cannot start it: only the static checks apply.
+      console.error(
+        "Computer use static checks passed for an ad hoc release; the driver needs a Team ID signature to run.",
+      );
+      return;
+    }
     const host = resolveSelfTestHost();
     const startHost = (permissionPrompt) =>
       startMcp(host, [
@@ -76,10 +98,11 @@ async function main() {
       );
       console.log(JSON.stringify(structured(result), null, 2));
     } else if (options.live) {
-      await runLiveSelfTest(driver, false);
+      if (process.platform === "win32") await runWindowsLiveSelfTest(driver);
+      else await runLiveSelfTest(driver, false);
     }
     console.error(
-      `Computer use ${options.live ? "live " : ""}self-test passed for Clovy's helper built from cua-driver ${pin.version} (${pin.sourceCommit}).`,
+      `Computer use ${options.live ? "live " : ""}self-test passed for Clovy's helper built using agent-desktop ${pin.version} (${pin.sourceCommit}).`,
     );
   } finally {
     await driver?.close();
@@ -90,10 +113,12 @@ function parseArguments(args) {
   const parsed = {
     bundle: undefined,
     host: undefined,
+    target: undefined,
     live: false,
     permissionsOnly: false,
     promptPermissions: false,
     requireDeveloperId: false,
+    requireReleaseProfile: false,
   };
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
@@ -107,6 +132,12 @@ function parseArguments(args) {
         if (!parsed.host) throw new Error("--host requires a path");
         index += 1;
         break;
+      case "--target":
+        parsed.target = args[index + 1];
+        if (!parsed.target || !/^(aarch64|x86_64)-pc-windows-msvc$/.test(parsed.target))
+          throw new Error("--target requires an explicit Windows MSVC target");
+        index += 1;
+        break;
       case "--live":
         parsed.live = true;
         break;
@@ -118,6 +149,11 @@ function parseArguments(args) {
         break;
       case "--require-developer-id":
         parsed.requireDeveloperId = true;
+        break;
+      // An ad hoc release: the helper must still be the release build, but it
+      // carries no Developer ID.
+      case "--require-release-profile":
+        parsed.requireReleaseProfile = true;
         break;
       default:
         throw new Error(`Unknown Computer use self-test argument: ${args[index]}`);
@@ -144,6 +180,36 @@ function validateBundle() {
     );
   }
 
+  const engineManifest = readJson(
+    path.join(bundleDir, "Contents", "Resources", "agent-desktop-manifest.json"),
+  );
+  for (const field of [
+    "source",
+    "sourceCommit",
+    "version",
+    "protocolVersion",
+    "cargoLockSha256",
+    "license",
+    "licenseSha256",
+    "patchSha256",
+    "ownedRuntimeSourceSha256",
+    "sourceReviewSha256",
+  ]) {
+    if (typeof pin[field] !== "string" || !pin[field] || engineManifest[field] !== pin[field])
+      throw new Error(`Bundled engine ${field} differs from reviewed pin`);
+  }
+  if (
+    sha256(path.join(bundleDir, "Contents", "Resources", "source-review.md")) !==
+    pin.sourceReviewSha256
+  )
+    throw new Error("Bundled engine source qualification digest mismatch");
+  const engine = path.join(bundleDir, "Contents", "MacOS", "agent-desktop");
+  if (
+    engineManifest.executable !== "agent-desktop" ||
+    sha256(engine) !== engineManifest.executableSha256
+  )
+    throw new Error("Bundled engine digest mismatch");
+  run("/usr/bin/codesign", ["--verify", "--strict", engine]);
   const stamp = readJson(stampPath);
   const profile = stamp.clovyBuild?.profile;
   const expectedBundleIdentifier = computerUseBundleIdentifier({
@@ -193,33 +259,24 @@ function validateBundle() {
   if (
     stamp.version !== pin.version ||
     stamp.sourceCommit !== pin.sourceCommit ||
-    stamp.clovyBuild?.sourceSha256 !== helperSourceSha256()
+    stamp.clovyBuild?.sourceSha256 !== helperSourceSha256() ||
+    stamp.clovyBuild?.engineSha256 !== engineManifest.executableSha256
   ) {
     throw new Error("Computer use helper stamp does not match Clovy's pinned source build.");
   }
-  if (options.requireDeveloperId && stamp.clovyBuild?.profile !== "release") {
-    throw new Error("A signed Computer use release must contain a release-profile helper.");
-  }
-  const sbom = readJson(
-    path.join(bundleDir, "Contents", "Resources", "clovy-cua-driver.spdx.json"),
-  );
-  const sbomPackage = sbom.packages?.find((entry) => entry.name === "cua-driver-rs");
-  const sbomSource = sbomPackage?.externalRefs?.find(
-    (reference) => reference.referenceType === "purl",
-  )?.referenceLocator;
   if (
-    sbomPackage?.versionInfo !== pin.version ||
-    sbomPackage?.licenseDeclared !== "MIT" ||
-    !sbomSource?.endsWith(`@${pin.sourceCommit}`)
+    (options.requireDeveloperId || options.requireReleaseProfile) &&
+    stamp.clovyBuild?.profile !== "release"
   ) {
-    throw new Error("Bundled Computer use SBOM does not match the pinned source commit.");
+    throw new Error("A Computer use release must contain a release-profile helper.");
   }
-  const bundledLicense = path.join(bundleDir, "Contents", "Resources", "cua-driver-LICENSE.md");
+  verifyEngineSbom(path.join(bundleDir, "Contents", "Resources", "agent-desktop.spdx.json"), pin);
+  const bundledLicense = path.join(bundleDir, "Contents", "Resources", "agent-desktop-LICENSE");
   if (
     readFileSync(bundledLicense, "utf8") !==
-    readFileSync(path.join(rootDir, "src-tauri", "cua-driver-LICENSE.md"), "utf8")
+    readFileSync(path.join(rootDir, "src-tauri", "agent-desktop", "LICENSE"), "utf8")
   ) {
-    throw new Error("Bundled Computer use helper is missing its pinned MIT license notice.");
+    throw new Error("Bundled Computer use helper is missing its pinned Apache-2.0 license notice.");
   }
 
   const architectures = new Set(
@@ -233,6 +290,16 @@ function validateBundle() {
     if (!architectures.has(architecture)) {
       throw new Error(`Computer use helper is missing its ${architecture} slice.`);
     }
+    const engineSignature = run("/usr/bin/codesign", [
+      "-d",
+      "--verbose=4",
+      "--arch",
+      architecture,
+      engine,
+    ]).combined;
+    const cdhash = engineSignature.match(/^CDHash=([a-fA-F0-9]{40})$/m)?.[1]?.toLowerCase();
+    if (!cdhash || cdhash !== engineManifest.codeDirectoryHashes?.[architecture])
+      throw new Error(`Engine ${architecture} CodeDirectory identity mismatch`);
   }
 
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundleDir]);
@@ -248,6 +315,49 @@ function validateBundle() {
   }
 }
 
+function validateWindowsBundle() {
+  verifyEngineSbom(path.join(bundleDir, "agent-desktop.spdx.json"), pin);
+  const stamp = readJson(stampPath);
+  const target =
+    options.target ||
+    (process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc");
+  const engineManifest = verifyEngineArtifact(bundleDir, pin, target);
+  if (
+    stamp.sourceCommit !== pin.sourceCommit ||
+    stamp.version !== pin.version ||
+    stamp.clovyBuild?.sourceSha256 !== helperSourceSha256() ||
+    stamp.clovyBuild?.engineSha256 !== engineManifest.executableSha256
+  )
+    throw new Error("Windows helper source stamp mismatch");
+  const version = run(executable, ["--version"]).combined;
+  if (version.trim() !== `clovy-computer-use-driver ${pin.version} ${pin.sourceCommit}`)
+    throw new Error("Windows helper version mismatch");
+  const publisher = (file) =>
+    run("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      path.join(rootDir, "scripts", "windows-authenticode.ps1"),
+      "-TargetPath",
+      file,
+    ]).stdout.trim();
+  const helperPublisher = publisher(executable);
+  if (
+    !helperPublisher ||
+    helperPublisher !== publisher(path.join(bundleDir, "agent-desktop.exe")) ||
+    helperPublisher !== publisher(resolveSelfTestHost())
+  )
+    throw new Error("Computer use helper, engine and host signing publisher mismatch");
+  if (
+    Object.keys(contract.driverTools).length !== 14 ||
+    contract.version !== pin.version ||
+    contract.engineProtocolVersion !== pin.protocolVersion
+  )
+    throw new Error("Computer use engine/tool contract mismatch");
+}
+
 function validateDirectLaunchRefusal() {
   const direct = spawnSync(executable, ["mcp"], {
     encoding: "utf8",
@@ -258,26 +368,27 @@ function validateDirectLaunchRefusal() {
     },
   });
   const output = `${direct.stdout || ""}\n${direct.stderr || ""}`;
-  if (direct.status === 0 || !output.includes("must be launched directly by Clovy")) {
+  if (
+    direct.status === 0 ||
+    !/(must be launched directly by Clovy|private to Clovy|Only the exact bundled Clovy process)/.test(
+      output,
+    )
+  ) {
     throw new Error("Bundled Computer use helper accepted a direct MCP launch.");
   }
 }
 
 function resolveSelfTestHost() {
-  if (options.host) {
-    const host = path.resolve(options.host);
-    if (!existsSync(host)) throw new Error(`Computer use self-test host is missing: ${host}`);
-    return host;
-  }
+  if (options.host) return resolveComputerUseHost({ host: options.host });
   const stamp = readJson(stampPath);
   const profile = stamp.clovyBuild?.profile === "release" ? "release" : "debug";
-  const host = path.join(rootDir, "src-tauri", "target", profile, "os-june");
-  if (!existsSync(host)) {
-    throw new Error(
-      `Computer use self-test host is missing: ${host}. Build Clovy first or pass --host.`,
-    );
-  }
-  return host;
+  return resolveComputerUseHost({
+    host: options.host,
+    targetDir: process.env.CARGO_TARGET_DIR || path.join(rootDir, "src-tauri", "target"),
+    profile,
+    platform: process.platform,
+    targetTriple: options.target,
+  });
 }
 
 async function startMcp(command, args = [], env = driverEnvironment()) {
@@ -298,6 +409,8 @@ async function startMcp(command, args = [], env = driverEnvironment()) {
 function validateDriverContract(tools) {
   if (!Array.isArray(tools)) throw new Error("Driver tools/list did not return a tool list.");
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  if (!sameMembers([...byName.keys()], Object.keys(contract.driverTools)))
+    throw new Error("Computer use helper tool allowlist changed");
   for (const [name, expected] of Object.entries(contract.driverTools)) {
     const tool = byName.get(name);
     if (!tool) throw new Error(`Pinned driver no longer exposes required tool ${name}.`);
@@ -326,7 +439,117 @@ function validateDriverContract(tools) {
   }
 }
 
+async function runWindowsLiveSelfTest(client) {
+  const readiness = structured(await callTool(client, "check_permissions", { prompt: false }));
+  if (readiness.accessibility !== true || readiness.screen_recording_capturable !== true)
+    throw new Error("Windows live fixture requires a non-elevated unlocked interactive desktop");
+  const host = resolveSelfTestHost();
+  const fixtureDir = path.join(path.dirname(host), "native", "fixtures");
+  mkdirSync(fixtureDir, { recursive: true });
+  const fixture = path.join(fixtureDir, "clovy-computer-use-fixture.exe");
+  if (!process.env.WINDOWS_CERTIFICATE_THUMBPRINT)
+    throw new Error("Windows live fixture signing requires WINDOWS_CERTIFICATE_THUMBPRINT");
+  if (existsSync(fixture))
+    throw new Error(
+      `Preserve the previous fixture and choose a fresh run-owned host build directory: ${fixture}`,
+    );
+  const csc =
+    process.env.CLOVY_QA_CSC ||
+    path.join(
+      process.env.WINDIR || "C:\\Windows",
+      "Microsoft.NET",
+      "Framework64",
+      "v4.0.30319",
+      "csc.exe",
+    );
+  run(csc, [
+    "/nologo",
+    "/target:exe",
+    `/out:${fixture}`,
+    "/reference:System.Windows.Forms.dll",
+    "/reference:System.Drawing.dll",
+    `/win32manifest:${path.join(rootDir, "src-tauri", "native", "computer-use-fixture", "windows", "app.manifest")}`,
+    path.join(rootDir, "src-tauri", "native", "computer-use-fixture", "windows", "Fixture.cs"),
+  ]);
+  run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", [
+    "sign",
+    "/sha1",
+    process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+    "/fd",
+    "sha256",
+    fixture,
+  ]);
+  run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", ["verify", "/pa", fixture]);
+  const tempDir = mkdtempSync(path.join(tmpdir(), "clovy-windows-cu-proof-"));
+  const statePath = path.join(tempDir, "target-state.txt");
+  writeFileSync(statePath, "waiting");
+  const children = [];
+  try {
+    for (const role of ["target", "observer"]) {
+      const pidPath = path.join(tempDir, `${role}.pid`);
+      const child = spawn(fixture, ["--role", role, "--state", statePath, "--pid-file", pidPath], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      children.push(child);
+      if (Number(await waitForFile(pidPath)) !== child.pid)
+        throw new Error("Unexpected Windows fixture PID");
+    }
+    const [target, observer] = children;
+    run(fixture, ["--activate-pid", String(observer.pid)]);
+    const before = await waitForProbe(
+      fixture,
+      (probe) => probe.frontmostPid === observer.pid,
+      3_000,
+    );
+    const windows = await waitForWindows(client, [target.pid, observer.pid]);
+    const window = findFixtureWindow(windows, target.pid, "Clovy Computer Use Target");
+    if (!window) throw new Error("Exact Windows fixture target is missing");
+    const capture = await callTool(client, "get_window_state", {
+      pid: target.pid,
+      window_id: window.window_id,
+      capture_mode: "som",
+    });
+    const actionLine = captureTree(capture)
+      .split("\n")
+      .find((line) => line.includes("Apply fixture action"));
+    const element = actionLine?.match(/\[(?:element_index\s+)?(\d+)\]/)?.[1];
+    if (
+      !element ||
+      !capture.content?.some((part) => part.type === "image" && part.data?.startsWith("iVBOR"))
+    )
+      throw new Error("Windows capture must contain PNG and a numbered semantic button");
+    await callTool(client, "click", {
+      pid: target.pid,
+      window_id: window.window_id,
+      element_index: Number(element),
+    });
+    await waitFor(
+      () => readFileSync(statePath, "utf8").trim() === "clicked",
+      "Windows semantic fixture click",
+    );
+    const after = probeFixture(fixture);
+    if (
+      after.frontmostPid !== before.frontmostPid ||
+      after.cursorX !== before.cursorX ||
+      after.cursorY !== before.cursorY
+    )
+      throw new Error("Windows semantic background click changed pointer or focus");
+    console.error(
+      "Windows live fixture proved exact-window capture and semantic click without pointer/focus change. Text, mixed DPI, secure desktop, Stop and Job Object matrix remains required.",
+    );
+  } finally {
+    for (const child of children) {
+      child.kill();
+      child.unref();
+    }
+    // Keep the signed QA fixture and synthetic result as run-owned evidence.
+    console.error(`Windows synthetic fixture evidence retained: ${tempDir}`);
+  }
+}
+
 async function runLiveSelfTest(client, promptPermissions) {
+  fixtureSigningIdentity();
   const permissionResult = await callTool(
     client,
     "check_permissions",
@@ -542,6 +765,25 @@ function buildFixture(tempDir) {
   return output;
 }
 
+function signatureTeam(file) {
+  const details = run("/usr/bin/codesign", ["-dv", "--verbose=4", file]).combined;
+  if (details.includes("Signature=adhoc"))
+    throw new Error("Native fixtures require a non-ad-hoc signature");
+  const team = details.match(/^TeamIdentifier=([A-Za-z0-9]+)$/m)?.[1];
+  if (!team) throw new Error("Native fixture acceptance requires an Apple Team identifier");
+  return team;
+}
+function fixtureSigningIdentity() {
+  const identity =
+    process.env.APPLE_SIGNING_IDENTITY?.trim() || process.env.CLOVY_DEV_SIGNING_IDENTITY?.trim();
+  if (!identity || identity === "-")
+    throw new Error(
+      "Native fixture signing requires explicit APPLE_SIGNING_IDENTITY or CLOVY_DEV_SIGNING_IDENTITY; ad hoc signing is refused",
+    );
+  signatureTeam(resolveSelfTestHost());
+  return identity;
+}
+
 function makeFixtureApp(tempDir, fixtureExecutable, role) {
   const displayName = role === "observer" ? "Clovy CU Observer" : "Clovy CU Target";
   const app = path.join(tempDir, `${displayName}.app`);
@@ -557,7 +799,7 @@ function makeFixtureApp(tempDir, fixtureExecutable, role) {
 <plist version="1.0"><dict>
 <key>CFBundleDisplayName</key><string>${displayName}</string>
 <key>CFBundleExecutable</key><string>${executableName}</string>
-<key>CFBundleIdentifier</key><string>co.opensoftware.clovy.computer-use-self-test.${role}</string>
+<key>CFBundleIdentifier</key><string>dev.guilhermexp.clovy.computer-use-self-test.${role}</string>
 <key>CFBundleName</key><string>${displayName}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -566,7 +808,20 @@ function makeFixtureApp(tempDir, fixtureExecutable, role) {
 </dict></plist>
 `,
   );
-  run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", app]);
+  run("/usr/bin/codesign", [
+    "--force",
+    "--sign",
+    fixtureSigningIdentity(),
+    "--timestamp=none",
+    "--options",
+    "runtime",
+    "--identifier",
+    `dev.guilhermexp.clovy.computer-use-self-test.${role}`,
+    app,
+  ]);
+  run("/usr/bin/codesign", ["--verify", "--strict", app]);
+  if (signatureTeam(app) !== signatureTeam(resolveSelfTestHost()))
+    throw new Error("Native fixture must share the signed Clovy host's Apple Team");
   return app;
 }
 
@@ -690,6 +945,7 @@ function driverEnvironment() {
   const env = { ...process.env };
   for (const name of Object.keys(env)) {
     if (
+      name.startsWith("AGENT_DESKTOP_") ||
       name.startsWith("CUA_DRIVER_RS_") ||
       name.startsWith("CLOVY_CUA_DRIVER") ||
       name.startsWith("JUNE_CUA_DRIVER") ||
@@ -701,13 +957,7 @@ function driverEnvironment() {
       delete env[name];
     }
   }
-  return {
-    ...env,
-    CUA_DRIVER_RS_TELEMETRY_ENABLED: "0",
-    CUA_DRIVER_RS_UPDATE_CHECK: "0",
-    CUA_DRIVER_RS_PERMISSIONS_GATE: "0",
-    CUA_DRIVER_RS_MCP_NO_RELAUNCH: "1",
-  };
+  return env;
 }
 
 class JsonRpcClient {
@@ -805,6 +1055,7 @@ class JsonRpcClient {
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
+    windowsHide: true,
     timeout: 120_000,
     maxBuffer: 24 * 1024 * 1024,
     ...options,
@@ -828,11 +1079,9 @@ function readJson(file) {
 
 function helperSourceSha256() {
   const hash = createHash("sha256");
-  for (const relative of [
-    "src-tauri/src/computer_use_driver.rs",
-    "src-tauri/Cargo.toml",
-    "src-tauri/Cargo.lock",
-  ]) {
+  for (const relative of readJson(
+    path.join(rootDir, "src-tauri", "computer-use-build-inputs.json"),
+  )) {
     hash.update(relative);
     hash.update("\0");
     hash.update(readFileSync(path.join(rootDir, relative)));

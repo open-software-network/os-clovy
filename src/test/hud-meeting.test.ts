@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => ({
     mocks.listeners.set(event, listener);
     return Promise.resolve(vi.fn());
   }),
-  startDragging: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,7 +26,6 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     hide: mocks.hide,
-    startDragging: mocks.startDragging,
   }),
 }));
 
@@ -37,7 +35,6 @@ describe("meeting detection HUD", () => {
     vi.clearAllMocks();
     mocks.hide.mockResolvedValue(undefined);
     mocks.invoke.mockResolvedValue(undefined);
-    mocks.startDragging.mockResolvedValue(undefined);
     mocks.listeners.clear();
     document.body.innerHTML = hudMarkup();
   });
@@ -50,6 +47,315 @@ describe("meeting detection HUD", () => {
       value: originalNavigatorPlatform,
     });
     vi.useRealTimers();
+  });
+
+  it("offers detected meeting video off by default and queues the selected window", async () => {
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const window = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "detect_meeting_window" ? window : undefined,
+    );
+    await loadHud();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    const toggle = document.querySelector<HTMLButtonElement>("#hud-meeting-video");
+    expect(toggle).not.toHaveAttribute("hidden");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Chrome: Meet - Review");
+    toggle?.click();
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request", {
+        video: { windowId: 42 },
+      }),
+    );
+    expect(
+      mocks.invoke.mock.calls.filter(([command]) => command === "detect_meeting_window"),
+    ).toHaveLength(1);
+  });
+
+  it("queues the selected video immediately without waiting for another detection", async () => {
+    const selectedWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      return detections === 1 ? Promise.resolve(selectedWindow) : new Promise(() => {});
+    });
+    await loadHud();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    document.querySelector<HTMLButtonElement>("#hud-meeting-video")?.click();
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request", {
+      video: { windowId: 42 },
+    });
+    expect(detections).toBe(1);
+  });
+
+  it("ignores delayed window detection from a prompt that was cleared and reopened", async () => {
+    const older = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Earlier call",
+    };
+    const current = {
+      windowId: 99,
+      appName: "Teams",
+      bundleId: "com.microsoft.teams2",
+      title: "Weekly meeting",
+    };
+    let resolveOlder: ((window: typeof older) => void) | undefined;
+    const delayedDetection = new Promise<typeof older>((resolve) => {
+      resolveOlder = resolve;
+    });
+    let detectionCount = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detectionCount += 1;
+      return detectionCount === 1 ? delayedDetection : Promise.resolve(current);
+    });
+    await loadHud();
+    const olderPrompt = emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    await vi.waitFor(() => expect(detectionCount).toBe(1));
+    await emit("meeting-detection-event", { type: "meeting_cleared" });
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Teams"] },
+    });
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Teams: Weekly meeting");
+
+    resolveOlder?.(older);
+    await olderPrompt;
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Teams: Weekly meeting");
+    document.querySelector<HTMLButtonElement>("#hud-meeting-video")?.click();
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request", {
+        video: { windowId: 99 },
+      }),
+    );
+  });
+
+  it.each([
+    "null",
+    "error",
+  ] as const)("retries an initial %s window result on a heartbeat without enabling video", async (result) => {
+    const meetingWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      if (detections === 1)
+        return result === "error"
+          ? Promise.reject(new Error("lookup failed"))
+          : Promise.resolve(null);
+      return Promise.resolve(meetingWindow);
+    });
+    await loadHud();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("hidden");
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    expect(detections).toBe(2);
+    expect(document.querySelector("#hud-meeting-video")).not.toHaveAttribute("hidden");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "false");
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Chrome: Meet - Review");
+    expect(
+      mocks.invoke.mock.calls.some(([command]) => command === "queue_meeting_start_request"),
+    ).toBe(false);
+  });
+
+  it("keeps only one retry pending during overlapping heartbeats", async () => {
+    const meetingWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    let resolveRetry: ((window: typeof meetingWindow) => void) | undefined;
+    const pendingRetry = new Promise<typeof meetingWindow>((resolve) => {
+      resolveRetry = resolve;
+    });
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      return detections === 1 ? Promise.resolve(null) : pendingRetry;
+    });
+    await loadHud();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    const retry = emit("meeting-detection-event", { type: "meeting_detected" });
+    await vi.waitFor(() => expect(detections).toBe(2));
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    expect(detections).toBe(2);
+    resolveRetry?.(meetingWindow);
+    await retry;
+    expect(document.querySelector("#hud-meeting-video")).not.toHaveAttribute("hidden");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("cannot clear a newer prompt's pending lookup when an older lookup completes", async () => {
+    const olderWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Earlier call",
+    };
+    const currentWindow = {
+      windowId: 99,
+      appName: "Teams",
+      bundleId: "com.microsoft.teams2",
+      title: "Weekly meeting",
+    };
+    let resolveOlder: ((window: typeof olderWindow) => void) | undefined;
+    let resolveCurrent: ((window: typeof currentWindow) => void) | undefined;
+    const pendingOlder = new Promise<typeof olderWindow>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const pendingCurrent = new Promise<typeof currentWindow>((resolve) => {
+      resolveCurrent = resolve;
+    });
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      return detections === 1 ? pendingOlder : pendingCurrent;
+    });
+    await loadHud();
+    const olderPrompt = emit("meeting-detection-event", { type: "meeting_detected" });
+    await vi.waitFor(() => expect(detections).toBe(1));
+    await emit("meeting-detection-event", { type: "meeting_cleared" });
+    const currentPrompt = emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Teams"] },
+    });
+    await vi.waitFor(() => expect(detections).toBe(2));
+    resolveOlder?.(olderWindow);
+    await olderPrompt;
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Teams");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("hidden");
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Teams"] },
+    });
+    expect(detections).toBe(2);
+    resolveCurrent?.(currentWindow);
+    await currentPrompt;
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Teams: Weekly meeting");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("preserves an opted-in target through heartbeats without looking up another window", async () => {
+    const selectedWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      return Promise.resolve(
+        detections === 1
+          ? selectedWindow
+          : { ...selectedWindow, windowId: 99, title: "Other meeting" },
+      );
+    });
+    await loadHud();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Chrome"] },
+    });
+    document.querySelector<HTMLButtonElement>("#hud-meeting-video")?.click();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Teams"] },
+    });
+    expect(detections).toBe(1);
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent("Chrome: Meet - Review");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "true");
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request", {
+      video: { windowId: 42 },
+    });
+  });
+
+  it("queues audio immediately while a retry is pending and ignores its later success", async () => {
+    const meetingWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    };
+    let resolveRetry: ((window: typeof meetingWindow) => void) | undefined;
+    const pendingRetry = new Promise<typeof meetingWindow>((resolve) => {
+      resolveRetry = resolve;
+    });
+    let detections = 0;
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command !== "detect_meeting_window") return Promise.resolve(undefined);
+      detections += 1;
+      return detections === 1 ? Promise.resolve(null) : pendingRetry;
+    });
+    await loadHud();
+    await emit("meeting-detection-event", { type: "meeting_detected" });
+    const retry = emit("meeting-detection-event", { type: "meeting_detected" });
+    await vi.waitFor(() => expect(detections).toBe(2));
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request");
+    expect(detections).toBe(2);
+    resolveRetry?.(meetingWindow);
+    await retry;
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("hidden");
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("keeps the prompt audio-only when window detection is denied", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "detect_meeting_window") throw new Error("permission_denied");
+      return undefined;
+    });
+    await loadHud();
+    await emit("meeting-detection-event", {
+      type: "meeting_detected",
+      payload: { appLabels: ["Zoom"] },
+    });
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("hidden");
+    document.querySelector<HTMLButtonElement>("#hud-meeting-start")?.click();
+    await vi.waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("queue_meeting_start_request"),
+    );
   });
 
   it("shows the take notes prompt when a meeting is detected", async () => {
@@ -625,17 +931,20 @@ describe("meeting detection HUD", () => {
     // A measurable pill takes the CSS collapse: inline width tweens from the
     // listening size to the square while the native frame holds still, then
     // one snap resize fits the frame to the settled square.
-    vi.spyOn(hud, "getBoundingClientRect").mockReturnValue({
-      width: 124,
-      height: 32,
-      top: 0,
-      left: 0,
-      right: 124,
-      bottom: 32,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(hud, "getBoundingClientRect").mockImplementation(
+      () =>
+        ({
+          width: hud.dataset.state === "listening" ? 124 : 32,
+          height: 32,
+          top: 0,
+          left: 0,
+          right: hud.dataset.state === "listening" ? 124 : 32,
+          bottom: 32,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
 
     const finalizing = emit("dictation-event", {
       type: "finalizing_transcript",
@@ -920,24 +1229,6 @@ describe("meeting detection HUD", () => {
     expect(mocks.invoke).not.toHaveBeenCalledWith("dictation_helper_command", {
       command: { type: "discard_recording" },
     });
-  });
-
-  it("drags from anywhere on the pill except the controls", async () => {
-    await loadHud();
-    await emit("dictation-event", { type: "listening_started" });
-
-    hudElement().dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
-
-    document
-      .querySelector<HTMLButtonElement>("#hud-stop")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
-
-    document
-      .querySelector<HTMLButtonElement>("#hud-cancel")
-      ?.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
-    expect(mocks.startDragging).toHaveBeenCalledTimes(1);
   });
 
   it("responds to cancel hover immediately but waits for tooltip intent", async () => {
@@ -1243,17 +1534,20 @@ describe("meeting detection HUD", () => {
     await loadHud();
     await emit("dictation-event", { type: "listening_started" });
     const hud = hudElement();
-    vi.spyOn(hud, "getBoundingClientRect").mockReturnValue({
-      width: 124,
-      height: 32,
-      top: 0,
-      left: 0,
-      right: 124,
-      bottom: 32,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(hud, "getBoundingClientRect").mockImplementation(
+      () =>
+        ({
+          width: hud.dataset.state === "listening" ? 124 : 32,
+          height: 32,
+          top: 0,
+          left: 0,
+          right: hud.dataset.state === "listening" ? 124 : 32,
+          bottom: 32,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
     mocks.invoke.mockClear();
     mocks.hide.mockClear();
 
@@ -1459,6 +1753,7 @@ function hudMarkup() {
         <span class="hud-meeting-text">
           <span id="hud-meeting-label" class="hud-meeting-label">Meeting detected</span>
           <span id="hud-meeting-app" class="hud-meeting-app"></span>
+          <button id="hud-meeting-video" class="hud-meeting-video" role="switch" aria-checked="false" hidden type="button"><span id="hud-meeting-video-label"></span></button>
         </span>
       </span>
       <button id="hud-meeting-start" class="hud-meeting-start" type="button">

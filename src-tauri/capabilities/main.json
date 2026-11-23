@@ -10,7 +10,6 @@
     "notification:default",
     "dialog:allow-open",
     "clipboard-manager:allow-write-text",
-    "process:allow-restart",
     "autostart:default"
   ]
 }

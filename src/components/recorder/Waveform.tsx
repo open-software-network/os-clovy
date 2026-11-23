@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useT } from "../../i18n";
 import type { AudioLevelDto } from "../../lib/tauri";
 import { useRecordingTelemetryLevel } from "../../lib/recording-telemetry-store";
 import {
@@ -39,6 +40,7 @@ type WaveformProps = {
 const POLL_WINDOW_PEAKS = 6;
 
 export function Waveform({ level, sessionId, active = true }: WaveformProps) {
+  const t = useT();
   const telemetryLevel = useRecordingTelemetryLevel(sessionId, level);
   const refs = useRef<Array<HTMLSpanElement | null>>([]);
   // Shares the dictation HUD's synthesis + ballistics AND its travelling-wave
@@ -97,7 +99,7 @@ export function Waveform({ level, sessionId, active = true }: WaveformProps) {
   }, []);
 
   return (
-    <div className="waveform" aria-label="Audio activity">
+    <div className="waveform" aria-label={t("recorder.audioActivity")}>
       {Array.from({ length: RECORDER_BAR_COUNT }, (_, index) => (
         <span
           key={index}

@@ -16,6 +16,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { t as translate, useT } from "../../i18n";
+import { formatListTimestamp } from "../../lib/date-format";
 import type { NoteListItemDto } from "../../lib/tauri";
 import { useDismiss } from "../../lib/use-dismiss";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -68,6 +70,7 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
   },
   ref,
 ) {
+  const t = useT();
   // __emptyStates() preview (dev console): render the page as a fresh
   // install would see it, real data untouched underneath.
   const notes = useForcedEmptyStates() ? NO_NOTES : allNotes;
@@ -101,8 +104,6 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
   const selectedCount = selectedNoteIds.length;
   const hasUnselectedVisibleNotes =
     filteredNotes.length > 0 && visibleSelectedCount < filteredNotes.length;
-  const allVisibleNotesSelected =
-    filteredNotes.length > 0 && visibleSelectedCount === filteredNotes.length;
 
   // Snapshot the last nonzero count so the exiting bar keeps its real label
   // instead of flashing "0 selected".
@@ -204,14 +205,14 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
   }, [selectedCount, confirmBulkDelete]);
 
   return (
-    <section className="all-notes-workspace" aria-label="Meeting notes">
+    <section className="all-notes-workspace" aria-label={t("notes.list.title")}>
       <header className="folders-header">
         <div className="folders-heading">
           <h1>
-            Meeting notes
+            {t("notes.list.title")}
             {notes.length > 0 ? <span className="folders-count">{notes.length}</span> : null}
           </h1>
-          <p className="folders-subtitle">Everything across your workspace.</p>
+          <p className="folders-subtitle">{t("notes.list.subtitle")}</p>
         </div>
         <button
           type="button"
@@ -219,7 +220,7 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
           onClick={onCreateNote}
         >
           <IconPlusMedium size={13} />
-          New note
+          {t("notes.list.newNote")}
           <kbd className="primary-action-kbd" aria-hidden>
             {createNoteShortcut}
           </kbd>
@@ -232,7 +233,7 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
             <IconMagnifyingGlass size={14} />
             <input
               type="search"
-              placeholder="Search"
+              placeholder={t("common.search")}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
@@ -242,20 +243,20 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
 
       {notes.length === 0 ? (
         <EmptyState
-          label="Create your first note"
+          label={t("notes.list.empty.cta")}
           icon={<IconNoteText size={28} />}
-          title="Capture your first meeting"
-          description="Record a meeting, a phone call, or a half-formed thought. Clovy transcribes it and writes the note for you."
+          title={t("notes.list.empty.title")}
+          description={t("notes.list.empty.description")}
           action={
             <button type="button" className="primary-action primary-solid" onClick={onCreateNote}>
               <IconPlusMedium size={13} />
-              Create your first note
+              {t("notes.list.empty.cta")}
             </button>
           }
         />
       ) : filteredNotes.length === 0 ? (
         <div className="folders-empty">
-          <p>No notes match “{query.trim()}”.</p>
+          <p>{t("notes.list.noMatch", { query: query.trim() })}</p>
         </div>
       ) : (
         <ul className="folder-notes all-notes-list" role="list" data-selecting={selectedCount > 0}>
@@ -281,7 +282,7 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
         <div
           className="meetings-bulk-bar"
           role="toolbar"
-          aria-label="Selection"
+          aria-label={t("notes.list.selection")}
           data-exit={isExiting ? exit : undefined}
           onAnimationEnd={(event) => {
             // Only the bar's own exit keyframes unmount it. Child button
@@ -297,33 +298,35 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
             setExit(null);
           }}
         >
-          <span className="meetings-bulk-count">{displayCount} selected</span>
+          <span className="meetings-bulk-count">
+            {t("notes.list.selectedCount", { count: displayCount })}
+          </span>
           {hasUnselectedVisibleNotes ? (
             <button type="button" className="meetings-bulk-action" onClick={selectAllVisibleNotes}>
-              Select all
+              {t("notes.list.selectAll")}
             </button>
           ) : null}
           <button type="button" className="meetings-bulk-action" onClick={deselectAllVisibleNotes}>
-            Deselect all
+            {t("notes.list.deselectAll")}
           </button>
           <button
             type="button"
             className="meetings-bulk-action"
             onClick={() => onOpenMoveNotes(selectedNoteIds)}
           >
-            Move
+            {t("notes.list.move")}
           </button>
           <button
             type="button"
             className="meetings-bulk-action"
             onClick={() => setConfirmBulkDelete(true)}
           >
-            Delete
+            {t("common.delete")}
           </button>
           <button
             type="button"
             className="meetings-bulk-dismiss"
-            aria-label="Clear selection"
+            aria-label={t("notes.list.clearSelection")}
             onClick={resetSelection}
           >
             <IconCrossMedium size={14} />
@@ -338,9 +341,9 @@ export const NotesList = forwardRef<NotesListHandle, NotesListProps>(function No
           await onDeleteNotes(selectedNoteIds);
           resetSelection();
         }}
-        title={`Delete ${selectedCount} ${selectedCount === 1 ? "note" : "notes"}?`}
-        description="This cannot be undone. Audio, transcripts, and generated notes for these notes will be removed."
-        confirmLabel={selectedCount === 1 ? "Delete note" : "Delete notes"}
+        title={t("notes.list.bulkDelete.title", { count: selectedCount })}
+        description={t("notes.list.bulkDelete.description")}
+        confirmLabel={t("notes.list.bulkDelete.confirm", { count: selectedCount })}
         destructive
       />
     </section>
@@ -370,11 +373,13 @@ const AllNoteRow = memo(function AllNoteRow({
   onOpenMove: (noteId: string) => void;
   onDelete: (noteId: string) => void;
 }) {
-  const title = note.title.trim() || "New note";
+  const t = useT();
+  const title = note.title.trim() || t("notes.editor.titlePlaceholder");
   const effectiveStatus =
     note.processingStatus === "recording" && !liveRecording ? "draft" : note.processingStatus;
   const preview =
-    note.preview.trim() || (liveRecording ? "Recording" : statusLabel(effectiveStatus));
+    note.preview.trim() ||
+    (liveRecording ? t("notes.list.status.recording") : statusLabel(effectiveStatus));
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useDismiss(null, menu !== null, onCloseMenu, { pointerEvent: "click" });
@@ -391,7 +396,7 @@ const AllNoteRow = memo(function AllNoteRow({
           <input
             type="checkbox"
             checked={checked}
-            aria-label={`Select ${title}`}
+            aria-label={t("notes.list.selectNote", { title })}
             onChange={() => onToggleSelected(note.id)}
           />
           <span className="folder-note-select-box" aria-hidden>
@@ -412,7 +417,7 @@ const AllNoteRow = memo(function AllNoteRow({
           <button
             type="button"
             className="folder-note-menu"
-            aria-label={`Actions for ${title}`}
+            aria-label={t("notes.list.actionsFor", { title })}
             aria-haspopup="menu"
             aria-expanded={menu !== null}
             onClick={(event) => {
@@ -444,7 +449,7 @@ const AllNoteRow = memo(function AllNoteRow({
               }}
             >
               <IconMoveFolder size={14} />
-              Move to project
+              {t("notes.list.moveToProject")}
             </button>
             <div className="context-menu-separator" role="separator" />
             <button
@@ -457,7 +462,7 @@ const AllNoteRow = memo(function AllNoteRow({
               }}
             >
               <IconTrashCan size={14} />
-              Delete note
+              {t("notes.header.deleteNote")}
             </button>
           </div>
         ) : null}
@@ -466,9 +471,9 @@ const AllNoteRow = memo(function AllNoteRow({
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
         onConfirm={() => onDelete(note.id)}
-        title={`Delete "${title}"?`}
-        description="This cannot be undone."
-        confirmLabel="Delete note"
+        title={t("notes.list.delete.title", { title })}
+        description={t("notes.list.delete.description")}
+        confirmLabel={t("notes.header.deleteNote")}
         destructive
       />
     </li>
@@ -541,21 +546,21 @@ function meetingMenuPosition(trigger: HTMLElement): MenuPosition {
 function statusLabel(status: NoteListItemDto["processingStatus"]) {
   switch (status) {
     case "recording":
-      return "Recording";
+      return translate("notes.list.status.recording");
     case "validating":
-      return "Validating";
+      return translate("notes.list.status.validating");
     case "transcribing":
-      return "Transcribing";
+      return translate("notes.list.status.transcribing");
     case "generating":
-      return "Generating";
+      return translate("notes.list.status.generating");
     case "failed":
-      return "Needs attention";
+      return translate("notes.list.status.failed");
     case "recoverable":
-      return "Recoverable";
+      return translate("notes.list.status.recoverable");
     case "ready":
-      return "Ready";
+      return translate("notes.list.status.ready");
     default:
-      return "Draft";
+      return translate("notes.list.status.draft");
   }
 }
 
@@ -563,24 +568,6 @@ function formatNoteTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  if (diffMs < 0) return "Future";
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return date.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    return date.toLocaleDateString(undefined, { weekday: "short" });
-  }
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  if (now.getTime() < date.getTime()) return translate("notes.list.future");
+  return formatListTimestamp(date, now);
 }

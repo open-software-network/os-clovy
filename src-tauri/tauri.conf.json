@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clovy",
-  "version": "0.0.40",
-  "identifier": "co.opensoftware.june",
+  "version": "0.1.6",
+  "identifier": "dev.guilhermexp.clovy",
   "build": {
     "beforeDevCommand": "node ./scripts/tauri-before-dev.mjs",
-    "beforeBuildCommand": "pnpm run agent-runtime:build && node ./scripts/build-agent-runtime.mjs && pnpm run extension:build && node ./scripts/validate-extension-id.mjs && pnpm run computer-use:prepare -- --release && pnpm run build",
+    "beforeBuildCommand": "pnpm run browser:prepare -- --release && pnpm run computer-use:prepare -- --build-hook && pnpm run build",
     "devUrl": "http://127.0.0.1:1421",
     "frontendDist": "../dist"
   },
@@ -42,23 +42,6 @@
         "visible": false
       },
       {
-        "label": "agent-hud",
-        "url": "/agent-hud.html",
-        "title": "Clovy Agents",
-        "width": 240,
-        "height": 48,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "backgroundColor": "#00000000",
-        "alwaysOnTop": true,
-        "visibleOnAllWorkspaces": true,
-        "focusable": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": false
-      },
-      {
         "label": "meeting-hud",
         "url": "/meeting-hud.html",
         "title": "Clovy Recording",
@@ -82,15 +65,12 @@
         "enable": true,
         "scope": [
           "$TEMP/clovy-dictation-*.m4a",
-          "$TEMP/clovy-dictation-*.wav",
-          "$TEMP/os-june-dictation-*.m4a",
-          "$TEMP/os-june-dictation-*.wav"
+          "$TEMP/clovy-dictation-*.wav"
         ]
       },
       "capabilities": [
         "main",
         "hud",
-        "agent-hud",
         "meeting-hud"
       ]
     }
@@ -100,29 +80,26 @@
       "mobile": [
         {
           "scheme": [
-            "clovy",
-            "osjune"
+            "clovy"
           ],
           "appLink": false
         }
       ],
       "desktop": {
         "schemes": [
-          "clovy",
-          "osjune"
+          "clovy"
         ]
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwMDUxRDBGNzYyRDU0MTgKUldRWVZDMTJEeDBGVUZWQ3VsVWxCdmhFbk9McWFVWjBGTEZZZHN0NFZRQjFZaFZRVzF4Sm9NdnkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDODFEM0NBQjZENzU4MzYKUldRMldOZTJ5dE9CZkZHa0NQeU0vdW9BNmRVZnErcXZsTytXZXVwYzkvVFNmT0xzN3VmdlVaQ3EK",
       "endpoints": [
-        "https://github.com/open-software-network/os-june-releases/releases/latest/download/latest.json"
+        "https://github.com/guilhermexp/os-clovy/releases/latest/download/latest.json"
       ]
     }
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -131,7 +108,7 @@
       "icons/icon.png"
     ],
     "resources": {
-      "../extension/dist": "native/extension",
+      "../resources/agent-browser": "native/agent-browser",
       "resources/agent-skills": "native/agent-skills"
     }
   }

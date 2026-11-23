@@ -1,6 +1,6 @@
-//! Public-web-only URL policy for the managed browser (JUN-289).
+//! Public-web-only URL policy for Clovy's private browser.
 //!
-//! Per ADR 0017 and its 2026-07-13 addendum, the Rust broker is the only
+//! Per ADR 0017 and the private browser host decision, the Rust broker is the only
 //! enforcement point for browser policy. This module is the single source of
 //! truth for which destinations the managed transport may reach: a scheme and
 //! host check for a pre-navigation refusal, an address-class check that names
@@ -37,7 +37,8 @@ pub struct PolicyConfig {
 }
 
 /// The broker-visible facts about an interactive element. Page script only
-/// reports these facts; the Rust policy below is the sole classifier.
+/// reports these redacted facts; only the private host classifies the original
+/// field facts. Network policy remains enforced here in Rust.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractiveElement {
@@ -52,117 +53,31 @@ pub struct InteractiveElement {
     pub content_editable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedAction<'a> {
-    Click,
-    Fill,
-    Press(&'a str),
+/// A closed classification from the private host's original, unredacted facts.
+/// This is never accepted as a model tool argument. The host guard is the only
+/// field classifier; the broker routes this trusted result before approval.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionClass {
+    HumanOnly,
+    ApprovalRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionClass {
-    Routine,
-    Consequential,
-    SensitiveField,
+pub enum InteractionRoute {
+    HumanOnly,
+    UnattendedDenied,
+    CentralApproval,
 }
 
-/// Classify a managed-browser action from element semantics. The page never
-/// decides whether an action is allowed, and its descriptive text is never
-/// included in a refusal.
-pub fn classify_managed_action(
-    action: ManagedAction<'_>,
-    element: &InteractiveElement,
-) -> ActionClass {
-    if matches!(action, ManagedAction::Fill | ManagedAction::Press(_))
-        && is_sensitive_field(element)
-    {
-        return ActionClass::SensitiveField;
+/// Route the trusted host class before attendance or central approval. No DOM
+/// metadata is accepted here: redaction cannot change this routing decision.
+pub fn interaction_route(class: InteractionClass, attended: bool) -> InteractionRoute {
+    match (class, attended) {
+        (InteractionClass::HumanOnly, _) => InteractionRoute::HumanOnly,
+        (InteractionClass::ApprovalRequired, false) => InteractionRoute::UnattendedDenied,
+        (InteractionClass::ApprovalRequired, true) => InteractionRoute::CentralApproval,
     }
-
-    let activates = match action {
-        ManagedAction::Click => true,
-        ManagedAction::Fill => false,
-        ManagedAction::Press(key) => matches!(key, "Enter" | " " | "Space" | "Spacebar"),
-    };
-    if !activates {
-        return ActionClass::Routine;
-    }
-
-    let tag = element.tag.to_ascii_lowercase();
-    let input_type = element.input_type.to_ascii_lowercase();
-    let semantic_submit = matches!(input_type.as_str(), "submit" | "image")
-        || (tag == "button" && element.in_form && input_type != "button")
-        || (matches!(action, ManagedAction::Press("Enter"))
-            && element.in_form
-            && matches!(tag.as_str(), "input" | "textarea" | "select"));
-    if semantic_submit || contains_consequential_term(element) {
-        ActionClass::Consequential
-    } else {
-        ActionClass::Routine
-    }
-}
-
-pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
-    if element.input_type.eq_ignore_ascii_case("password") {
-        return true;
-    }
-    let autocomplete = element.autocomplete.to_ascii_lowercase();
-    if autocomplete.split_whitespace().any(|token| {
-        token.contains("password") || token == "one-time-code" || token.starts_with("cc-")
-    }) {
-        return true;
-    }
-    contains_term(
-        element,
-        &[
-            "password",
-            "passcode",
-            "one time code",
-            "one-time code",
-            "otp",
-            "verification code",
-            "authentication code",
-            "auth code",
-            "2fa code",
-            "2 fa code",
-            "mfa code",
-            "two factor code",
-            "security code",
-            "card number",
-            "credit card",
-            "expiration",
-            "expiry",
-            "exp date",
-            "exp month",
-            "exp year",
-            "mm/yy",
-            "mm / yy",
-            "valid thru",
-            "valid through",
-            "cvv",
-            "cvc",
-        ],
-    )
-}
-
-fn contains_consequential_term(element: &InteractiveElement) -> bool {
-    contains_term(
-        element,
-        &[
-            "submit", "send", "publish", "purchase", "buy", "checkout", "pay", "payment", "order",
-            "delete", "remove", "confirm", "save",
-        ],
-    )
-}
-
-fn contains_term(element: &InteractiveElement, terms: &[&str]) -> bool {
-    let haystack = format!(
-        "{} {} {} {}",
-        element.name, element.id, element.label, element.role
-    )
-    .to_ascii_lowercase()
-    .replace(['_', '-'], " ");
-    terms.iter().any(|term| haystack.contains(term))
 }
 
 /// The class of a blocked address, used to name a refusal without leaking the
@@ -223,6 +138,8 @@ pub enum PolicyViolation {
     NonHttpScheme,
     /// The URL parsed with no host, or a host that is not usable.
     MissingHost,
+    /// Credentials must be entered by the person, never carried in a tool URL.
+    EmbeddedCredentials,
     /// DNS resolution failed or returned no addresses.
     ResolutionFailure,
     /// The destination resolves to a non-public address of the named class.
@@ -242,6 +159,7 @@ impl std::fmt::Display for PolicyViolation {
                 f,
                 "Navigation blocked: the address is missing a valid host. The managed browser reaches only the public web."
             ),
+            PolicyViolation::EmbeddedCredentials => write!(f,"Navigation blocked: enter credentials yourself in the dedicated browser."),
             PolicyViolation::ResolutionFailure => write!(
                 f,
                 "Navigation blocked: the destination could not be resolved. The managed browser reaches only the public web."
@@ -290,6 +208,9 @@ impl ValidatedUrl {
 /// later, at connection time, by [`resolve_validated`].
 pub fn validate_public_http_url(raw: &str) -> Result<ValidatedUrl, PolicyViolation> {
     let url = Url::parse(raw).map_err(|_| PolicyViolation::MissingHost)?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PolicyViolation::EmbeddedCredentials);
+    }
 
     match url.scheme() {
         "http" | "https" => {}
@@ -602,6 +523,17 @@ pub async fn validate_final_public_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_credentials_never_enter_browser_navigation_or_artifacts() {
+        for raw in [
+            "https://user:synthetic-password@example.com/",
+            "http://synthetic-user@example.com/",
+        ] {
+            let violation = validate_public_http_url(raw).unwrap_err();
+            assert_eq!(violation, PolicyViolation::EmbeddedCredentials);
+            assert!(!violation.to_string().contains("synthetic"));
+        }
+    }
     use std::net::SocketAddr;
 
     /// A resolver that returns a fixed address set regardless of input, for
@@ -988,152 +920,39 @@ mod tests {
     }
 
     #[test]
-    fn managed_action_classification_covers_consequential_and_routine_actions() {
-        let submit = InteractiveElement {
-            tag: "button".into(),
-            in_form: true,
-            label: "Continue".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &submit),
-            ActionClass::Consequential
-        );
-
-        let delete = InteractiveElement {
-            tag: "div".into(),
-            role: "button".into(),
-            label: "Delete draft".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &delete),
-            ActionClass::Consequential
-        );
-
-        let link = InteractiveElement {
-            tag: "a".into(),
-            label: "Read details".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &link),
-            ActionClass::Routine
-        );
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("Escape"), &submit),
-            ActionClass::Routine
-        );
-        let form_input = InteractiveElement {
-            tag: "input".into(),
-            in_form: true,
-            label: "Email address".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("Enter"), &form_input),
-            ActionClass::Consequential
-        );
-    }
-
-    #[test]
-    fn managed_action_classification_covers_every_consequential_term_class() {
-        for label in [
-            "Submit application",
-            "Send message",
-            "Publish post",
-            "Purchase now",
-            "Pay",
-            "Pay now",
-            "Complete order",
-            "Delete account",
-            "Save",
-        ] {
-            let element = InteractiveElement {
-                tag: "button".into(),
-                input_type: "button".into(),
-                label: label.into(),
-                ..InteractiveElement::default()
-            };
+    fn human_only_host_class_precedes_attendance_and_central_approval() {
+        let class: InteractionClass = serde_json::from_str("\"human_only\"").unwrap();
+        for attended in [false, true] {
             assert_eq!(
-                classify_managed_action(ManagedAction::Click, &element),
-                ActionClass::Consequential,
-                "{label} must be consequential"
+                interaction_route(class, attended),
+                InteractionRoute::HumanOnly
             );
         }
     }
 
     #[test]
-    fn managed_text_input_classification_blocks_sensitive_fields_only() {
-        for sensitive in [
-            InteractiveElement {
-                tag: "input".into(),
-                input_type: "password".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                autocomplete: "one-time-code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Verification code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "2FA code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Authentication code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                autocomplete: "cc-number".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Expiration date (MM/YY)".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                name: "card_expiry".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Valid thru".into(),
-                ..InteractiveElement::default()
-            },
+    fn ordinary_host_class_requires_attended_central_approval() {
+        let class: InteractionClass = serde_json::from_str("\"approval_required\"").unwrap();
+        assert_eq!(
+            interaction_route(class, false),
+            InteractionRoute::UnattendedDenied
+        );
+        assert_eq!(
+            interaction_route(class, true),
+            InteractionRoute::CentralApproval
+        );
+    }
+
+    #[test]
+    fn private_host_class_has_no_unknown_or_boolean_default() {
+        for invalid in [
+            serde_json::json!("unknown"),
+            serde_json::json!("HumanOnly"),
+            serde_json::json!(true),
+            serde_json::Value::Null,
         ] {
-            assert_eq!(
-                classify_managed_action(ManagedAction::Fill, &sensitive),
-                ActionClass::SensitiveField
-            );
-            assert_eq!(
-                classify_managed_action(ManagedAction::Press("a"), &sensitive),
-                ActionClass::SensitiveField
-            );
+            assert!(serde_json::from_value::<InteractionClass>(invalid).is_err());
         }
-        let ordinary = InteractiveElement {
-            tag: "input".into(),
-            label: "City".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Fill, &ordinary),
-            ActionClass::Routine
-        );
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("a"), &ordinary),
-            ActionClass::Routine
-        );
     }
 
     #[test]

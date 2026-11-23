@@ -285,6 +285,45 @@ async fn generated_note_derives_title_from_all_section_headings() {
 }
 
 #[tokio::test]
+async fn generated_note_title_uses_subjects_not_fixed_sections() {
+    let repos = repos().await;
+    let note = repos.create_note("default", None).await.expect("note");
+
+    let generated = repos
+        .set_generated_note(
+            &note.id,
+            Some("New note".to_string()),
+            "# Resumo\n\nReunião gravada em 28 de outubro de 2026.\n\n# Discussão\n\n## Integrações DHL e Azul\n\n- Falta a credencial.\n\n## Site para a loja de carros\n\n- Vitrine sem venda online.\n\n# Tarefas\n\n- **Cliente:** enviar o logo"
+                .to_string(),
+        )
+        .await
+        .expect("generated note");
+
+    assert_eq!(
+        generated.title,
+        "Integrações DHL e Azul and Site para a loja de carros"
+    );
+}
+
+#[tokio::test]
+async fn generated_note_title_uses_continuation_subjects() {
+    let repos = repos().await;
+    let note = repos.create_note("default", None).await.expect("note");
+
+    let generated = repos
+        .set_generated_note(
+            &note.id,
+            Some("New note".to_string()),
+            "# Continuação — 30 de outubro de 2026\n\nNesta parte.\n\n## Discussão\n\n### Credencial da Azul\n\n- Encontrada.\n\n## Tarefas\n\n- **Dev:** deploy"
+                .to_string(),
+        )
+        .await
+        .expect("generated note");
+
+    assert_eq!(generated.title, "Credencial da Azul");
+}
+
+#[tokio::test]
 async fn generated_note_appends_to_existing_generated_content() {
     let repos = repos().await;
     let note = repos.create_note("default", None).await.expect("note");
@@ -821,7 +860,7 @@ async fn get_note_returns_transcript_and_audio_metadata() {
             &audio.id,
             "Raw transcript text",
             Some("en".into()),
-            "venice",
+            "groq",
         )
         .await
         .expect("transcript");
@@ -833,7 +872,8 @@ async fn get_note_returns_transcript_and_audio_metadata() {
         loaded.transcript.expect("transcript").text,
         "Raw transcript text"
     );
-    assert!(loaded.source_transcripts.is_empty());
+    assert_eq!(loaded.source_transcripts.len(), 1);
+    assert_eq!(loaded.source_transcripts[0].text, "Raw transcript text");
 }
 
 #[tokio::test]
@@ -869,7 +909,7 @@ async fn discarded_recording_no_longer_exposes_retryable_audio() {
 }
 
 #[tokio::test]
-async fn get_note_returns_only_timed_source_transcript_rows() {
+async fn get_note_preserves_legacy_transcripts_alongside_timed_turns() {
     let repos = repos().await;
     let note = repos.create_note("default", None).await.expect("note");
     let session_id = "session-1";
@@ -895,17 +935,17 @@ async fn get_note_returns_only_timed_source_transcript_rows() {
         )
         .await
         .expect("artifact");
-    repos
+    let legacy = repos
         .create_transcript(
             &note.id,
             &audio.id,
-            "Standalone transcript should not be displayed as a turn.",
+            "Legacy transcript without a recording session",
             Some("en".into()),
-            "venice",
+            "groq",
         )
         .await
         .expect("standalone transcript");
-    repos
+    let timed = repos
         .create_source_transcript(
             &note.id,
             session_id,
@@ -914,7 +954,7 @@ async fn get_note_returns_only_timed_source_transcript_rows() {
             "microphone",
             "Timed source transcript",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(1_000),
             Some(2_000),
             Some(0),
@@ -924,8 +964,24 @@ async fn get_note_returns_only_timed_source_transcript_rows() {
 
     let loaded = repos.get_note(&note.id).await.expect("loaded note");
 
-    assert_eq!(loaded.source_transcripts.len(), 1);
-    assert_eq!(loaded.source_transcripts[0].text, "Timed source transcript");
+    assert_eq!(loaded.source_transcripts.len(), 2);
+    assert!(loaded.source_transcripts.iter().any(|row| {
+        row.id == legacy.id
+            && row.text == legacy.text
+            && row.recording_session_id.is_none()
+            && row.start_ms.is_none()
+            && row.end_ms.is_none()
+            && row.turn_index.is_none()
+    }));
+    assert!(loaded.source_transcripts.iter().any(|row| {
+        row.id == timed.id
+            && row.text == timed.text
+            && row.recording_session_id.as_deref() == Some(session_id)
+            && row.source.as_deref() == Some("microphone")
+            && row.start_ms == Some(1_000)
+            && row.end_ms == Some(2_000)
+            && row.turn_index == Some(0)
+    }));
 }
 
 #[tokio::test]
@@ -956,7 +1012,7 @@ async fn get_note_returns_failed_source_transcript_reason() {
             &audio.id,
             RecordingSourceMode::MicrophonePlusSystem,
             "system",
-            "venice",
+            "groq",
             "System source was silent.",
             Some(1_000),
             Some(2_000),
@@ -995,7 +1051,7 @@ async fn get_note_orders_source_transcripts_by_session_then_turn() {
             "microphone",
             "First session second turn",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(2_000),
             Some(3_000),
             Some(1),
@@ -1011,7 +1067,7 @@ async fn get_note_orders_source_transcripts_by_session_then_turn() {
             "system",
             "Second session first turn",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(1_000),
             Some(2_000),
             Some(0),
@@ -1027,7 +1083,7 @@ async fn get_note_orders_source_transcripts_by_session_then_turn() {
             "system",
             "First session first turn",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(500),
             Some(1_500),
             Some(0),
@@ -1066,7 +1122,7 @@ async fn successful_source_turns_for_session_exclude_failed_and_empty_rows() {
             "microphone",
             "Valid microphone turn",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(1_000),
             Some(2_000),
             Some(0),
@@ -1082,7 +1138,7 @@ async fn successful_source_turns_for_session_exclude_failed_and_empty_rows() {
             "system",
             "   ",
             Some("en".into()),
-            "venice",
+            "groq",
             Some(2_500),
             Some(3_000),
             Some(1),
@@ -1096,7 +1152,7 @@ async fn successful_source_turns_for_session_exclude_failed_and_empty_rows() {
             &audio_id,
             RecordingSourceMode::MicrophonePlusSystem,
             "system",
-            "venice",
+            "groq",
             "No speech detected.",
             Some(3_500),
             Some(4_000),
@@ -1128,7 +1184,7 @@ async fn source_turn_upsert_replaces_failed_retry_with_success() {
             &audio_id,
             RecordingSourceMode::MicrophonePlusSystem,
             "system",
-            "venice",
+            "groq",
             "No speech detected.",
             1_000,
             2_000,
@@ -1145,7 +1201,7 @@ async fn source_turn_upsert_replaces_failed_retry_with_success() {
             "system",
             "Recovered system turn",
             Some("en".into()),
-            "venice",
+            "groq",
             1_000,
             2_000,
             0,

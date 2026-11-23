@@ -161,3 +161,5 @@ extension publication is enabled, the Workload Identity Provider must trust
 that repository and the production-environment subject documented in
 `docs/release-extension.md`. The earlier `os-june` subject above describes the
 repository coordinate in effect when this decision was accepted.
+
+Superada pela change desvincular-repo-ci.

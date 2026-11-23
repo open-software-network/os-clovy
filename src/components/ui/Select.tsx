@@ -119,6 +119,9 @@ export type SelectOption = {
   /** Optional trailing count, rendered as a small muted number badge rather than
    * inline in the label text (e.g. the skills category filter counts). */
   count?: number;
+  /** BCP 47 tag when the label is written in another language than the
+   * interface (the interface-language picker names each option natively). */
+  lang?: string;
 };
 
 /**
@@ -245,7 +248,7 @@ export function Select({
         {selected?.color ? (
           <span className="select-swatch" style={{ background: selected.color }} aria-hidden />
         ) : null}
-        <span>{selected?.label ?? placeholder}</span>
+        <span lang={selected?.lang}>{selected?.label ?? placeholder}</span>
         {typeof selected?.count === "number" ? (
           <span className="status-pill select-count">{selected.count}</span>
         ) : null}
@@ -293,7 +296,9 @@ export function Select({
                     aria-hidden
                   />
                 ) : null}
-                <span className="select-label">{option.label}</span>
+                <span className="select-label" lang={option.lang}>
+                  {option.label}
+                </span>
                 <span className="select-trailing">
                   <span className="select-check" aria-hidden>
                     {isSelected ? <IconCheckmark2Small size={14} /> : null}

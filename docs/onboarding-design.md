@@ -171,6 +171,9 @@ The structural insight this screen encodes: **inference privacy is a property of
 
 ## 7. No-card onboarding and funding (2026-06-24)
 
+> Superseded in this fork by §8: sign-in, funding gates and billing were
+> removed.
+
 The onboarding path should get a signed-in user into the product before any
 payment handoff. OS Accounts owns the starting grant, so Clovy should trust the
 account snapshot instead of minting trials or opening checkout from the
@@ -207,3 +210,18 @@ portal; zero-credit accounts open the same portal to add credits.
 - The Clovy OAuth scopes should stay read/spend focused:
   `profile:read billing:read credits:spend`. The desktop app should not need
   `billing:write` because billing changes happen in OS Accounts.
+
+## 8. Account-free onboarding (fork, 2026-10-21)
+
+The `desvincular-servicos-open-software` change removed OS Accounts from the
+desktop. The app runs on a fixed local identity, so there is nothing to sign in
+to and nothing to fund.
+
+Progress bar: **Focus -> Mood -> Permissions** (`ONBOARDING_STEPS` in
+`src/components/onboarding/OnboardingFlow.tsx`).
+
+- There is no sign-in step, no `osjune://` deep link, and no telemetry consent
+  step; the data sharing screen in §3 and the sign-in step in §7 are gone.
+- After onboarding the app opens the main window directly. There is no
+  `AccountGate`, `FundingNotice` or `FundingChip`, and no action is gated on a
+  plan or credit balance in the desktop.

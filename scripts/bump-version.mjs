@@ -125,21 +125,16 @@ function cargoLockField(contents, table, field) {
 }
 
 function desktopCargoLockPackage(contents) {
-  const matches = { clovy: [], "os-june": [] };
+  const packageName = "clovy";
+  const selected = [];
   for (const table of cargoLockPackageTables(contents)) {
     const name = cargoLockField(contents, table, "name");
     if (name.count !== 1 || name.malformed) continue;
-    if (name.value === "clovy" || name.value === "os-june") {
-      matches[name.value].push(table);
-    }
+    if (name.value === packageName) selected.push(table);
   }
 
-  const packageName = matches.clovy.length > 0 ? "clovy" : "os-june";
-  const selected = matches[packageName];
   if (selected.length === 0) {
-    throw new Error(
-      'Could not find a [[package]] named "clovy" or legacy "os-june" in Cargo.lock.',
-    );
+    throw new Error('Could not find a [[package]] named "clovy" in Cargo.lock.');
   }
   if (selected.length > 1) {
     throw new Error(`Found multiple [[package]] tables named "${packageName}" in Cargo.lock.`);

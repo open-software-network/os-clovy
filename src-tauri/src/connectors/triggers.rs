@@ -682,7 +682,7 @@ async fn fire(app: &AppHandle, trigger: &ConnectorTriggerRecord) -> FireOutcome 
 /// example a desktop with no battery, or a non-macOS host) reports false, so
 /// the daemon keeps its normal cadence.
 fn battery_low_and_discharging() -> bool {
-    let Ok(output) = std::process::Command::new("pmset")
+    let Ok(output) = crate::hide_console::command("pmset")
         .args(["-g", "batt"])
         .output()
     else {

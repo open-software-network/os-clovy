@@ -1,5 +1,7 @@
 // DownloadEvent is owned by the IPC boundary (lib/updater.ts); re-exported here
-// so existing importers keep working without app/ reaching back up into lib/.
+// so importers do not reach from app/ back up into lib/ for it.
+import { t } from "../i18n";
+import { messageFromError } from "../lib/errors";
 import type { DownloadEvent } from "../lib/updater";
 export type { DownloadEvent };
 
@@ -9,12 +11,14 @@ export type UpdatePromptPayload<TUpdate> = {
   notes?: string;
 };
 
-export type UpdateCheckMode = "launch" | "manual" | "periodic";
-
-export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+// A release build checks once at launch and whenever the owner asks in
+// Settings. A postponed offer stays hidden until one of those runs again.
+export type UpdateCheckMode = "launch" | "manual";
 
 // The manual-check success status. Shared so the reporter and the auto-dismiss
-// effect that matches on it (App), plus the dev demo, can't drift apart.
+// effect that matches on it can't drift apart. It stays an English sentinel in
+// state; the update card renders it through t("app.update.upToDate") so it
+// follows the interface language.
 export const UP_TO_DATE_STATUS = "Clovy is up to date.";
 
 export type UpdateStatusDisplayState = {
@@ -53,8 +57,8 @@ export function updateStatusDisplayReducer(
   return INITIAL_UPDATE_STATUS_DISPLAY;
 }
 
-// Launch and periodic checks are silent unless they discover an update. Only
-// manual checks render the transient checking status and its spinner.
+// The launch check is silent unless it finds an update. Only manual checks
+// render the transient checking status and its spinner.
 export function updateCheckShowsStatus(mode: UpdateCheckMode): boolean {
   return mode === "manual";
 }
@@ -67,15 +71,8 @@ export type UpdaterUpdate = {
 
 export type UpdateCheckDeps<TUpdate extends UpdaterUpdate> = {
   check: () => Promise<TUpdate | null>;
-  prompt: (payload: UpdatePromptPayload<TUpdate>) => void;
+  offer: (payload: UpdatePromptPayload<TUpdate>) => void;
   reportNoUpdate: () => void;
-  reportFailure: (message: string) => void;
-};
-
-export type InstallUpdateDeps<TUpdate extends UpdaterUpdate> = {
-  update: TUpdate;
-  relaunch: () => Promise<void>;
-  reportProgress: (progress: UpdateInstallProgress) => void;
   reportFailure: (message: string) => void;
 };
 
@@ -87,11 +84,14 @@ export type PrepareUpdateDeps<TUpdate extends UpdaterUpdate> = {
 };
 
 export type UpdateInstallProgress = {
-  state: "downloading" | "installing";
+  // waitingForCapture: downloaded, the install waits for a capture to end.
+  state: "downloading" | "waitingForCapture" | "installing";
   downloadedBytes?: number;
   contentLength?: number;
 };
 
+// A check only offers the update: nothing downloads until the owner accepts.
+// A failed launch check (no network, a bad manifest) never interrupts the app.
 export async function checkForClovyUpdate<TUpdate extends UpdaterUpdate>(
   deps: UpdateCheckDeps<TUpdate>,
   mode: UpdateCheckMode,
@@ -102,22 +102,14 @@ export async function checkForClovyUpdate<TUpdate extends UpdaterUpdate>(
       if (mode === "manual") deps.reportNoUpdate();
       return;
     }
-    deps.prompt({
+    deps.offer({
       update,
       version: update.version,
       notes: normalizeNotes(update.body),
     });
   } catch (error) {
-    deps.reportFailure(messageFromUnknown(error));
+    if (mode === "manual") deps.reportFailure(messageFromUnknown(error));
   }
-}
-
-export function startPeriodicClovyUpdateChecks(
-  runUpdateCheck: (mode: UpdateCheckMode) => void,
-  intervalMs = UPDATE_CHECK_INTERVAL_MS,
-) {
-  const timer = window.setInterval(() => runUpdateCheck("periodic"), intervalMs);
-  return () => window.clearInterval(timer);
 }
 
 export async function prepareClovyUpdate<TUpdate extends UpdaterUpdate>({
@@ -138,18 +130,29 @@ export async function prepareClovyUpdate<TUpdate extends UpdaterUpdate>({
   }
 }
 
-export async function installClovyUpdate<TUpdate extends UpdaterUpdate>({
-  update,
-  relaunch,
-  reportProgress,
-  reportFailure,
-}: InstallUpdateDeps<TUpdate>) {
-  try {
-    await downloadAndInstallClovyUpdate(update, reportProgress);
-    await relaunch();
-  } catch (error) {
-    reportFailure(messageFromUnknown(error));
-  }
+export type UpdateStepState = {
+  // A newer version was found and is shown to the owner.
+  offered: boolean;
+  // The owner chose to update and has not postponed since.
+  accepted: boolean;
+  // Download and install are running.
+  preparing: boolean;
+  // The update is installed and only the restart is left.
+  ready: boolean;
+  relaunching: boolean;
+  // A meeting recording or a dictation take is running.
+  captureActive: boolean;
+};
+
+export type UpdateStep = "none" | "wait" | "install" | "relaunch";
+
+// What the updater does next. Installing on Windows exits the app, and the
+// restart on macOS ends it too, so both wait while anything is recording.
+export function nextUpdateStep(state: UpdateStepState): UpdateStep {
+  if (!state.accepted || state.preparing || state.relaunching) return "none";
+  if (!state.ready && !state.offered) return "none";
+  if (state.captureActive) return "wait";
+  return state.ready ? "relaunch" : "install";
 }
 
 async function downloadAndInstallClovyUpdate<TUpdate extends UpdaterUpdate>(
@@ -158,10 +161,10 @@ async function downloadAndInstallClovyUpdate<TUpdate extends UpdaterUpdate>(
 ) {
   let downloadedBytes = 0;
   let contentLength: number | undefined;
-  // A multi-MB DMG fires thousands of Progress events; surfacing each as a state
-  // update would re-render the app on every network chunk. Throttle downloading
-  // ticks to whole-percent changes (or ~1MB steps when the total size is
-  // unknown). State transitions — Started and installing — always fire.
+  // A multi-MB package fires thousands of Progress events; surfacing each as a
+  // state update would re-render the app on every network chunk. Throttle
+  // downloading ticks to whole-percent changes (or ~1MB steps when the total
+  // size is unknown). State transitions (Started and installing) always fire.
   let lastPercent: number | undefined;
   let lastReportedBytes = 0;
   const UNKNOWN_LENGTH_STEP = 1_000_000;
@@ -197,6 +200,10 @@ async function downloadAndInstallClovyUpdate<TUpdate extends UpdaterUpdate>(
       });
       return;
     }
+    if (event.event === "WaitingForCapture") {
+      reportProgress({ state: "waitingForCapture", downloadedBytes, contentLength });
+      return;
+    }
     reportProgress({ state: "installing", downloadedBytes, contentLength });
   });
 }
@@ -206,8 +213,9 @@ function normalizeNotes(notes?: string) {
   return trimmed ? trimmed : undefined;
 }
 
+// Native commands reject with an AppError object ({ code, message }), not an Error.
 function messageFromUnknown(error: unknown) {
-  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) return messageFromError(error);
   if (typeof error === "string") return error;
-  return "An unknown error occurred.";
+  return t("app.update.unknownError");
 }

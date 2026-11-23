@@ -1,50 +1,53 @@
-//! Authenticated, narrow Computer use helper.
-//!
-//! This binary links the pinned upstream macOS implementation, but it does
-//! not expose upstream's CLI or complete MCP registry. Clovy starts it over a
-//! private local socket and authenticates both Clovy's peer process and a fresh
-//! in-memory capability. LaunchServices owns the helper process so macOS TCC
-//! grants belong to this bundle, while direct launches still provide no
-//! desktop-control surface.
+//! Authenticated private desktop helper. The only automation surface is the
+//! fourteen Clovy operations below. The upstream CLI/daemon is never exposed.
+#[path = "app_identity.rs"]
+#[allow(dead_code)]
+mod app_identity;
+mod computer_use_cancel;
+mod computer_use_engine;
+mod computer_use_host;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Shared helper permissions and main process-group ownership.
+mod computer_use_macos;
+#[allow(dead_code)] // Shared host/helper source; the helper uses only its relevant entry points.
+mod computer_use_owned_runtime;
+#[allow(dead_code)] // Shared with the host; not every policy is used by the helper.
+mod computer_use_policy;
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Shared parent/client and helper/server implementation.
+mod computer_use_windows;
 
 #[cfg(target_os = "macos")]
 use core_foundation::{base::TCFType, data::CFData};
 #[cfg(target_os = "macos")]
-use cua_driver_core::{
-    protocol::{initialize_result, Request, Response},
-    tool::ToolRegistry,
-};
-#[cfg(target_os = "macos")]
 use security_framework::os::macos::code_signing::{
     Flags as CodeSigningFlags, GuestAttributes, SecCode, SecRequirement,
 };
-#[cfg(target_os = "macos")]
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 #[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
 use std::{
-    collections::{HashMap, HashSet},
-    io::{self, Read},
-    os::fd::AsRawFd,
+    io,
     path::PathBuf,
+    sync::{Arc, Mutex},
+};
+#[cfg(target_os = "macos")]
+use std::{
+    io::Read,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
-#[cfg(target_os = "macos")]
-use tokio::{
-    io::{
-        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
-        BufReader,
-    },
-    net::{UnixListener, UnixStream},
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
-
-const UPSTREAM_VERSION: &str = "0.5.0";
-const UPSTREAM_COMMIT: &str = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1";
-const MAX_REQUEST_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "macos")]
-const POINTER_NOTIFICATION_METHOD: &str = "clovy/pointer";
+use tokio::net::{UnixListener, UnixStream};
+
+const UPSTREAM_VERSION: &str = "1.0.2";
+const UPSTREAM_COMMIT: &str = "9eb9b296192fcb70bda25e918cd6dd66abfa3d0d";
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
 #[cfg(target_os = "macos")]
 const SIGNATURE_DETAILS_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
@@ -53,7 +56,6 @@ const CHILD_TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(target_os = "macos")]
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 #[cfg(target_os = "macos")]
 struct BoundedChildOutput {
     status: ExitStatus,
@@ -61,43 +63,69 @@ struct BoundedChildOutput {
     stderr: Vec<u8>,
 }
 
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ScreenshotSize {
-    width: f64,
-    height: f64,
+#[derive(Deserialize)]
+struct Request {
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Option<Value>,
 }
-
-#[cfg(target_os = "macos")]
+#[derive(Serialize)]
+struct Response {
+    jsonrpc: &'static str,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<Value>,
+}
+impl Response {
+    fn ok(id: Value, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+    fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(json!({"code":code,"message":message.into()})),
+        }
+    }
+    fn parse_error() -> Self {
+        Self::error(Value::Null, -32700, "Invalid private request")
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 enum BoundedLine {
     Eof,
     Line(String),
     TooLarge,
 }
-
-#[cfg(target_os = "macos")]
-async fn read_bounded_line<R>(reader: &mut R, max_bytes: usize) -> io::Result<BoundedLine>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024));
-    let limit = u64::try_from(max_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let read = reader.take(limit).read_until(b'\n', &mut bytes).await?;
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<BoundedLine> {
+    let mut bytes = Vec::new();
+    let read = reader
+        .take((max_bytes as u64).saturating_add(1))
+        .read_until(b'\n', &mut bytes)
+        .await?;
     if read == 0 {
         return Ok(BoundedLine::Eof);
     }
-    if read > max_bytes {
+    if read > max_bytes || bytes.last() != Some(&b'\n') {
         return Ok(BoundedLine::TooLarge);
     }
     String::from_utf8(bytes)
         .map(BoundedLine::Line)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
-
-#[cfg(target_os = "macos")]
 const ALLOWED_TOOLS: &[&str] = &[
     "check_permissions",
     "list_windows",
@@ -115,7 +143,7 @@ const ALLOWED_TOOLS: &[&str] = &[
     "set_value",
 ];
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -123,57 +151,82 @@ async fn main() {
         println!("clovy-computer-use-driver {UPSTREAM_VERSION} {UPSTREAM_COMMIT}");
         return;
     }
+    #[cfg(target_os = "macos")]
     let result = match args.as_slice() {
-        [mode] if mode == "mcp" && parent_is_clovy() => serve_stdio().await,
         [mode] if mode == "mcp-daemon" => serve_daemon().await,
-        [mode] if mode == "mcp" => Err(anyhow::anyhow!(
-            "the helper must be launched directly by Clovy"
-        )),
-        _ => Err(anyhow::anyhow!("This helper is private to Clovy.")),
+        _ => Err(anyhow::anyhow!("This helper is private to Clovy")),
+    };
+    #[cfg(target_os = "windows")]
+    let result = match args.as_slice() {
+        [mode] if mode == "mcp" => match computer_use_windows::verify_parent() {
+            Ok(()) => match computer_use_windows::connect_private_transport() {
+                Ok((reader, writer)) => serve(reader, writer).await,
+                Err(error) => Err(error),
+            },
+            Err(e) => Err(e),
+        },
+        _ => Err(anyhow::anyhow!("This helper is private to Clovy")),
     };
     if let Err(error) = result {
         eprintln!("Computer use helper stopped: {error}");
         std::process::exit(1);
     }
 }
-
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    eprintln!("Computer use is available on macOS only.");
+    eprintln!("Clovy desktop control requires macOS or Windows");
     std::process::exit(69);
-}
-
-#[cfg(target_os = "macos")]
-async fn serve_stdio() -> anyhow::Result<()> {
-    serve(tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 #[cfg(target_os = "macos")]
 async fn serve_daemon() -> anyhow::Result<()> {
     isolate_process_group()?;
-    let socket_path = std::env::var("CLOVY_COMPUTER_USE_SOCKET")
-        .map(PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("the private Clovy socket is missing"))?;
+    let socket_path = PathBuf::from(std::env::var("CLOVY_COMPUTER_USE_SOCKET")?);
     if !socket_path.is_absolute() {
-        anyhow::bail!("the private Clovy socket must be absolute");
+        anyhow::bail!("Private socket must be absolute");
     }
+    let run_root = PathBuf::from(
+        std::env::var_os("CLOVY_COMPUTER_USE_RUN_DIR")
+            .ok_or_else(|| anyhow::anyhow!("Missing private run root"))?,
+    );
+    if !run_root.is_absolute() || socket_path.parent() != Some(run_root.as_path()) {
+        anyhow::bail!("Socket must belong to the parent-owned private run root");
+    }
+    use std::os::unix::fs::MetadataExt;
+    let root_identity = std::fs::symlink_metadata(&run_root)?;
+    if !root_identity.is_dir() || root_identity.file_type().is_symlink() {
+        anyhow::bail!("Invalid private run root");
+    }
+    let root_alive = || {
+        std::fs::symlink_metadata(&run_root).is_ok_and(|current| {
+            current.is_dir()
+                && current.dev() == root_identity.dev()
+                && current.ino() == root_identity.ino()
+        })
+    };
     let listener = UnixListener::bind(&socket_path)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
-    request_startup_permission();
-    let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(15), listener.accept())
-        .await
-        .map_err(|_| anyhow::anyhow!("Clovy did not connect to the private helper"))??;
-    let peer_pid = stream
+    let accepting = listener.accept();
+    tokio::pin!(accepting);
+    let deadline = tokio::time::sleep(Duration::from_secs(15));
+    tokio::pin!(deadline);
+    let (stream, _) = loop {
+        tokio::select! {
+            result=&mut accepting => {if !root_alive(){anyhow::bail!("Clovy cancelled helper startup");}break result?;},
+            _=&mut deadline=>anyhow::bail!("Clovy did not connect to the private helper"),
+            _=tokio::time::sleep(Duration::from_millis(50))=>if !root_alive(){anyhow::bail!("Clovy cancelled helper startup");}
+        }
+    };
+    let pid = stream
         .peer_cred()?
         .pid()
-        .ok_or_else(|| anyhow::anyhow!("the private Clovy peer has no process identity"))?;
-    let peer_audit_token = socket_peer_audit_token(&stream)?;
-    if !process_is_clovy(peer_pid, Some(&peer_audit_token)) {
-        anyhow::bail!("the private helper accepts only Clovy");
+        .ok_or_else(|| anyhow::anyhow!("Missing peer PID"))?;
+    let token = socket_peer_audit_token(&stream)?;
+    if !process_is_clovy(pid, Some(&token)) {
+        anyhow::bail!("Private helper peer identity rejected");
     }
     let (reader, writer) = stream.into_split();
     let result = serve(reader, writer).await;
@@ -181,175 +234,227 @@ async fn serve_daemon() -> anyhow::Result<()> {
     result
 }
 
-#[cfg(target_os = "macos")]
-fn request_startup_permission() {
-    match std::env::var("CLOVY_COMPUTER_USE_PERMISSION_PROMPT").as_deref() {
-        Ok("accessibility") => {
-            let _ = platform_macos::permissions::status::request_accessibility();
-        }
-        Ok("screen-recording") => {
-            let _ = platform_macos::permissions::status::request_screen_recording();
-        }
-        _ => {}
-    }
+#[derive(Default)]
+struct Connection {
+    closed: bool,
+    cancel: Option<computer_use_host::HostCancel>,
 }
-
-#[cfg(target_os = "macos")]
-fn permission_result() -> Value {
-    let status = platform_macos::permissions::current_status();
-    let accessibility = status.accessibility;
-    let screen_recording = status.screen_recording;
-    let text = format!(
-        "{} Accessibility: {}.\n{} Screen Recording: {}.",
-        if accessibility { "✅" } else { "❌" },
-        if accessibility {
-            "granted"
-        } else {
-            "NOT granted"
-        },
-        if screen_recording { "✅" } else { "❌" },
-        if screen_recording {
-            "granted"
-        } else {
-            "NOT granted"
-        },
-    );
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "structuredContent": {
-            "accessibility": accessibility,
-            "screen_recording": screen_recording,
-            // Accessibility belongs to this nested helper. macOS attributes
-            // Screen Recording to the signed outer Clovy app that launched it,
-            // and reports that responsible-app grant through this process.
-            // Avoid upstream's blocking live probe here; actual captures remain
-            // the authoritative runtime check.
-            "screen_recording_capturable": screen_recording,
-            "source": {
-                "attribution": "driver-app",
-                "pid": std::process::id(),
-                "executable": std::env::current_exe()
-                    .ok()
-                    .and_then(|path| path.to_str().map(str::to_owned))
-                    .unwrap_or_default(),
-            },
-        },
-        "isError": false,
-    })
-}
-
-#[cfg(target_os = "macos")]
 async fn serve<R, W>(reader: R, writer: W) -> anyhow::Result<()>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    let registry = Arc::new(platform_macos::register_tools());
-    registry.init_self_weak();
-    let allowed: HashSet<&'static str> = ALLOWED_TOOLS.iter().copied().collect();
-    let mut authenticated = false;
-    let mut screenshot_sizes = HashMap::new();
-    let mut reader = BufReader::new(reader);
-    let mut stdout = tokio::io::BufWriter::new(writer);
-
-    loop {
-        let line = match read_bounded_line(&mut reader, MAX_REQUEST_BYTES).await? {
-            BoundedLine::Eof => break,
-            BoundedLine::TooLarge => {
-                write_response(&mut stdout, Response::parse_error()).await?;
-                break;
-            }
-            BoundedLine::Line(line) => line,
-        };
-        let request = match serde_json::from_str::<Request>(line.trim()) {
-            Ok(request) => request,
-            Err(_) => {
-                write_response(&mut stdout, Response::parse_error()).await?;
-                continue;
-            }
-        };
-        if request.is_notification() {
-            continue;
-        }
-        let id = request.id.clone().unwrap_or(Value::Null);
-        let response = match request.method.as_str() {
-            "initialize" if !authenticated => {
-                if initialize_capability(request.params.as_ref()).is_some_and(valid_capability) {
-                    authenticated = true;
-                    let mut result = initialize_result();
-                    result["serverInfo"] = json!({
-                        "name": "Clovy Computer Use Driver",
-                        "version": UPSTREAM_VERSION,
-                    });
-                    result["instructions"] = Value::String(
-                        "Private Clovy helper. Desktop actions require Clovy's Rust policy broker."
-                            .to_string(),
-                    );
-                    Response::ok(id, result)
-                } else {
-                    let response = Response::error(id, -32001, "Clovy capability required.");
-                    write_response(&mut stdout, response).await?;
+    let namespace = PathBuf::from(
+        std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE")
+            .ok_or_else(|| anyhow::anyhow!("Missing browser authority"))?,
+    );
+    let image = PathBuf::from(
+        std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_IMAGE")
+            .ok_or_else(|| anyhow::anyhow!("Missing browser authority"))?,
+    );
+    if !namespace.is_absolute() || !image.is_absolute() {
+        anyhow::bail!("Invalid browser authority");
+    }
+    let browser_runtime = Arc::new(computer_use_owned_runtime::OwnedBrowserRuntime::new(
+        namespace, image,
+    ));
+    let connection = Arc::new(Mutex::new(Connection::default()));
+    let reader_connection = connection.clone();
+    let (sender, mut messages) = tokio::sync::mpsc::channel(16);
+    let reader_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        loop {
+            match read_bounded_line(&mut reader, MAX_REQUEST_BYTES).await {
+                Ok(BoundedLine::Line(line)) => {
+                    if sender.try_send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Ok(BoundedLine::Eof) => break,
+                _ => {
+                    let _ = sender.try_send(Err(()));
                     break;
                 }
             }
-            _ if !authenticated => Response::error(id, -32001, "Clovy capability required."),
-            "tools/list" => Response::ok(id, allowed_tool_list(&registry, &allowed)),
-            "tools/call" => match request.tool_call() {
-                Err(error) => Response::error(id, -32602, format!("Invalid params: {error}")),
-                Ok(call) if !allowed.contains(call.name.as_str()) => {
-                    Response::error(id, -32601, "That driver tool is not available to Clovy.")
-                }
-                Ok(call) if !arguments_are_narrow(&call.name, &call.args) => Response::error(
-                    id,
-                    -32602,
-                    "The driver request contains fields outside Clovy's contract.",
-                ),
-                Ok(call) if call.name == "check_permissions" => {
-                    Response::ok(id, permission_result())
-                }
-                Ok(call) if call.name == "join_current_stage" => {
-                    Response::ok(id, join_current_stage_result(&call.args))
-                }
-                Ok(call) => {
-                    let notification =
-                        pointer_notification(&call.name, &call.args, &screenshot_sizes);
-                    let tool_name = call.name;
-                    let tool_args = call.args;
-                    let result = registry.invoke(&tool_name, tool_args.clone()).await;
-                    match serde_json::to_value(result) {
-                        Ok(result) => {
-                            if let Some(notification) =
-                                pointer_notification_for_result(notification, &result)
-                            {
-                                write_json(&mut stdout, &notification).await?;
-                            }
-                            if tool_name == "get_window_state" {
-                                remember_screenshot_size(
-                                    &mut screenshot_sizes,
-                                    &tool_args,
-                                    &result,
-                                );
-                            }
-                            Response::ok(id, result)
-                        }
-                        Err(error) => {
-                            Response::error(id, -32603, format!("Serialize error: {error}"))
-                        }
-                    }
-                }
-            },
-            method => Response::method_not_found(id, method),
+        }
+        let mut connection = reader_connection.lock().unwrap_or_else(|e| e.into_inner());
+        connection.closed = true;
+        if let Some(cancel) = &connection.cancel {
+            cancel.cancel();
+        }
+    });
+    let mut writer = tokio::io::BufWriter::new(writer);
+    let mut authenticated = false;
+    let mut adapter = None;
+    while let Some(line) = messages.recv().await {
+        let request = match line
+            .ok()
+            .and_then(|line| serde_json::from_str::<Request>(&line).ok())
+        {
+            Some(request) => request,
+            None => {
+                write_response(&mut writer, Response::parse_error()).await?;
+                break;
+            }
         };
-        write_response(&mut stdout, response).await?;
+        let Some(id) = request.id else {
+            continue;
+        };
+        let response = match request.method.as_str() {
+            "initialize" if !authenticated => {
+                if !initialize_capability(request.params.as_ref()).is_some_and(valid_capability) {
+                    write_response(
+                        &mut writer,
+                        Response::error(id, -32001, "Clovy capability required"),
+                    )
+                    .await?;
+                    break;
+                }
+                authenticated = true;
+                #[cfg(target_os = "macos")]
+                {
+                    let closed = connection
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .closed;
+                    if closed || computer_use_cancel::current_run_cancelled() {
+                        anyhow::bail!(
+                            "Clovy cancelled helper startup before the permission request"
+                        );
+                    }
+                    computer_use_macos::request_startup_permission();
+                }
+                Response::ok(
+                    id,
+                    json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"Clovy Computer Use Driver","version":UPSTREAM_VERSION},"instructions":"Private helper. All actions require the Clovy policy broker."}),
+                )
+            }
+            _ if !authenticated => Response::error(id, -32001, "Clovy capability required"),
+            "tools/list" => Response::ok(id, allowed_tool_list()),
+            "tools/call" => {
+                let params = request.params.unwrap_or(Value::Null);
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                if !ALLOWED_TOOLS.contains(&name) {
+                    Response::error(id, -32601, "Driver operation is not allowed")
+                } else if !arguments_are_narrow(name, &args) {
+                    Response::error(id, -32602, "Fields outside the Clovy contract")
+                } else if name == "check_permissions" {
+                    Response::ok(id, permission_result())
+                } else {
+                    if adapter.is_none() {
+                        let executable = engine_executable()?;
+                        let run_root = PathBuf::from(
+                            std::env::var_os("CLOVY_COMPUTER_USE_RUN_DIR").ok_or_else(|| {
+                                anyhow::anyhow!("Missing parent-owned run namespace")
+                            })?,
+                        );
+                        if !run_root.is_absolute()
+                            || !run_root.is_dir()
+                            || std::fs::symlink_metadata(&run_root)?
+                                .file_type()
+                                .is_symlink()
+                        {
+                            anyhow::bail!("Invalid parent-owned run namespace");
+                        }
+                        let home = run_root.join(format!("engine-{}", uuid::Uuid::new_v4()));
+                        let host = computer_use_host::CommandHost::start(
+                            executable,
+                            home,
+                            Arc::clone(&browser_runtime),
+                        )
+                        .await?;
+                        let mut state = connection.lock().unwrap_or_else(|e| e.into_inner());
+                        state.cancel = Some(host.cancel_handle());
+                        if state.closed {
+                            host.cancel_handle().cancel();
+                            anyhow::bail!("Clovy disconnected");
+                        }
+                        adapter = Some(computer_use_engine::EngineAdapter::new(host));
+                    }
+                    Response::ok(id, adapter.as_mut().unwrap().invoke(name, args).await)
+                }
+            }
+            _ => Response::error(id, -32601, "Private method is unavailable"),
+        };
+        write_response(&mut writer, response).await?;
+    }
+    reader_task.abort();
+    if let Some(cancel) = &connection.lock().unwrap_or_else(|e| e.into_inner()).cancel {
+        cancel.cancel();
     }
     Ok(())
 }
-
-#[cfg(target_os = "macos")]
-fn parent_is_clovy() -> bool {
-    process_is_clovy(unsafe { libc::getppid() }, None)
+fn private_contract() -> &'static Value {
+    static CONTRACT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    CONTRACT.get_or_init(|| {
+        serde_json::from_str(include_str!("../computer-use-contract.json"))
+            .expect("packaged Computer use contract is valid JSON")
+    })
 }
-
+fn allowed_tool_list() -> Value {
+    let contract = private_contract();
+    let tools: Vec<Value> = ALLOWED_TOOLS.iter().map(|name| {
+        let definition = &contract["driverTools"][*name];
+        let properties: serde_json::Map<String,Value> = definition["properties"].as_object().expect("private tool properties").iter().map(|(field,kind)| {
+            let schema = if *name == "get_window_state" && field == "capture_mode" {
+                json!({"type":kind,"enum":["som","vision","ax"]})
+            } else if kind == "array" { json!({"type":"array","items":{"type":"string"},"maxItems":16}) } else { json!({"type":kind}) };
+            (field.clone(),schema)
+        }).collect();
+        json!({"name":name,"description":"Private broker-authorized Clovy desktop operation","inputSchema":{"type":"object","properties":properties,"required":definition["required"],"additionalProperties":false}})
+    }).collect();
+    json!({"tools":tools})
+}
+fn engine_executable() -> anyhow::Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Helper directory missing"))?
+        .join(if cfg!(target_os = "windows") {
+            "agent-desktop.exe"
+        } else {
+            "agent-desktop"
+        }))
+}
+fn permission_result() -> Value {
+    let engine_check = (|| -> anyhow::Result<()> {
+        let executable = engine_executable()?;
+        #[cfg(target_os = "windows")]
+        let _image_lock = computer_use_windows::lock_image(
+            &executable,
+            option_env!("CLOVY_AGENT_DESKTOP_EXECUTABLE_SHA256"),
+        )?;
+        computer_use_host::verify_engine(&executable)?;
+        #[cfg(target_os = "windows")]
+        computer_use_windows::verify_signed_peer(&executable)?;
+        Ok(())
+    })();
+    if let Err(error) = engine_check {
+        return json!({"isError":true,"content":[{"type":"text","text":format!("The packaged Computer use engine is missing or mismatched. {error}")}],"structuredContent":{"code":"computer_use_engine_mismatch","disposition":{"delivery":"not_delivered","retry":"safe"}}});
+    }
+    #[cfg(target_os = "macos")]
+    {
+        computer_use_macos::permission_result()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        computer_use_windows::permission_result()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        json!({"isError":true,"content":[{"type":"text","text":"Desktop platform unavailable"}]})
+    }
+}
+async fn write_response<W: AsyncWrite + Unpin>(
+    writer: &mut tokio::io::BufWriter<W>,
+    response: Response,
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(&response)?;
+    writer.write_all(&bytes).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 fn process_is_clovy(pid: libc::pid_t, audit_token: Option<&[u8]>) -> bool {
     let Some(process_path) = process_path(pid) else {
@@ -378,19 +483,28 @@ fn process_is_clovy(pid: libc::pid_t, audit_token: Option<&[u8]>) -> bool {
                 .is_some_and(|token| packaged_process_signature_matches(token, helper_app));
     }
 
-    // Development builds are not nested yet. Accept only the Cargo binary or
-    // the byte-identical product-named launcher materialized by the Tauri dev runner,
-    // both inside this checkout's Cargo target tree.
+    // Development builds are not nested. Accept only `clovy` built in one of
+    // this checkout's Cargo profile directories: Cargo's own binary, or the
+    // main executable of the dev runner's signed bundle directly inside that
+    // directory (`target/debug/Clovy Dev.app/Contents/MacOS/clovy`). The path
+    // marker is only a location check; every development peer must also pass
+    // the same audit-token, compiled identifier and same-Team signature gate.
     cfg!(debug_assertions)
         && development_process_path_is_clovy(
             &process_path,
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
         )
+        && app_ancestors.first().is_some_and(|helper_app| {
+            audit_token.is_some_and(|token| packaged_process_signature_matches(token, helper_app))
+        })
 }
 
 #[cfg(target_os = "macos")]
 fn packaged_main_executable(outer_app: &std::path::Path) -> PathBuf {
-    outer_app.join("Contents").join("MacOS").join("os-june")
+    outer_app
+        .join("Contents")
+        .join("MacOS")
+        .join(app_identity::MAIN_EXECUTABLE)
 }
 
 #[cfg(target_os = "macos")]
@@ -398,50 +512,58 @@ fn development_process_path_is_clovy(
     process_path: &std::path::Path,
     target_root: &std::path::Path,
 ) -> bool {
-    if !process_path.starts_with(target_root) {
-        return false;
-    }
-    let Some(name) = process_path.file_name() else {
-        return false;
-    };
-    if name == "os-june" {
-        return true;
-    }
-    if !development_launcher_name_is_allowed(name) {
-        return false;
-    }
+    use std::ffi::OsStr;
 
-    // The dev runner creates its product-named launcher as a hard link to the
-    // canonical Cargo binary. Requiring the same device and inode keeps the
-    // human-readable suffix from widening this trust boundary to another
-    // executable that merely copied an allowed name into target/.
-    let Some(profile_dir) = process_path.parent() else {
+    let Ok(relative) = process_path.strip_prefix(target_root) else {
         return false;
     };
-    same_file(process_path, &profile_dir.join("os-june"))
-}
-
-#[cfg(target_os = "macos")]
-fn development_launcher_name_is_allowed(name: &std::ffi::OsStr) -> bool {
-    if name == "Clovy" || name == "June" {
-        return true;
+    // The deepest accepted shape is
+    // `<triple>/<profile>/<bundle>.app/Contents/MacOS/clovy`.
+    let mut names = [OsStr::new(""); 6];
+    let mut depth = 0;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        let Some(slot) = names.get_mut(depth) else {
+            return false;
+        };
+        *slot = name;
+        depth += 1;
     }
-    let Some(name) = name.to_str() else {
-        return false;
+    let names = &names[..depth];
+    let is_main_executable = |rest: &[&OsStr]| match rest {
+        [executable] => *executable == OsStr::new(app_identity::MAIN_EXECUTABLE),
+        [bundle, contents, macos, executable] => {
+            std::path::Path::new(bundle)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+                && *contents == OsStr::new("Contents")
+                && *macos == OsStr::new("MacOS")
+                && *executable == OsStr::new(app_identity::MAIN_EXECUTABLE)
+        }
+        _ => false,
     };
-    let mut parts = name.split(' ');
-    let (Some(product), Some(issue), Some(harness), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
+    // Cargo marks every profile directory (`debug`, `<triple>/release`, ...)
+    // with `.cargo-lock`; any other directory under target/ is not a build
+    // output this helper trusts. `prefix` is how many names lead to it.
+    let is_profile_dir = |prefix: usize| {
+        process_path
+            .ancestors()
+            .nth(depth - prefix)
+            .is_some_and(|profile| profile.join(".cargo-lock").is_file())
     };
-    let Some(issue_number) = issue.strip_prefix("JUN-") else {
-        return false;
-    };
-    matches!(product, "Clovy" | "June")
-        && !issue_number.is_empty()
-        && issue_number.bytes().all(|byte| byte.is_ascii_digit())
-        && matches!(harness, "Codex" | "Claude")
+    match names {
+        [_profile, rest @ ..] if is_main_executable(rest) => is_profile_dir(1),
+        [triple, _profile, rest @ ..] => {
+            triple
+                .to_str()
+                .is_some_and(|triple| triple.ends_with("-apple-darwin"))
+                && is_main_executable(rest)
+                && is_profile_dir(2)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -472,8 +594,12 @@ fn socket_peer_audit_token(stream: &UnixStream) -> io::Result<[u8; 32]> {
 
 #[cfg(target_os = "macos")]
 fn packaged_process_signature_matches(audit_token: &[u8], helper_app: &std::path::Path) -> bool {
-    let Some(helper) = signature_details(helper_app, "co.opensoftware.june.computer-use-driver")
+    let Some(expected_identifier) = option_env!("CLOVY_COMPUTER_USE_HELPER_IDENTIFIER")
+        .filter(|identifier| valid_signing_identifier(identifier))
     else {
+        return false;
+    };
+    let Some(helper) = signature_details(helper_app, expected_identifier) else {
         return false;
     };
     let Some(requirement) = clovy_process_requirement(&helper.team_identifier) else {
@@ -487,9 +613,7 @@ fn packaged_process_signature_matches(audit_token: &[u8], helper_app: &std::path
         return false;
     };
     peer.check_validity(
-        CodeSigningFlags::DO_NOT_VALIDATE_RESOURCES
-            | CodeSigningFlags::STRICT_VALIDATE
-            | CodeSigningFlags::NO_NETWORK_ACCESS,
+        CodeSigningFlags::STRICT_VALIDATE | CodeSigningFlags::NO_NETWORK_ACCESS,
         &requirement,
     )
     .is_ok()
@@ -543,11 +667,25 @@ fn clovy_process_requirement(team_identifier: &str) -> Option<SecRequirement> {
     {
         return None;
     }
-    format!(
-        "anchor apple generic and identifier \"co.opensoftware.june\" and certificate leaf[subject.OU] = \"{team_identifier}\""
-    )
-    .parse()
-    .ok()
+    if !valid_signing_identifier(app_identity::APP_IDENTIFIER) {
+        return None;
+    }
+    let identifier = app_identity::APP_IDENTIFIER;
+    let identity = if cfg!(debug_assertions) {
+        format!("(identifier \"{identifier}\" or identifier \"{identifier}.dev\")")
+    } else {
+        format!("identifier \"{identifier}\"")
+    };
+    format!("anchor apple generic and {identity} and certificate leaf[subject.OU] = \"{team_identifier}\"").parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn valid_signing_identifier(identifier: &str) -> bool {
+    !identifier.is_empty()
+        && identifier.len() <= 255
+        && identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 #[cfg(target_os = "macos")]
@@ -685,16 +823,11 @@ extern "C" {
     fn proc_pidpath(pid: libc::pid_t, buffer: *mut libc::c_void, buffersize: u32) -> libc::c_int;
 }
 
-#[cfg(target_os = "macos")]
 fn initialize_capability(params: Option<&Value>) -> Option<&str> {
     let experimental = params?.get("capabilities")?.get("experimental")?;
-    experimental
-        .get("clovyComputerUseCapability")
-        .or_else(|| experimental.get("juneComputerUseCapability"))?
-        .as_str()
+    experimental.get("clovyComputerUseCapability")?.as_str()
 }
 
-#[cfg(target_os = "macos")]
 fn valid_capability(candidate: &str) -> bool {
     let expected = std::env::var("CLOVY_COMPUTER_USE_HELPER_CAPABILITY").unwrap_or_default();
     if expected.len() < 32 || candidate.len() != expected.len() {
@@ -708,213 +841,42 @@ fn valid_capability(candidate: &str) -> bool {
         == 0
 }
 
-#[cfg(target_os = "macos")]
-fn allowed_tool_list(registry: &ToolRegistry, allowed: &HashSet<&str>) -> Value {
-    let mut tools: Vec<Value> = registry
-        .iter_defs()
-        .filter(|(name, _)| allowed.contains(name))
-        .map(|(name, definition)| {
-            if name == "launch_app" {
-                launch_app_tool_definition()
-            } else {
-                definition.to_list_entry()
-            }
-        })
-        .collect();
-    tools.push(join_current_stage_tool_definition());
-    json!({ "tools": tools })
-}
-
-#[cfg(target_os = "macos")]
-fn launch_app_tool_definition() -> Value {
-    json!({
-        "name": "launch_app",
-        "description": "Open an installed macOS app by display name in the background.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "minLength": 1, "maxLength": 200 }
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        }
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn join_current_stage_tool_definition() -> Value {
-    json!({
-        "name": "join_current_stage",
-        "description": "Raise one authorized app window inside Clovy's current Stage Manager group without following it to another Space.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "pid": { "type": "integer", "minimum": 1 },
-                "window_id": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["pid", "window_id"],
-            "additionalProperties": false
-        }
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn join_current_stage_result(arguments: &Value) -> Value {
-    let pid = arguments
-        .get("pid")
-        .and_then(Value::as_i64)
-        .and_then(|pid| i32::try_from(pid).ok())
-        .filter(|pid| *pid > 0);
-    let Some(pid) = pid else {
-        return json!({
-            "content": [{ "type": "text", "text": "join_current_stage requires a positive pid." }],
-            "isError": true
-        });
-    };
-    let window_id = arguments
-        .get("window_id")
-        .and_then(Value::as_u64)
-        .and_then(|window_id| u32::try_from(window_id).ok())
-        .filter(|window_id| *window_id > 0);
-    let Some(window_id) = window_id else {
-        return json!({
-            "content": [{ "type": "text", "text": "join_current_stage requires a positive window_id." }],
-            "isError": true
-        });
-    };
-
-    let activated_application = activate_application(pid);
-    if activated_application {
-        std::thread::sleep(std::time::Duration::from_millis(350));
-    }
-    let focused_without_space_follow =
-        platform_macos::input::skylight::activate_without_raise(pid, window_id);
-    let raised_with_accessibility = raise_ax_window(pid, window_id);
-    if stage_join_was_dispatched(
-        activated_application,
-        focused_without_space_follow,
-        raised_with_accessibility,
-    ) {
-        json!({
-            "content": [{ "type": "text", "text": format!("Added app window {window_id} to the current stage.") }],
-            "structuredContent": {
-                "pid": pid,
-                "window_id": window_id,
-                "raised": true,
-                "activated_application": activated_application,
-                "focused_without_space_follow": focused_without_space_follow,
-                "raised_with_accessibility": raised_with_accessibility
-            },
-            "isError": false
-        })
-    } else {
-        json!({
-            "content": [{ "type": "text", "text": "The selected app window could not be raised in the current stage." }],
-            "structuredContent": {
-                "pid": pid,
-                "window_id": window_id,
-                "raised": false,
-                "activated_application": activated_application,
-                "focused_without_space_follow": focused_without_space_follow,
-                "raised_with_accessibility": raised_with_accessibility
-            },
-            "isError": true
-        })
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn stage_join_was_dispatched(
-    activated_application: bool,
-    focused_without_space_follow: bool,
-    raised_with_accessibility: bool,
-) -> bool {
-    // The broker re-lists the exact window after a native path is dispatched.
-    // AppKit activation is authoritative for the Stage Manager transition;
-    // SkyLight focus and Accessibility raise are reported separately so the
-    // broker can require both when AppKit activation is unavailable.
-    activated_application || focused_without_space_follow || raised_with_accessibility
-}
-
-#[cfg(target_os = "macos")]
-fn activate_application(pid: i32) -> bool {
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-
-    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some_and(|application| {
-        !application.isTerminated()
-            && application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn raise_ax_window(pid: i32, window_id: u32) -> bool {
-    use platform_macos::ax::bindings::{
-        ax_get_window_id, copy_ax_windows, kAXErrorSuccess, perform_action,
-        AXUIElementCreateApplication,
-    };
-
-    unsafe extern "C" {
-        fn CFRelease(value: *const libc::c_void);
-    }
-
-    unsafe {
-        let application = AXUIElementCreateApplication(pid);
-        if application.is_null() {
-            return false;
-        }
-        let windows = copy_ax_windows(application);
-        let mut raised = false;
-        for window in windows {
-            if ax_get_window_id(window) == Some(window_id)
-                && perform_action(window, "AXRaise") == kAXErrorSuccess
-            {
-                raised = true;
-            }
-            CFRelease(window.cast());
-        }
-        CFRelease(application.cast());
-        raised
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn arguments_are_narrow(tool: &str, arguments: &Value) -> bool {
     let Some(arguments) = arguments.as_object() else {
         return false;
     };
-    let allowed: &[&str] = match tool {
-        "check_permissions" => &["prompt"],
-        "list_windows" => &["pid", "on_screen_only"],
-        "launch_app" => &["name"],
-        "join_current_stage" => &["pid", "window_id"],
-        "get_window_state" => &["pid", "window_id", "capture_mode"],
-        "click" | "double_click" | "right_click" => &[
-            "pid",
-            "window_id",
-            "element_index",
-            "x",
-            "y",
-            "count",
-            "modifier",
-        ],
-        "drag" => &[
-            "pid",
-            "window_id",
-            "from_x",
-            "from_y",
-            "to_x",
-            "to_y",
-            "modifier",
-        ],
-        "scroll" => &["pid", "window_id", "element_index", "direction", "amount"],
-        "type_text" => &["pid", "window_id", "element_index", "text"],
-        "press_key" => &["pid", "window_id", "element_index", "key", "modifiers"],
-        "hotkey" => &["pid", "window_id", "keys"],
-        "set_value" => &["pid", "window_id", "element_index", "value"],
-        _ => return false,
-    };
-    if !arguments.keys().all(|key| allowed.contains(&key.as_str())) {
+    let Some(definition) = private_contract()["driverTools"].get(tool) else {
         return false;
+    };
+    let Some(properties) = definition["properties"].as_object() else {
+        return false;
+    };
+    if !definition["required"].as_array().is_some_and(|required| {
+        required.iter().all(|field| {
+            field
+                .as_str()
+                .is_some_and(|field| arguments.contains_key(field))
+        })
+    }) {
+        return false;
+    }
+    for (field, value) in arguments {
+        let Some(kind) = properties.get(field).and_then(Value::as_str) else {
+            return false;
+        };
+        let valid = match kind {
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.as_f64().is_some_and(f64::is_finite),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "array" => value
+                .as_array()
+                .is_some_and(|values| values.len() <= 16 && values.iter().all(Value::is_string)),
+            _ => false,
+        };
+        if !valid {
+            return false;
+        }
     }
     match tool {
         "launch_app" => {
@@ -933,544 +895,81 @@ fn arguments_are_narrow(tool: &str, arguments: &Value) -> bool {
                 && arguments
                     .get("window_id")
                     .and_then(Value::as_u64)
-                    .is_some_and(|window_id| window_id > 0 && u32::try_from(window_id).is_ok())
+                    .is_some_and(|window_id| {
+                        window_id > 0
+                            && usize::try_from(window_id).is_ok()
+                            && (!cfg!(target_os = "macos") || u32::try_from(window_id).is_ok())
+                    })
         }
         _ => true,
     }
 }
 
-#[cfg(target_os = "macos")]
-fn remember_screenshot_size(
-    sizes: &mut HashMap<(i64, u64), ScreenshotSize>,
-    arguments: &Value,
-    result: &Value,
-) {
-    if tool_result_is_error(result) {
-        return;
-    }
-    let Some((pid, window_id)) = action_identity(arguments) else {
-        return;
-    };
-    let Some(structured) = result
-        .get("structuredContent")
-        .or_else(|| result.get("structured_content"))
-    else {
-        return;
-    };
-    let Some(size) = screenshot_size(
-        structured.get("screenshot_width"),
-        structured.get("screenshot_height"),
-    ) else {
-        return;
-    };
-    sizes.insert((pid, window_id), size);
-}
-
-#[cfg(target_os = "macos")]
-fn pointer_notification_for_result(notification: Option<Value>, result: &Value) -> Option<Value> {
-    (!tool_result_is_error(result))
-        .then_some(notification)
-        .flatten()
-}
-
-#[cfg(target_os = "macos")]
-fn tool_result_is_error(result: &Value) -> bool {
-    result.get("isError").and_then(Value::as_bool) == Some(true)
-}
-
-#[cfg(target_os = "macos")]
-fn pointer_notification(
-    tool: &str,
-    arguments: &Value,
-    sizes: &HashMap<(i64, u64), ScreenshotSize>,
-) -> Option<Value> {
-    let (pid, window_id) = action_identity(arguments)?;
-    match tool {
-        "click" | "double_click" | "right_click" => {
-            let (x, y, size) = if let (Some(x), Some(y)) = (
-                json_number(arguments.get("x")),
-                json_number(arguments.get("y")),
-            ) {
-                (x, y, *sizes.get(&(pid, window_id))?)
-            } else {
-                let element_index = arguments
-                    .get("element_index")?
-                    .as_u64()
-                    .and_then(|index| u32::try_from(index).ok())?;
-                let (x, y) = platform_macos::recording_hooks::element_window_local_xy(
-                    window_id,
-                    pid,
-                    element_index,
-                )?;
-                // element_window_local_xy captures internally, so this is a
-                // second capture per element action. Deliberate: the AX
-                // coordinates must be paired with dimensions from the same
-                // moment - reusing the cached get_window_state size could
-                // pair stale dimensions with fresh coordinates and offset
-                // the cursor overlay after a window resize.
-                let png = platform_macos::capture::screenshot_window_bytes(
-                    u32::try_from(window_id).ok()?,
-                )
-                .ok()?;
-                (x, y, png_screenshot_size(&png)?)
-            };
-            Some(json!({
-                "jsonrpc": "2.0",
-                "method": POINTER_NOTIFICATION_METHOD,
-                "params": {
-                    "kind": "point",
-                    "pid": pid,
-                    "window_id": window_id,
-                    "x": x,
-                    "y": y,
-                    "screenshot_width": size.width,
-                    "screenshot_height": size.height,
-                }
-            }))
-        }
-        "drag" => {
-            let size = *sizes.get(&(pid, window_id))?;
-            Some(json!({
-                "jsonrpc": "2.0",
-                "method": POINTER_NOTIFICATION_METHOD,
-                "params": {
-                    "kind": "drag",
-                    "pid": pid,
-                    "window_id": window_id,
-                    "from_x": json_number(arguments.get("from_x"))?,
-                    "from_y": json_number(arguments.get("from_y"))?,
-                    "to_x": json_number(arguments.get("to_x"))?,
-                    "to_y": json_number(arguments.get("to_y"))?,
-                    "screenshot_width": size.width,
-                    "screenshot_height": size.height,
-                    // Mirror the pinned driver's `duration_ms` argument
-                    // (default 500) instead of assuming the default.
-                    "duration_ms": arguments
-                        .get("duration_ms")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(500),
-                }
-            }))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn action_identity(arguments: &Value) -> Option<(i64, u64)> {
-    let pid = arguments.get("pid")?.as_i64().filter(|pid| *pid > 0)?;
-    let window_id = arguments
-        .get("window_id")?
-        .as_u64()
-        .filter(|window_id| *window_id > 0)?;
-    Some((pid, window_id))
-}
-
-#[cfg(target_os = "macos")]
-fn screenshot_size(width: Option<&Value>, height: Option<&Value>) -> Option<ScreenshotSize> {
-    Some(ScreenshotSize {
-        width: json_number(width).filter(|value| *value > 0.0)?,
-        height: json_number(height).filter(|value| *value > 0.0)?,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn json_number(value: Option<&Value>) -> Option<f64> {
-    value?.as_f64().filter(|value| value.is_finite())
-}
-
-#[cfg(target_os = "macos")]
-fn png_screenshot_size(png: &[u8]) -> Option<ScreenshotSize> {
-    if png.len() < 24 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return None;
-    }
-    let width = u32::from_be_bytes(png[16..20].try_into().ok()?) as f64;
-    let height = u32::from_be_bytes(png[20..24].try_into().ok()?) as f64;
-    (width > 0.0 && height > 0.0).then_some(ScreenshotSize { width, height })
-}
-
-#[cfg(target_os = "macos")]
-async fn write_response<W>(
-    stdout: &mut tokio::io::BufWriter<W>,
-    response: Response,
-) -> anyhow::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    write_json(stdout, &response).await
-}
-
-#[cfg(target_os = "macos")]
-async fn write_json<W, T>(stdout: &mut tokio::io::BufWriter<W>, value: &T) -> anyhow::Result<()>
-where
-    W: AsyncWrite + Unpin,
-    T: serde::Serialize + ?Sized,
-{
-    let mut bytes = serde_json::to_vec(value)?;
-    bytes.push(b'\n');
-    stdout.write_all(&bytes).await?;
-    stdout.flush().await?;
-    Ok(())
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
+#[cfg(test)]
+mod private_protocol_tests {
     use super::*;
 
     #[test]
-    fn initialize_accepts_canonical_and_legacy_capability_fields() {
-        let canonical = json!({
-            "capabilities": {
-                "experimental": {
-                    "clovyComputerUseCapability": "canonical",
-                    "juneComputerUseCapability": "legacy"
-                }
-            }
-        });
-        let legacy = json!({
-            "capabilities": {
-                "experimental": { "juneComputerUseCapability": "legacy" }
-            }
-        });
-
-        assert_eq!(initialize_capability(Some(&canonical)), Some("canonical"));
-        assert_eq!(initialize_capability(Some(&legacy)), Some("legacy"));
-    }
-
-    #[test]
-    fn stage_join_continues_when_any_native_path_dispatched() {
-        assert!(stage_join_was_dispatched(true, false, false));
-        assert!(stage_join_was_dispatched(false, true, false));
-        assert!(stage_join_was_dispatched(false, false, true));
-        assert!(stage_join_was_dispatched(true, true, true));
-        assert!(!stage_join_was_dispatched(false, false, false));
-    }
-
-    #[test]
-    fn development_peer_accepts_cargo_and_tauri_runner_names_only() {
-        let target = std::path::Path::new("/repo/src-tauri/target");
-
-        assert!(development_process_path_is_clovy(
-            std::path::Path::new("/repo/src-tauri/target/debug/os-june"),
-            target,
-        ));
-        assert!(!development_process_path_is_clovy(
-            std::path::Path::new("/repo/src-tauri/target/debug/clovy-lookalike"),
-            target,
-        ));
-        assert!(!development_process_path_is_clovy(
-            std::path::Path::new("/tmp/target/debug/June"),
-            target,
-        ));
-
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "Clovy"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "Clovy JUN-278 Codex"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-278 Codex"
-        )));
-        assert!(development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-00278 Claude"
-        )));
-        assert!(!development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-278 Unknown"
-        )));
-        assert!(!development_launcher_name_is_allowed(std::ffi::OsStr::new(
-            "June JUN-two Codex"
-        )));
-    }
-
-    #[test]
-    fn packaged_peer_uses_the_tauri_bundle_executable_name() {
-        assert_eq!(
-            packaged_main_executable(std::path::Path::new("/Applications/June.app")),
-            std::path::PathBuf::from("/Applications/June.app/Contents/MacOS/os-june")
-        );
-    }
-
-    #[tokio::test]
-    async fn accepted_private_socket_exposes_peer_audit_token() {
-        let directory = tempfile::tempdir().expect("private socket directory");
-        let socket_path = directory.path().join("driver.sock");
-        let listener = UnixListener::bind(&socket_path).expect("private socket listener");
-        let client = tokio::spawn(UnixStream::connect(socket_path));
-        let (server, _) = listener.accept().await.expect("accepted private peer");
-        let _client = client
-            .await
-            .expect("private peer task")
-            .expect("connected private peer");
-
-        let token = socket_peer_audit_token(&server).expect("peer audit token");
-        assert_ne!(token, [0; 32]);
-    }
-
-    #[test]
-    fn live_process_requirement_rejects_untrusted_team_syntax() {
-        assert!(clovy_process_requirement("ABCDE12345").is_some());
-        assert!(clovy_process_requirement("").is_none());
-        assert!(clovy_process_requirement("ABCDE12345\" or true").is_none());
-    }
-
-    #[test]
-    fn timed_out_signature_child_is_killed_and_reaped() {
-        let child = Command::new("/bin/sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn stuck signature child");
-        let pid = child.id() as libc::pid_t;
-
-        assert!(terminate_child_and_reap(child));
-        let probe = unsafe { libc::kill(pid, 0) };
-        assert_eq!(probe, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-    }
-
-    #[test]
-    fn development_peer_accepts_the_issue_suffixed_tauri_launcher() {
-        let workspace = tempfile::tempdir().expect("temporary workspace");
-        let target = workspace.path().join("target");
-        let profile = target.join("debug");
-        std::fs::create_dir_all(&profile).expect("debug profile");
-        let cargo_binary = profile.join("os-june");
-        std::fs::write(&cargo_binary, b"june development binary").expect("cargo binary");
-        let launcher = profile.join("Clovy JUN-278 Codex");
-        std::fs::hard_link(&cargo_binary, &launcher).expect("Tauri launcher");
-
-        assert!(development_process_path_is_clovy(&launcher, &target));
-
-        let copied_lookalike = profile.join("Clovy JUN-279 Codex");
-        std::fs::copy(&cargo_binary, &copied_lookalike).expect("copied lookalike");
-        assert!(!development_process_path_is_clovy(
-            &copied_lookalike,
-            &target
-        ));
-    }
-
-    #[tokio::test]
-    async fn request_reader_enforces_the_limit_while_reading() {
-        let mut reader = BufReader::new(&b"{}\n"[..]);
-        assert_eq!(
-            read_bounded_line(&mut reader, 3).await.expect("valid line"),
-            BoundedLine::Line("{}\n".to_string())
-        );
-
-        let mut oversized = BufReader::new(&b"12345"[..]);
-        assert_eq!(
-            read_bounded_line(&mut oversized, 4)
-                .await
-                .expect("bounded read"),
-            BoundedLine::TooLarge
-        );
-    }
-
-    #[test]
-    fn narrow_contract_allows_only_policy_brokered_lifecycle_tools() {
-        assert!(ALLOWED_TOOLS.contains(&"launch_app"));
-        assert!(ALLOWED_TOOLS.contains(&"join_current_stage"));
-        for denied in [
-            "kill_app",
-            "move_cursor",
-            "set_config",
-            "start_recording",
-            "replay_trajectory",
-            "update",
-        ] {
-            assert!(!ALLOWED_TOOLS.contains(&denied));
+    fn window_state_schema_advertises_supported_capture_modes() {
+        let tool_list = allowed_tool_list();
+        let capture = tool_list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "get_window_state")
+            .expect("get_window_state is advertised");
+        let schema = &capture["inputSchema"];
+        let capture_mode = &schema["properties"]["capture_mode"];
+        assert_eq!(capture_mode["type"], "string");
+        let modes = capture_mode["enum"]
+            .as_array()
+            .expect("capture_mode advertises its supported modes");
+        assert_eq!(modes.len(), 3);
+        for mode in ["som", "vision", "ax"] {
+            assert!(modes.contains(&json!(mode)), "missing capture mode {mode}");
         }
+        assert_eq!(schema["additionalProperties"], false);
     }
 
+    #[tokio::test]
+    async fn oversized_or_unterminated_frames_close_the_private_channel() {
+        for bytes in [b"12345\n".as_slice(), b"1234".as_slice()] {
+            let mut reader = BufReader::new(bytes);
+            assert_eq!(
+                read_bounded_line(&mut reader, 4).await.unwrap(),
+                BoundedLine::TooLarge
+            );
+        }
+        let mut reader = BufReader::new(b"\"ok\"\nrest\n".as_slice());
+        assert_eq!(
+            read_bounded_line(&mut reader, 10).await.unwrap(),
+            BoundedLine::Line("\"ok\"\n".into())
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 10).await.unwrap(),
+            BoundedLine::Line("rest\n".into())
+        );
+    }
     #[test]
-    fn app_lifecycle_arguments_cannot_smuggle_paths_urls_or_process_options() {
+    fn private_operations_reject_extra_engine_authority() {
+        for name in ALLOWED_TOOLS {
+            assert!(!arguments_are_narrow(
+                name,
+                &json!({"session":"other","socket":"public","command":"arbitrary"})
+            ));
+        }
+        assert!(!arguments_are_narrow(
+            "launch_app",
+            &json!({"name":"x","args":["bad"]})
+        ));
         assert!(arguments_are_narrow(
             "launch_app",
-            &json!({ "name": "TextEdit" }),
-        ));
-        assert!(arguments_are_narrow(
-            "join_current_stage",
-            &json!({ "pid": 42, "window_id": 84 }),
-        ));
-        for arguments in [
-            json!({ "name": "TextEdit", "urls": ["file:///tmp/private"] }),
-            json!({ "name": "TextEdit", "additional_arguments": ["--unsafe"] }),
-            json!({ "name": "TextEdit", "electron_debugging_port": 9222 }),
-            json!({ "name": "TextEdit", "webkit_inspector_port": 9223 }),
-            json!({ "name": "TextEdit", "creates_new_application_instance": true }),
-        ] {
-            assert!(!arguments_are_narrow("launch_app", &arguments));
-        }
-        assert!(!arguments_are_narrow(
-            "join_current_stage",
-            &json!({ "pid": 42, "window_id": 84, "bundle_id": "com.apple.TextEdit" }),
+            &json!({"name":"TextEdit"})
         ));
         assert!(!arguments_are_narrow(
             "join_current_stage",
-            &json!({ "pid": 42 }),
+            &json!({"pid":1,"window_id":0})
         ));
-    }
-
-    #[test]
-    fn file_output_and_session_injection_are_rejected() {
-        assert!(!arguments_are_narrow(
-            "get_window_state",
-            &json!({ "pid": 1, "window_id": 2, "screenshot_out_file": "/tmp/leak" }),
-        ));
-        assert!(!arguments_are_narrow(
-            "click",
-            &json!({ "pid": 1, "window_id": 2, "x": 3, "y": 4, "session": "bypass" }),
-        ));
-    }
-
-    #[test]
-    fn successful_capture_dimensions_drive_coordinate_pointer_notifications() {
-        let arguments = json!({ "pid": 42, "window_id": 84, "capture_mode": "both" });
-        let result = json!({
-            "content": [],
-            "structuredContent": {
-                "pid": 42,
-                "window_id": 84,
-                "screenshot_width": 1800,
-                "screenshot_height": 1400,
-            }
-        });
-        let mut sizes = HashMap::new();
-        remember_screenshot_size(&mut sizes, &arguments, &result);
-
-        assert_eq!(
-            sizes.get(&(42, 84)),
-            Some(&ScreenshotSize {
-                width: 1800.0,
-                height: 1400.0,
-            })
-        );
-        assert_eq!(
-            pointer_notification(
-                "click",
-                &json!({ "pid": 42, "window_id": 84, "x": 900, "y": 350 }),
-                &sizes,
-            ),
-            Some(json!({
-                "jsonrpc": "2.0",
-                "method": POINTER_NOTIFICATION_METHOD,
-                "params": {
-                    "kind": "point",
-                    "pid": 42,
-                    "window_id": 84,
-                    "x": 900.0,
-                    "y": 350.0,
-                    "screenshot_width": 1800.0,
-                    "screenshot_height": 1400.0,
-                }
-            }))
-        );
-    }
-
-    #[test]
-    fn failed_actions_do_not_publish_pointer_notifications() {
-        let notification = Some(json!({
-            "jsonrpc": "2.0",
-            "method": POINTER_NOTIFICATION_METHOD,
-            "params": { "kind": "point" },
-        }));
-
-        assert_eq!(
-            pointer_notification_for_result(
-                notification.clone(),
-                &json!({ "isError": true, "content": [] }),
-            ),
-            None
-        );
-        assert_eq!(
-            pointer_notification_for_result(notification.clone(), &json!({ "content": [] })),
-            notification
-        );
-    }
-
-    #[test]
-    fn drag_notification_carries_both_endpoints_and_upstream_duration() {
-        let sizes = HashMap::from([(
-            (42, 84),
-            ScreenshotSize {
-                width: 1800.0,
-                height: 1400.0,
-            },
-        )]);
-        let notification = pointer_notification(
-            "drag",
-            &json!({
-                "pid": 42,
-                "window_id": 84,
-                "from_x": 100,
-                "from_y": 200,
-                "to_x": 600,
-                "to_y": 700,
-            }),
-            &sizes,
-        )
-        .expect("drag notification");
-
-        assert_eq!(notification["params"]["kind"], "drag");
-        assert_eq!(notification["params"]["from_x"], 100.0);
-        assert_eq!(notification["params"]["to_y"], 700.0);
-        assert_eq!(notification["params"]["duration_ms"], 500);
-
-        let explicit = pointer_notification(
-            "drag",
-            &json!({
-                "pid": 42,
-                "window_id": 84,
-                "from_x": 100,
-                "from_y": 200,
-                "to_x": 600,
-                "to_y": 700,
-                "duration_ms": 1200,
-            }),
-            &sizes,
-        )
-        .expect("drag notification with explicit duration");
-        assert_eq!(explicit["params"]["duration_ms"], 1200);
-    }
-
-    #[test]
-    fn invalid_or_missing_screenshot_dimensions_fail_closed() {
-        let mut sizes = HashMap::new();
-        remember_screenshot_size(
-            &mut sizes,
-            &json!({ "pid": 42, "window_id": 84 }),
-            &json!({
-                "isError": true,
-                "structuredContent": {
-                    "screenshot_width": 1800,
-                    "screenshot_height": 1400,
-                }
-            }),
-        );
-        assert!(sizes.is_empty());
-        assert!(pointer_notification(
-            "click",
-            &json!({ "pid": 42, "window_id": 84, "x": 1, "y": 2 }),
-            &sizes,
-        )
-        .is_none());
-
-        let mut png = vec![0; 24];
-        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-        png[16..20].copy_from_slice(&1800_u32.to_be_bytes());
-        png[20..24].copy_from_slice(&1400_u32.to_be_bytes());
-        assert_eq!(
-            png_screenshot_size(&png),
-            Some(ScreenshotSize {
-                width: 1800.0,
-                height: 1400.0,
-            })
-        );
+        assert_eq!(ALLOWED_TOOLS.len(), 14);
     }
 }

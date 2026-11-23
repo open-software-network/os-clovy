@@ -1,0 +1,245 @@
+{
+  "base": "ef5f699e09359203ea177a7cabfda7830a4d2e0a",
+  "main": "79441ef3d82e77380d2874764b84290468a40219",
+  "merge": "normal merge into feature branch; exact hash in integration/report.md and integration-handoff.md after commit",
+  "review": {
+    "status": "complete with evidence-backed dispositions",
+    "base": "ef5f699e09359203ea177a7cabfda7830a4d2e0a",
+    "coverage_paths": 43,
+    "accepted_pairs": [
+      {
+        "name": "integration-2-deletions",
+        "exit": 0,
+        "summary": ".tmp/verify/remover-clovy-api/review-pair/integration-2-deletions/summary.md",
+        "summary_json_sha256": "589eb4423e19637b61bd2e74c0adc719b199a8040707c2f2fa70e8fa3528c57c",
+        "snapshot": "4a8497d0367c9d374f46a64c390785c987b475e1",
+        "tree": "45623df215f61d127b8afa8857fa3fe7836cfe09",
+        "files": 2,
+        "tools": {
+          "openqodex": {
+            "status": "completed",
+            "reason": null,
+            "findings": []
+          },
+          "coderabbit": {
+            "status": "completed",
+            "reason": null,
+            "findings": []
+          }
+        }
+      },
+      {
+        "name": "integration-3-remainder",
+        "exit": 6,
+        "summary": ".tmp/verify/remover-clovy-api/review-pair/integration-3-remainder/summary.md",
+        "summary_json_sha256": "2c3a9afada5bf9f999d6cbaf449c5dfd55f7aadba38d77de98ddfcf086b74b70",
+        "snapshot": "101effc7ae0d1a11c435f386ba4613d0e3a22db6",
+        "tree": "0cb7d627df8af5c4276b110d77b8717acad441e7",
+        "files": 41,
+        "tools": {
+          "openqodex": {
+            "status": "completed",
+            "reason": null,
+            "findings": []
+          },
+          "coderabbit": {
+            "status": "findings",
+            "reason": null,
+            "findings": [
+              {
+                "severity": "major",
+                "title": "Enforce the decode-allocation limit independently of `maxalloc`.",
+                "file": "src-tauri/src/background_image.rs",
+                "line": 59
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "incomplete_attempts": [
+      {
+        "name": "integration-1",
+        "exit": 4,
+        "summary": ".tmp/verify/remover-clovy-api/review-pair/integration-1/summary.md",
+        "summary_json_sha256": "0a3d82c78f16bba64dda64acc213133c13ceadddfdf580e3a39783a93c2496a0",
+        "snapshot": "db2c009be40ee2f47c1bf802e2b00e4932c8c142",
+        "tree": "0cb7d627df8af5c4276b110d77b8717acad441e7",
+        "files": 43,
+        "tools": {
+          "openqodex": {
+            "status": "completed",
+            "reason": null,
+            "findings": []
+          },
+          "coderabbit": {
+            "status": "incomplete",
+            "reason": "scope_mismatch",
+            "findings": [
+              {
+                "severity": "minor",
+                "title": "Verify ownership of `data-agent-surface`.",
+                "file": "src/components/agent/AgentWorkspace.tsx",
+                "line": 534
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "rename_snapshots": {
+      "base": "ef5f699e09359203ea177a7cabfda7830a4d2e0a",
+      "delete_paths": [
+        "openspec/changes/fundo-ascii-tema-escuro/.openspec.yaml",
+        "openspec/changes/fundo-ascii-tema-escuro/proposal.md"
+      ],
+      "A": "4a8497d0367c9d374f46a64c390785c987b475e1",
+      "B": "101effc7ae0d1a11c435f386ba4613d0e3a22db6",
+      "final_tree": "0cb7d627df8af5c4276b110d77b8717acad441e7",
+      "tree_equality": {
+        "source_index": "0cb7d627df8af5c4276b110d77b8717acad441e7",
+        "review_B": "0cb7d627df8af5c4276b110d77b8717acad441e7",
+        "integration_1": "0cb7d627df8af5c4276b110d77b8717acad441e7"
+      },
+      "coverage": {
+        "total_paths": 43,
+        "snapshot_paths": [
+          2,
+          41
+        ],
+        "all_sides_included": true,
+        "parts": [
+          {
+            "base": "ef5f699e09359203ea177a7cabfda7830a4d2e0a",
+            "head": "4a8497d0367c9d374f46a64c390785c987b475e1",
+            "paths": [
+              "openspec/changes/fundo-ascii-tema-escuro/.openspec.yaml",
+              "openspec/changes/fundo-ascii-tema-escuro/proposal.md"
+            ],
+            "renames": false
+          },
+          {
+            "base": "4a8497d0367c9d374f46a64c390785c987b475e1",
+            "head": "101effc7ae0d1a11c435f386ba4613d0e3a22db6",
+            "paths": [
+              "docs/design/foundations.md",
+              "docs/mcp-server.md",
+              "index.html",
+              "onboarding-preview.html",
+              "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/.openspec.yaml",
+              "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/design.md",
+              "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/proposal.md",
+              "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/specs/app-appearance/spec.md",
+              "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/tasks.md",
+              "openspec/changes/cli-substitui-agente-nativo/tasks.md",
+              "openspec/changes/fundo-ascii-tema-escuro/design.md",
+              "openspec/changes/fundo-ascii-tema-escuro/specs/app-appearance/spec.md",
+              "openspec/changes/fundo-ascii-tema-escuro/tasks.md",
+              "openspec/changes/remover-clovy-api/integration-review-map.json",
+              "openspec/changes/remover-clovy-api/tasks.md",
+              "openspec/specs/app-appearance/spec.md",
+              "package.json",
+              "pnpm-lock.yaml",
+              "src-tauri/src/background_image.rs",
+              "src-tauri/src/lib.rs",
+              "src-tauri/tests/mcp_server_doc_catalog.rs",
+              "src/components/agent/AgentBackground.tsx",
+              "src/components/agent/AgentWorkspace.tsx",
+              "src/components/settings/AppSettings.tsx",
+              "src/components/settings/BackgroundSettings.tsx",
+              "src/i18n/messages/settings.ts",
+              "src/lib/app-background.ts",
+              "src/lib/theme.ts",
+              "src/styleguide/sections/Color.tsx",
+              "src/styles/app.css",
+              "src/styles/tokens.css",
+              "src/test/agent-background-load-failure.test.tsx",
+              "src/test/agent-background-pending-import.test.tsx",
+              "src/test/agent-background.test.tsx",
+              "src/test/app-background.test.ts",
+              "src/test/background-image-settings.test.tsx",
+              "src/test/home-polish-css.test.ts",
+              "src/test/i18n-settings-language.test.tsx",
+              "src/test/technical-identity.test.mjs",
+              "src/test/theme.test.ts",
+              "styleguide.html"
+            ],
+            "renames": false
+          }
+        ]
+      }
+    },
+    "dispositions": [
+      {
+        "finding": "workspace data-agent-surface ownership",
+        "decision": "refuted: host renders one mutually exclusive workspace",
+        "evidence": "src/app/App.tsx:1787; src/app/app-layout.tsx:290; src/app/app-workspace-view.tsx:205"
+      },
+      {
+        "finding": "decode max_alloc is non-strict",
+        "decision": "existing main limitation acknowledged; output buffer is reserved before decoding; no strict total heap ceiling claimed",
+        "evidence": "openspec/changes/archive/2026-10-28-fundo-ascii-tema-escuro/design.md:73; .tmp/verify/remover-clovy-api/integration/image-limits-source-evidence.json"
+      }
+    ],
+    "disposition_report": ".tmp/verify/remover-clovy-api/integration/review-dispositions.md",
+    "limitations": [
+      "CodeRabbit deletion snapshot reported no fresh detailed file review; not represented as fresh detailed analysis",
+      "internal decoder allocations remain best effort, as documented in accepted main design"
+    ],
+    "bundle": ".tmp/verify/remover-clovy-api/integration/review-only.bundle"
+  },
+  "evidence": ".tmp/verify/remover-clovy-api/integration/",
+  "locks": {
+    "pnpm": "sfw pnpm install --lockfile-only --ignore-scripts --offline, then frozen install; versions within parent union",
+    "cargo": "duplicate image declaration removed; manifest and lock identical to ef5f699e; cargo metadata --offline --locked --filter-platform aarch64-apple-darwin succeeds"
+  },
+  "checks": {
+    "frontend": {
+      "files": 202,
+      "tests": 1902,
+      "failed": 0
+    },
+    "rust": {
+      "tests": 2151,
+      "ignored": 21,
+      "failed_final": 0,
+      "first_round": "one outdated MCP doc fixture failed; fixed persisted session/routine authorization; resumed only affected and remaining suites"
+    },
+    "fmt": "passed",
+    "clippy_all_targets": "passed after fixture correction",
+    "typecheck_app_extension": "passed",
+    "biome": "passed; owner .mcp.json/opencode.json excluded",
+    "reference_guards": "passed",
+    "native_app": "not rebuilt or launched",
+    "synthetic_smoke": {
+      "passed": true,
+      "evidence": ".tmp/verify/remover-clovy-api/integration/smoke/result.json",
+      "appearance": [
+        "Drift rendered",
+        "synthetic image decoded 640x360",
+        "dark despite light system"
+      ],
+      "model": "vendor/two without tool capability selected; Claude remains; zero llm_set_usage calls",
+      "missing_key": "real UI translated groq_api_key_missing from synthetic IPC",
+      "retired_listener": "127.0.0.1:8080 bound, zero requests",
+      "limits": "browser IPC fixture; native provider contracts covered by Rust, no paid inference"
+    },
+    "openspec_strict": "both changes pass"
+  },
+  "appearance": "seven core files identical to main; appearance-parent-equality.json",
+  "manual_pending": [
+    "real Groq transcription",
+    "real OpenRouter notes inference and own-key catalog",
+    "real fal image/video assets and recoverable jobs",
+    "real Codex turn",
+    "Windows native tests"
+  ],
+  "owner_changes": "original selective stash preserved until post-commit restoration; exact hashes recorded in integration/final-delivery.json",
+  "trail_check": {
+    "status": "lexical conflicts refuted",
+    "matches": 20,
+    "diff_cap_bytes": 400000,
+    "reason": "historical/config lexical matches; no owner config committed, no profile/permissions/keys/paid calls; main merge explicitly authorized only into feature branch"
+  },
+  "closure": "Only task/review-result metadata changes after approved source snapshot; product and test bytes remain identical."
+}

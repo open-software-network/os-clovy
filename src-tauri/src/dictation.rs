@@ -1,22 +1,23 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
-use crate::clovy_api::{
-    cleanup_text, dictate_transcribe, DictateCleanupRequestParams, DictateTranscribeRequest,
-    TranscriptionProviderResult,
-};
 use crate::domain::{
-    processing::{build_dictionary_context, merge_transcription_context},
+    processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
 };
-use crate::providers::{configured_transcription_provider, OPENAI_PROVIDER, VENICE_PROVIDER};
+use crate::providers::PROVIDER_GROQ;
+use crate::providers::{
+    groq::{dictate_transcribe_with, DictateTranscribeRequest, TranscriptionProviderResult},
+    openrouter::{dictate_cleanup, DictateCleanupRequestParams, DEFAULT_DICTATION_CLEANUP_MODEL},
+};
 use chrono::Utc;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fs,
     future::Future,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
         Arc, Mutex, OnceLock,
@@ -24,11 +25,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
-};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
-const DICTATION_TRANSCRIPTION_CONTEXT: &str = "Transcribe this as clean hands-free dictation for direct insertion into the active app. Preserve the speaker's intended words, language, and meaning. Remove filler sounds and accidental false starts when they are not meaningful, especially um, uh, ah, er, and a... stutters. Do not remove intentional articles such as a or an when they are grammatically needed. Convert spoken punctuation and formatting into text punctuation, including comma, period, question mark, exclamation point, colon, semicolon, dash, newline, and new paragraph. Convert quote/unquote, open quote/close quote, and start quote/end quote into actual quotation marks around the quoted words. Output only the dictated text.";
 /// Cleanup regenerates the whole transcript through the LLM, so its latency
 /// grows with dictation length. A flat budget silently degraded long
 /// dictations: the call timed out, cleanup was skipped, and the raw ASR text
@@ -41,20 +39,19 @@ const DICTATION_CLEANUP_BASE_TIMEOUT_MS: u64 = 15_000;
 /// conservative floor of ~50 tokens/s for the cleanup model.
 const DICTATION_CLEANUP_TIMEOUT_MS_PER_BYTE: u64 = 5;
 const DICTATION_CLEANUP_MAX_TIMEOUT_MS: u64 = 60_000;
-/// No single cleanup request may wait longer than Clovy API's cleanup billing
-/// hold (`cleanup_hold_ttl_seconds`, 30s): a response that arrives after its
-/// hold expired could paste text whose charge no longer settles. The overall
-/// budget above spans multiple sequential chunk requests; this cap bounds
-/// each one. Keep in sync with the clovy-api config default.
+/// Bound each optional cleanup request to 30 seconds. The overall budget
+/// above can span multiple sequential chunks; a failed chunk preserves its
+/// original transcript so cleanup cannot hold the paste indefinitely.
 const DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS: u64 = 30_000;
 /// Above this size, cleanup runs chunked. Measured against the production
 /// prompt (JUN-212): the cleanup model punctuates ~800-byte passages of
 /// filler-heavy run-on speech reliably, while at 2 KB and beyond it degrades
 /// into echoing the transcript back with no punctuation at all.
 const DICTATION_CLEANUP_CHUNK_TARGET_BYTES: usize = 800;
-/// Below this input size a chunk plausibly is a single sentence, so a cleaned
-/// result without sentence punctuation is not evidence of the echo failure.
-const DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES: usize = 300;
+/// Takes with less audio than this never reach Whisper (design D5).
+const DICTATION_MIN_UPLOAD_SECONDS: f32 = 0.5;
+/// Chunks of one long transcript cleaned at the same time (design D7).
+const DICTATION_CLEANUP_PARALLEL_CHUNKS: usize = 4;
 /// App-context slug sent with dictation cleanup when the paste target is a
 /// known kind of app, so the cleaned text is laid out for that surface.
 /// Email is the only recognized context today.
@@ -150,6 +147,8 @@ struct ComposerDeliveryRegistration {
 }
 
 pub struct HelperState {
+    agent_take: Mutex<Option<AgentDictationTake>>,
+    agent_changed: tokio::sync::Notify,
     process: Mutex<Option<HelperProcess>>,
     /// One composer request registered while the main-window editor owns
     /// focus. A matching helper-confirmed recording start consumes it.
@@ -165,12 +164,527 @@ pub struct HelperState {
 impl Default for HelperState {
     fn default() -> Self {
         Self {
+            agent_take: Mutex::new(None),
+            agent_changed: tokio::sync::Notify::new(),
             process: Mutex::new(None),
             composer_registration: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             respawn_failures: AtomicU32::new(0),
         }
     }
+}
+
+/// A host-owned dictation destination. No arbitrary app or window target is accepted.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentDictationTake {
+    pub take_id: String,
+    pub composer_request_id: String,
+    pub conversation_id: String,
+    pub profile: String,
+    pub window: String,
+    pub phase: String,
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    #[serde(skip)]
+    pub binding: Option<crate::mcp_server::turns::TurnBinding>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AgentDictationAction {
+    Start,
+    Stop,
+    Cancel,
+}
+
+pub(crate) fn agent_dictation_target(profile: &str, conversation_id: &str) -> AgentDictationTake {
+    AgentDictationTake {
+        take_id: uuid::Uuid::new_v4().to_string(),
+        composer_request_id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.into(),
+        profile: profile.into(),
+        window: "main".into(),
+        phase: "starting".into(),
+        error: None,
+        error_code: None,
+        binding: None,
+    }
+}
+
+pub(crate) fn agent_dictation_status(
+    app: &AppHandle,
+    profile: &str,
+    conversation_id: &str,
+) -> Result<Option<AgentDictationTake>, AppError> {
+    let state = app.state::<HelperState>();
+    let take = state
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?;
+    Ok(take
+        .as_ref()
+        .filter(|take| take.profile == profile && take.conversation_id == conversation_id)
+        .cloned())
+}
+
+/// Cancelling a caller while waiting also revokes the take's delivery authority.
+struct AgentDictationOperationLease {
+    app: AppHandle,
+    take_id: String,
+    complete: bool,
+}
+impl Drop for AgentDictationOperationLease {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        if self
+            .app
+            .state::<HelperState>()
+            .agent_take
+            .lock()
+            .ok()
+            .is_some_and(|active| {
+                active.as_ref().is_some_and(|take| {
+                    take.take_id == self.take_id && take.phase == "deliveryClaimed"
+                })
+            })
+        {
+            return;
+        }
+        cancel_dictation_take(&self.app, Some(&self.take_id));
+        let state = self.app.state::<HelperState>();
+        set_agent_dictation_phase(
+            &state,
+            &self.take_id,
+            "failed",
+            Some("The controlling chat turn ended before dictation completed.".into()),
+        );
+        let _ = send_helper_command(
+            &state,
+            serde_json::json!({"type":"discard_recording","takeId":self.take_id}),
+        );
+    }
+}
+
+/// A main-window delivery claim validates the original host binding again
+/// immediately before text is written to a composer, even after navigation.
+#[tauri::command]
+pub async fn claim_agent_dictation_delivery(
+    app: AppHandle,
+    window: WebviewWindow,
+    take_id: String,
+    composer_request_id: String,
+) -> Result<(), AppError> {
+    if window.label() != "main" {
+        return Err(AppError::new(
+            "dictation_delivery_forbidden",
+            "Only the destination window may claim delivery.",
+        ));
+    }
+    let target = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?
+        .as_ref()
+        .filter(|target| {
+            target.take_id == take_id
+                && target.composer_request_id == composer_request_id
+                && target.phase == "delivering"
+        })
+        .cloned()
+        .ok_or_else(|| {
+            AppError::new(
+                "dictation_take_not_found",
+                "The dictation delivery expired.",
+            )
+        })?;
+    let binding = target
+        .binding
+        .as_ref()
+        .ok_or_else(|| AppError::new("turn_expired", "The dictation has no controlling turn."))?;
+    let repos = crate::commands::repositories(&app).await?;
+    crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, binding, &target.profile)
+        .await?;
+    let state = app.state::<HelperState>();
+    let mut active = state
+        .agent_take
+        .lock()
+        .map_err(|_| AppError::new("dictation_unavailable", "Dictation state is unavailable."))?;
+    let take = active
+        .as_mut()
+        .filter(|current| {
+            current.take_id == take_id
+                && current.composer_request_id == composer_request_id
+                && current.phase == "delivering"
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                "dictation_take_not_found",
+                "The dictation delivery expired.",
+            )
+        })?;
+    // Claim commits the fixed composer insertion. Cancellation may win before
+    // this point; afterwards it must report too late rather than false success.
+    take.phase = "deliveryClaimed".into();
+    Ok(())
+}
+
+/// Dispatches a closed lifecycle operation and awaits the actual helper/UI acknowledgement.
+pub(crate) async fn agent_dictation_control(
+    app: &AppHandle,
+    action: AgentDictationAction,
+    target: AgentDictationTake,
+) -> Result<AgentDictationTake, AppError> {
+    let state = app.state::<HelperState>();
+    if matches!(action, AgentDictationAction::Start)
+        && app
+            .try_state::<ShortcutActivationState>()
+            .and_then(|state| {
+                state.controller.lock().ok().map(|controller| {
+                    controller.helper_is_listening || controller.pending_helper_take_id.is_some()
+                })
+            })
+            .unwrap_or(false)
+    {
+        return Err(AppError::new(
+            "dictation_busy",
+            "Another dictation take is starting or listening.",
+        ));
+    }
+    {
+        let mut active = state.agent_take.lock().map_err(|_| {
+            AppError::new("dictation_unavailable", "Dictation state is unavailable.")
+        })?;
+        match action {
+            AgentDictationAction::Start => {
+                if DICTATION_ACTIVE.load(Ordering::SeqCst)
+                    || active.as_ref().is_some_and(|take| {
+                        !matches!(take.phase.as_str(), "delivered" | "cancelled" | "failed")
+                    })
+                {
+                    return Err(AppError::new(
+                        "dictation_busy",
+                        "Another dictation take is active.",
+                    ));
+                }
+                *active = Some(target.clone());
+            }
+            AgentDictationAction::Stop | AgentDictationAction::Cancel => {
+                let take = active
+                    .as_mut()
+                    .filter(|take| {
+                        take.take_id == target.take_id
+                            && take.profile == target.profile
+                            && take.conversation_id == target.conversation_id
+                            && take.composer_request_id == target.composer_request_id
+                    })
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "dictation_take_not_found",
+                            "The bound dictation take is no longer active.",
+                        )
+                    })?;
+                if take.phase == "deliveryClaimed" {
+                    return Err(AppError::new("dictation_delivery_in_progress","The fixed composer delivery has already been claimed and cannot be cancelled."));
+                }
+                if matches!(take.phase.as_str(), "delivered" | "cancelled" | "failed") {
+                    return Err(AppError::new(
+                        "dictation_take_finished",
+                        "The dictation take has already finished.",
+                    ));
+                }
+                take.binding = target.binding.clone();
+                take.phase = if matches!(action, AgentDictationAction::Cancel) {
+                    "cancelling"
+                } else {
+                    "finalizing"
+                }
+                .into();
+            }
+        }
+    }
+    let mut lease = AgentDictationOperationLease {
+        app: app.clone(),
+        take_id: target.take_id.clone(),
+        complete: false,
+    };
+    let window = app.get_webview_window(&target.window).ok_or_else(|| {
+        AppError::new(
+            "dictation_window_unavailable",
+            "The destination window is unavailable.",
+        )
+    })?;
+    let kind = match action {
+        AgentDictationAction::Start => "start_listening",
+        AgentDictationAction::Stop => "stop_and_paste",
+        AgentDictationAction::Cancel => "discard_recording",
+    };
+    let authority = target
+        .binding
+        .as_ref()
+        .map(|binding| &binding.authority)
+        .ok_or_else(|| {
+            AppError::new(
+                "turn_expired",
+                "The dictation command has no host authority.",
+            )
+        })?;
+    if let Err(error) = dictation_helper_command_with_authority(
+        app.clone(),
+        window,
+        app.state::<HelperState>(),
+        serde_json::json!({"type":kind,"takeId":target.take_id}),
+        Some(authority),
+    ) {
+        set_agent_dictation_phase(
+            &state,
+            &target.take_id,
+            "failed",
+            Some(error.message.clone()),
+        );
+        return Err(error);
+    }
+    let completed = async {
+        loop {
+            let notified = state.agent_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let current = agent_dictation_status(app, &target.profile, &target.conversation_id)?
+                .filter(|take| take.take_id == target.take_id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "dictation_take_replaced",
+                        "The dictation take was replaced.",
+                    )
+                })?;
+            if current.phase == "failed" {
+                return Err(AppError::new(
+                    current
+                        .error_code
+                        .unwrap_or_else(|| "dictation_failed".into()),
+                    current.error.unwrap_or_else(|| "Dictation failed.".into()),
+                ));
+            }
+            if current.phase == "cancelled" && !matches!(action, AgentDictationAction::Cancel) {
+                return Err(AppError::new(
+                    "dictation_cancelled",
+                    "The dictation take was discarded before delivery.",
+                ));
+            }
+            let done = match action {
+                AgentDictationAction::Start => current.phase == "listening",
+                AgentDictationAction::Stop => current.phase == "delivered",
+                AgentDictationAction::Cancel => current.phase == "cancelled",
+            };
+            if done {
+                return Ok(current);
+            }
+            notified.await;
+        }
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(if matches!(action, AgentDictationAction::Stop) {
+            180
+        } else {
+            20
+        }),
+        completed,
+    )
+    .await
+    {
+        Ok(result) => {
+            lease.complete = result.is_ok();
+            result
+        }
+        Err(_) => {
+            cancel_dictation_take(app, Some(&target.take_id));
+            let _ = send_helper_command(
+                &state,
+                serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+            );
+            set_agent_dictation_phase(
+                &state,
+                &target.take_id,
+                "failed",
+                Some("The dictation acknowledgement timed out.".into()),
+            );
+            let mut error=AppError::new("dictation_timeout","The dictation acknowledgement timed out; cancellation was requested. Inspect the take before retrying.");
+            error.details = Some(
+                serde_json::json!({"target":target,"delivery":"unknown","effect":"unknown","retrySafe":false}),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn set_agent_dictation_phase(state: &HelperState, id: &str, phase: &str, error: Option<String>) {
+    if let Ok(mut active) = state.agent_take.lock() {
+        if let Some(take) = active.as_mut().filter(|take| {
+            take.take_id == id
+                && !matches!(
+                    take.phase.as_str(),
+                    "delivered" | "cancelled" | "failed" | "deliveryClaimed"
+                )
+        }) {
+            take.phase = phase.into();
+            take.error = error;
+            state.agent_changed.notify_waiters();
+        }
+    }
+}
+fn fail_agent_dictation(state: &HelperState, id: &str, code: &str, message: &str) {
+    if let Ok(mut active) = state.agent_take.lock() {
+        if let Some(take) = active.as_mut().filter(|take| {
+            take.take_id == id
+                && !matches!(
+                    take.phase.as_str(),
+                    "delivered" | "cancelled" | "failed" | "deliveryClaimed"
+                )
+        }) {
+            take.phase = "failed".into();
+            take.error_code = Some(code.into());
+            take.error = Some(message.into());
+            state.agent_changed.notify_waiters();
+        }
+    }
+}
+fn observe_agent_dictation_event(app: &AppHandle, event: &serde_json::Value) {
+    let Some(state) = app.try_state::<HelperState>() else {
+        return;
+    };
+    let id = dictation_take_id_from_event(event);
+    let phase = match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("listening_started") => "listening",
+        Some("recording_discarded") => "cancelled",
+        Some("error" | "helper_unavailable") => "failed",
+        _ => return,
+    };
+    let event_error = event.get("payload");
+    if let Some(id) = id {
+        if phase == "listening" {
+            let replaced = state.agent_take.lock().ok().and_then(|active| {
+                active
+                    .as_ref()
+                    .filter(|target| target.take_id != id)
+                    .map(|target| target.take_id.clone())
+            });
+            if let Some(replaced) = replaced {
+                set_agent_dictation_phase(
+                    &state,
+                    &replaced,
+                    "failed",
+                    Some("A newer dictation take replaced this take.".into()),
+                );
+            }
+        }
+
+        // Discard after finalization is a helper cleanup, not a user cancellation:
+        // the correlated composer delivery still owns completion.
+        if phase == "cancelled"
+            && state
+                .agent_take
+                .lock()
+                .ok()
+                .and_then(|active| {
+                    active.as_ref().map(|take| {
+                        take.take_id == id
+                            && (take.phase == "deliveryClaimed"
+                                || (take.phase == "delivering"
+                                    && dictation_discard_reason_from_event(event)
+                                        != Some("escape")))
+                    })
+                })
+                .unwrap_or(false)
+        {
+            return;
+        }
+        if phase == "failed" {
+            let code = event_error
+                .and_then(|payload| payload.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("dictation_helper_failed");
+            let message = event_error
+                .and_then(|payload| payload.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("The dictation helper reported an error.");
+            fail_agent_dictation(&state, id, code, message);
+        } else {
+            set_agent_dictation_phase(&state, id, phase, None);
+        }
+    } else if phase == "failed" {
+        let id = state
+            .agent_take
+            .lock()
+            .ok()
+            .and_then(|active| active.as_ref().map(|take| take.take_id.clone()));
+        if let Some(id) = id {
+            fail_agent_dictation(
+                &state,
+                &id,
+                "dictation_helper_unavailable",
+                "The dictation helper became unavailable.",
+            );
+        }
+    }
+}
+
+/// Profile-qualified deletion shared by UI and MCP; ids alone confer no access.
+pub(crate) async fn delete_history_for_profile(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query::query("DELETE FROM dictation_history WHERE id = ? AND profile = ?")
+        .bind(id)
+        .bind(profile)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::new(
+            "dictation_not_found",
+            "The dictation was not found in this data partition.",
+        ));
+    }
+    Ok(())
+}
+
+/// MCP deletion claims the approved partition under SQLite's write lock.
+pub(crate) async fn delete_history_authorized(
+    pool: &sqlx_sqlite::SqlitePool,
+    profile: &str,
+    id: &str,
+    authority: crate::db::repositories::McpMutation<'_>,
+) -> Result<(), AppError> {
+    use crate::db::repositories::McpMutation;
+    let mut tx = if matches!(authority, McpMutation::External(_)) {
+        pool.begin_with("BEGIN IMMEDIATE").await?
+    } else {
+        pool.begin().await?
+    };
+    authority.guard(&mut tx, profile).await?;
+    let expected = authority
+        .external_target()
+        .and_then(|target| target["createdAt"].as_str());
+    let result = sqlx::query::query(
+        "DELETE FROM dictation_history WHERE id=? AND profile=? AND (? IS NULL OR created_at = ?)",
+    )
+    .bind(id)
+    .bind(profile)
+    .bind(expected)
+    .bind(expected)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::new(
+            "dictation_not_found",
+            "The dictation was not found in this data partition.",
+        ));
+    }
+    authority.before_commit(profile)?;
+    tx.commit().await?;
+    Ok(())
 }
 
 const DICTATION_TAKE_CAPTURING: u8 = 0;
@@ -185,16 +699,19 @@ struct DictationTakeToken {
 
 struct DictationTakeTokenInner {
     id: String,
+    transcription_settings: crate::providers::ProviderModelSettings,
     state: AtomicU8,
     cancellation: tokio::sync::watch::Sender<bool>,
 }
 
 impl DictationTakeToken {
-    fn new(id: String) -> Self {
+    fn new(id: String, transcription_settings: crate::providers::ProviderModelSettings) -> Self {
         let (cancellation, _) = tokio::sync::watch::channel(false);
         Self {
             inner: Arc::new(DictationTakeTokenInner {
                 id,
+                // Reuse admission's selection; credentials are resolved only at transcription.
+                transcription_settings,
                 state: AtomicU8::new(DICTATION_TAKE_CAPTURING),
                 cancellation,
             }),
@@ -206,18 +723,30 @@ impl DictationTakeToken {
     }
 
     fn cancel(&self) -> bool {
-        if self
-            .inner
-            .state
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-                matches!(state, DICTATION_TAKE_CAPTURING | DICTATION_TAKE_PROCESSING)
-                    .then_some(DICTATION_TAKE_CANCELLED)
-            })
-            .is_err()
-        {
-            return false;
+        loop {
+            let state = self.inner.state.load(Ordering::SeqCst);
+            if !matches!(state, DICTATION_TAKE_CAPTURING | DICTATION_TAKE_PROCESSING) {
+                return false;
+            }
+            if self
+                .inner
+                .state
+                .compare_exchange(
+                    state,
+                    DICTATION_TAKE_CANCELLED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                break;
+            }
         }
         self.inner.cancellation.send_replace(true);
+        // A cancelled take never delivers, and its transcription task returns
+        // without an event, so it stops holding an update install here. A
+        // take already delivering cannot be cancelled; its paste ends it.
+        crate::update_gate::UPDATE_GATE.end_dictation_take(self.id());
         true
     }
 
@@ -282,10 +811,113 @@ enum DictationFinalizedTake {
 #[derive(Default)]
 pub struct DictationTakeState {
     current: Mutex<Option<DictationTakeToken>>,
+    admitted_settings:
+        Mutex<std::collections::HashMap<String, crate::providers::ProviderModelSettings>>,
     helper_command_generation: Mutex<u64>,
+    #[cfg(any(target_os = "macos", test))]
+    last_dictation: Mutex<Option<(String, String)>>,
 }
 
 impl DictationTakeState {
+    // Retain only a final, authorized result, before helper I/O can fail.
+    // The delivery claim remains the cancellation point of no return (ADR-0049).
+    #[cfg(any(target_os = "macos", test))]
+    fn remember_last_dictation(
+        &self,
+        claim: &DictationDeliveryClaim,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) {
+        // A preclaimed result may finish after a replacement started. Never let
+        // it overwrite that replacement's cache, even though delivery was authorized.
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !current
+            .as_ref()
+            .is_some_and(|take| Arc::ptr_eq(&take.inner, &claim.take.inner))
+        {
+            return;
+        }
+        let eligible = outcome.quarantine_transcript.is_none()
+            && (outcome.helper_command["type"] == "paste_text"
+                || outcome
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event["type"] == "agent_session_prompt"));
+        if let Some(text) = outcome
+            .transcript
+            .as_ref()
+            .filter(|transcript| eligible && !transcript.text.trim().is_empty())
+            .map(|transcript| &transcript.text)
+        {
+            *self
+                .last_dictation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((profile.to_string(), text.clone()));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn last_dictation_response(
+        &self,
+        profile: &str,
+        request: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let request_id = request.get("payload")?.get("requestId")?.as_str()?;
+        if request_id.is_empty() || request_id.len() > 128 {
+            return None;
+        }
+        let last = self
+            .last_dictation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let text = last
+            .as_ref()
+            .filter(|(owner, _)| owner == profile)
+            .map(|(_, text)| text);
+        Some(
+            serde_json::json!({"type": "repeat_last_dictation", "requestId": request_id, "text": text}),
+        )
+    }
+
+    fn remember_admitted_settings(
+        &self,
+        id: &str,
+        settings: crate::providers::ProviderModelSettings,
+    ) {
+        self.admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.to_string())
+            .or_insert(settings);
+    }
+
+    fn take_admitted_settings(&self, id: &str) -> crate::providers::ProviderModelSettings {
+        let mut admitted = self
+            .admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admitted
+            .remove(id)
+            .or_else(|| admitted.remove(UNTAGGED_DICTATION_TAKE))
+            .unwrap_or_else(crate::providers::effective_current_settings)
+    }
+
+    fn forget_admitted_settings(&self, id: Option<&str>) {
+        let mut admitted = self
+            .admitted_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = id {
+            admitted.remove(id);
+        } else {
+            admitted.clear();
+        }
+    }
+
     fn begin(&self, id: String) -> DictationTakeToken {
         let mut current = self
             .current
@@ -300,7 +932,8 @@ impl DictationTakeState {
         if let Some(previous) = current.take() {
             previous.cancel();
         }
-        let token = DictationTakeToken::new(id);
+        let settings = self.take_admitted_settings(&id);
+        let token = DictationTakeToken::new(id, settings);
         *current = Some(token.clone());
         token
     }
@@ -311,7 +944,9 @@ impl DictationTakeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = current.as_ref() {
-            if id.is_some_and(|id| existing.id() != id) {
+            if let Some(id) = id.filter(|id| existing.id() != *id) {
+                // Dropped untranscribed: nothing else will end it in the gate.
+                crate::update_gate::UPDATE_GATE.end_dictation_take(id);
                 return DictationFinalizedTake::Stale;
             }
             if existing.try_begin_processing() {
@@ -322,13 +957,17 @@ impl DictationTakeState {
                 DICTATION_TAKE_PROCESSING | DICTATION_TAKE_DELIVERING => {
                     DictationFinalizedTake::Duplicate
                 }
-                _ => DictationFinalizedTake::Stale,
+                _ => {
+                    crate::update_gate::UPDATE_GATE.end_dictation_take(existing.id());
+                    DictationFinalizedTake::Stale
+                }
             };
         }
         let id = id
             .map(str::to_string)
             .unwrap_or_else(|| format!("legacy-{}", uuid::Uuid::new_v4()));
-        let token = DictationTakeToken::new(id);
+        let settings = self.take_admitted_settings(&id);
+        let token = DictationTakeToken::new(id, settings);
         let processing_started = token.try_begin_processing();
         debug_assert!(processing_started);
         *current = Some(token.clone());
@@ -379,18 +1018,6 @@ impl DictationTakeState {
         Some((current, operation(current, prepared)))
     }
 
-    fn run_if_current_helper_command<T>(
-        &self,
-        expected_generation: u64,
-        operation: impl FnOnce() -> T,
-    ) -> Option<T> {
-        let generation = self
-            .helper_command_generation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (*generation == expected_generation).then(operation)
-    }
-
     fn lock_helper_commands(&self) -> std::sync::MutexGuard<'_, u64> {
         self.helper_command_generation
             .lock()
@@ -422,12 +1049,109 @@ pub struct HotkeyStatus {
     event: Mutex<serde_json::Value>,
 }
 
-/// Position the HUD remembers between dictation sessions in the same process.
-/// Intentionally process-scoped, not disk-persisted: every fresh launch of
-/// Clovy should put the pill back at top-center, but within a single run
-/// the user's drag-to-corner choice should stick.
+/// Only an explicit user drag is remembered within this process. Resizes and
+/// native startup moves must never replace the configured screen-edge anchor.
 pub struct HudPosition {
-    inner: Mutex<Option<(i32, i32)>>,
+    inner: Mutex<HudPositionState>,
+}
+
+#[derive(Default)]
+struct HudPositionState {
+    saved: Option<(i32, i32)>,
+    drag_origin: Option<(i32, i32)>,
+}
+
+impl HudPositionState {
+    fn begin_drag(&mut self, position: (i32, i32)) {
+        self.drag_origin = Some(position);
+    }
+
+    fn observe_drag(&mut self, position: (i32, i32), mouse_down: bool) {
+        if mouse_down {
+            return;
+        }
+        if let Some(origin) = self.drag_origin.take() {
+            if position != origin {
+                self.saved = Some(position);
+            }
+        }
+    }
+
+    fn cancel_drag(&mut self) {
+        self.drag_origin = None;
+    }
+
+    fn reset(&mut self) {
+        self.cancel_drag();
+        self.saved = None;
+    }
+}
+
+/// Stop capture before any programmatic movement. A queued release sample
+/// must never mistake a resize, shake, or meeting prompt for a user's drag.
+fn cancel_hud_drag(hud: &WebviewWindow) {
+    if let Some(state) = hud.app_handle().try_state::<HudPosition>() {
+        if let Ok(mut position) = state.inner.lock() {
+            position.cancel_drag();
+        }
+    }
+}
+
+fn poll_hud_drag(app: &AppHandle, hud: &WebviewWindow) {
+    let dragging = app
+        .try_state::<HudPosition>()
+        .and_then(|state| {
+            state
+                .inner
+                .lock()
+                .ok()
+                .map(|position| position.drag_origin.is_some())
+        })
+        .unwrap_or(false);
+    if !dragging {
+        return;
+    }
+    let app_for_drag = app.clone();
+    let hud = hud.clone();
+    // Read the frame and button state together on the main thread. In
+    // particular, never hold the position mutex while waiting for a native
+    // frame getter on another thread.
+    let _ = app.run_on_main_thread(move || {
+        let Ok(position) = hud.outer_position() else {
+            return;
+        };
+        let mouse_down = hud_left_mouse_button_down();
+        if let Some(state) = app_for_drag.try_state::<HudPosition>() {
+            if let Ok(mut saved) = state.inner.lock() {
+                saved.observe_drag((position.x, position.y), mouse_down);
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
+    }
+    // Combined session state, left button: AppKit need not deliver mouseUp
+    // to this process after performWindowDragWithEvent returns immediately.
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+
+#[cfg(target_os = "windows")]
+fn hud_left_mouse_button_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+    unsafe { GetAsyncKeyState(1) < 0 }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn hud_left_mouse_button_down() -> bool {
+    false
 }
 
 pub struct ShortcutActivationState {
@@ -466,6 +1190,14 @@ pub fn configured_transcription_language() -> Option<String> {
         .and_then(|settings| settings.language.clone())
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DictationHudPlacement {
+    #[default]
+    Bottom,
+    Top,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSettings {
@@ -473,18 +1205,76 @@ pub struct DictationSettings {
     pub toggle_shortcut: DictationShortcutSetting,
     pub microphone: DictationMicrophoneSetting,
     pub style: DictationStyle,
+    pub hud_placement: DictationHudPlacement,
     pub language: Option<String>,
+    /// Off by default: the Whisper transcript is pasted with no LLM call.
+    pub cleanup_enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    pub cleanup_model: String,
+    /// Records the one-time move to optional cleanup (ditado-rapido D1):
+    /// a file saved before it lacks the field and migrates to cleanup off.
+    pub cleanup_migrated: bool,
 }
 
 impl Default for DictationSettings {
     fn default() -> Self {
+        Self::default_for_platform(cfg!(target_os = "windows"))
+    }
+}
+
+impl DictationSettings {
+    /// Windows dictates with Right Ctrl alone by default (there is no Fn
+    /// there); a saved shortcut is kept as it is.
+    fn default_for_platform(windows: bool) -> Self {
         Self {
-            push_to_talk_shortcut: DictationShortcutSetting::control_option_d(),
+            push_to_talk_shortcut: default_shortcut_for(DictationShortcutKind::PushToTalk, windows),
             toggle_shortcut: DictationShortcutSetting::control_option_t(),
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
+            hud_placement: DictationHudPlacement::default(),
             language: None,
+            cleanup_enabled: false,
+            cleanup_model: DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
+            cleanup_migrated: true,
         }
+    }
+}
+
+const MAX_DICTATION_CLEANUP_MODEL_CHARS: usize = 200;
+
+/// One-time move to optional cleanup: settings saved before it (cleanup
+/// always ran, on Clovy API, an endpoint, or a CLI) start with cleanup off.
+/// Returns whether the settings changed and should be written back.
+fn migrate_dictation_cleanup(settings: &mut DictationSettings) -> bool {
+    if settings.cleanup_migrated {
+        return false;
+    }
+    settings.cleanup_enabled = false;
+    settings.cleanup_migrated = true;
+    true
+}
+
+/// Accepts an OpenRouter catalog id (`vendor/model`, optional `:variant`);
+/// CLI, endpoint, and internal option ids are refused.
+fn validate_dictation_cleanup_model(model: &str) -> Result<String, AppError> {
+    let model = model.trim();
+    let valid = model.chars().count() <= MAX_DICTATION_CLEANUP_MODEL_CHARS
+        && !model.starts_with("__")
+        && !model.chars().any(char::is_whitespace)
+        && model
+            .split_once('/')
+            .is_some_and(|(vendor, name)| !vendor.is_empty() && !name.is_empty())
+        && !model
+            .split('/')
+            .next()
+            .is_some_and(|vendor| vendor.contains(':'));
+    if valid {
+        Ok(model.to_string())
+    } else {
+        Err(AppError::new(
+            "dictation_cleanup_model_invalid",
+            "Choose an OpenRouter model for dictation cleanup.",
+        ))
     }
 }
 
@@ -500,7 +1290,11 @@ impl<'de> Deserialize<'de> for DictationSettings {
             toggle_shortcut: Option<DictationShortcutSetting>,
             microphone: Option<DictationMicrophoneSetting>,
             style: Option<DictationStyle>,
+            hud_placement: Option<DictationHudPlacement>,
             language: Option<String>,
+            cleanup_enabled: Option<bool>,
+            cleanup_model: Option<String>,
+            cleanup_migrated: Option<bool>,
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -524,14 +1318,26 @@ impl<'de> Deserialize<'de> for DictationSettings {
             push_to_talk_shortcut: settings
                 .push_to_talk_shortcut
                 .map(|shortcut| shortcut.normalized_or_default(DictationShortcutKind::PushToTalk))
-                .unwrap_or_else(DictationShortcutSetting::control_option_d),
+                .unwrap_or_else(|| {
+                    default_shortcut_for(
+                        DictationShortcutKind::PushToTalk,
+                        cfg!(target_os = "windows"),
+                    )
+                }),
             toggle_shortcut: settings
                 .toggle_shortcut
                 .map(|shortcut| shortcut.normalized_or_default(DictationShortcutKind::Toggle))
                 .unwrap_or_else(DictationShortcutSetting::control_option_t),
             microphone: settings.microphone.unwrap_or(microphone),
             style: settings.style.unwrap_or_default(),
+            hud_placement: settings.hud_placement.unwrap_or_default(),
             language: normalize_language(settings.language),
+            cleanup_enabled: settings.cleanup_enabled.unwrap_or(false),
+            cleanup_model: settings
+                .cleanup_model
+                .and_then(|model| validate_dictation_cleanup_model(&model).ok())
+                .unwrap_or_else(|| DEFAULT_DICTATION_CLEANUP_MODEL.to_string()),
+            cleanup_migrated: settings.cleanup_migrated.unwrap_or(false),
         })
     }
 }
@@ -644,6 +1450,17 @@ impl DictationShortcutSetting {
         }
     }
 
+    /// Right Ctrl alone: the Windows push-to-talk default.
+    fn right_ctrl() -> Self {
+        Self {
+            key_code: 0,
+            code: "ControlRight".to_string(),
+            modifiers: DictationShortcutModifiers::default(),
+            label: "Right Ctrl".to_string(),
+            press_count: 1,
+        }
+    }
+
     fn control_option_d() -> Self {
         Self {
             key_code: 0x02,
@@ -679,13 +1496,26 @@ impl DictationShortcutSetting {
             && self.press_count == other.press_count
     }
 
-    fn normalized_or_default(mut self, kind: DictationShortcutKind) -> Self {
-        if cfg!(target_os = "windows")
+    fn normalized_or_default(self, kind: DictationShortcutKind) -> Self {
+        self.normalized_for_platform(kind, cfg!(target_os = "windows"))
+    }
+
+    fn normalized_for_platform(mut self, kind: DictationShortcutKind, windows: bool) -> Self {
+        let double_tap =
+            self.press_count == 2 && is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && (self.press_count == 1 || double_tap)
+            && is_windows_lone_key(&self.code, &self.modifiers)
+        {
+            self.key_code = key_code_for_code(&self.code).unwrap_or(0);
+            return self;
+        }
+        if windows
             && (self.press_count != 1
                 || self.modifiers.function
                 || is_modifier_only_input(&self.code, &self.modifiers))
         {
-            return default_shortcut_for_kind(kind);
+            return default_shortcut_for(kind, windows);
         }
         if self.is_bare_fn() {
             return DictationShortcutSetting::bare_fn();
@@ -693,11 +1523,11 @@ impl DictationShortcutSetting {
         if is_modifier_only_input(&self.code, &self.modifiers) {
             return DictationShortcutSetting::modifier_only(self.modifiers);
         }
-        let Some(key_code) = key_code_for_code(&self.code) else {
-            return default_shortcut_for_kind(kind);
+        let Some(key_code) = key_code_for_platform(&self.code, windows) else {
+            return default_shortcut_for(kind, windows);
         };
         if !self.modifiers.has_any() {
-            return default_shortcut_for_kind(kind);
+            return default_shortcut_for(kind, windows);
         }
         self.key_code = key_code;
         self.press_count = if self.press_count == 2 { 2 } else { 1 };
@@ -829,6 +1659,18 @@ struct ShortcutActivationController {
 enum ShortcutKeyEdge {
     Down,
     Up,
+    /// Another key joined a lone-key shortcut while it was held (Windows
+    /// Right Ctrl + C): whatever the press started is dropped.
+    Cancel,
+}
+
+fn shortcut_key_edge(event_type: &str) -> Option<ShortcutKeyEdge> {
+    match event_type {
+        "fn_key_down" | "shortcut_key_down" => Some(ShortcutKeyEdge::Down),
+        "fn_key_up" | "shortcut_key_up" => Some(ShortcutKeyEdge::Up),
+        "shortcut_key_cancel" => Some(ShortcutKeyEdge::Cancel),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -907,6 +1749,19 @@ impl ShortcutActivationController {
                 None => None,
             },
             (DictationShortcutKind::Toggle, ShortcutKeyEdge::Up) => None,
+            (DictationShortcutKind::PushToTalk, ShortcutKeyEdge::Cancel) => {
+                self.push_started_at = None;
+                let active = self.active_mode == Some(DictationShortcutKind::PushToTalk)
+                    && self.push_to_talk_is_down;
+                self.push_to_talk_is_down = false;
+                if active {
+                    self.active_mode = None;
+                    Some(DictationCommand::DiscardListening)
+                } else {
+                    None
+                }
+            }
+            (DictationShortcutKind::Toggle, ShortcutKeyEdge::Cancel) => None,
         }
     }
 
@@ -1175,15 +2030,6 @@ impl ShortcutActivationController {
         true
     }
 
-    fn finish_start_for_auth_failure(&mut self, take_id: &str) -> Option<bool> {
-        let owns_start = self.pending_helper_take_id.as_deref() == Some(take_id)
-            || self.helper_take_id.as_deref() == Some(take_id);
-        if !owns_start {
-            return None;
-        }
-        Some(self.finish_helper_take(take_id, None))
-    }
-
     fn reset(&mut self) {
         self.reset_input_activation();
         self.helper_take_id = None;
@@ -1232,14 +2078,39 @@ impl DictationShortcutInput {
         }
 
         let requested_press_count = self.press_count.unwrap_or(1);
-
-        if windows && requested_press_count != 1 {
+        // On Windows a double tap exists only for a lone Ctrl, Alt or Shift,
+        // the Mac Fn toggle gesture; the helper's hook counts the taps.
+        let double_tap_allowed = is_windows_lone_modifier(&self.code, &self.modifiers);
+        if windows
+            && requested_press_count != 1
+            && !(requested_press_count == 2 && double_tap_allowed)
+        {
             return Err(AppError::new(
                 "dictation_shortcut_unsupported",
                 "Double-press shortcuts are not supported on Windows.",
             ));
         }
-        let press_count = 1;
+        let press_count = if windows && double_tap_allowed && requested_press_count == 2 {
+            2
+        } else {
+            1
+        };
+
+        if windows && is_windows_lone_key(&self.code, &self.modifiers) {
+            return Ok(DictationShortcutSetting {
+                key_code: key_code_for_code(&self.code).unwrap_or(0),
+                code: self.code,
+                modifiers: self.modifiers,
+                label: self.label,
+                press_count,
+            });
+        }
+        if windows && !self.modifiers.has_any() && is_windows_key_code(&self.code) {
+            return Err(AppError::new(
+                "dictation_shortcut_unsupported",
+                "The Windows key alone opens Start. Use Ctrl, Alt, or Shift alone, or add a key.",
+            ));
+        }
 
         if is_bare_fn_input(&self.code, &self.modifiers) {
             if windows {
@@ -1284,7 +2155,7 @@ impl DictationShortcutInput {
             ));
         }
 
-        let key_code = key_code_for_code(&self.code).ok_or_else(|| {
+        let key_code = key_code_for_platform(&self.code, windows).ok_or_else(|| {
             AppError::new(
                 "dictation_shortcut_unsupported",
                 "Shortcut must include a supported non-modifier key.",
@@ -1354,16 +2225,78 @@ fn no_standard_modifiers(modifiers: &DictationShortcutModifiers) -> bool {
     !modifiers.command && !modifiers.control && !modifiers.option && !modifiers.shift
 }
 
-fn default_shortcut_for_kind(kind: DictationShortcutKind) -> DictationShortcutSetting {
+fn default_shortcut_for(kind: DictationShortcutKind, windows: bool) -> DictationShortcutSetting {
     match kind {
+        DictationShortcutKind::PushToTalk if windows => DictationShortcutSetting::right_ctrl(),
         DictationShortcutKind::PushToTalk => DictationShortcutSetting::control_option_d(),
         DictationShortcutKind::Toggle => DictationShortcutSetting::control_option_t(),
     }
 }
 
+/// Ctrl, Alt and Shift of either side: watched by the helper's hooks with the
+/// Mac Fn gesture (hold alone to dictate, double tap to toggle).
+const WINDOWS_LONE_MODIFIERS: [&str; 6] = [
+    "ControlLeft",
+    "ControlRight",
+    "AltLeft",
+    "AltRight",
+    "ShiftLeft",
+    "ShiftRight",
+];
+
+/// Keys that work alone as a Windows shortcut: the modifiers above and keys
+/// no app uses on their own. Mirrors the helper's `solo_key::SOLO_KEYS`.
+const WINDOWS_LONE_KEYS: [&str; 23] = [
+    "ControlLeft",
+    "ControlRight",
+    "AltLeft",
+    "AltRight",
+    "ShiftLeft",
+    "ShiftRight",
+    "F13",
+    "F14",
+    "F15",
+    "F16",
+    "F17",
+    "F18",
+    "F19",
+    "F20",
+    "F21",
+    "F22",
+    "F23",
+    "F24",
+    "Pause",
+    "ScrollLock",
+    "Insert",
+    "PrintScreen",
+    "ContextMenu",
+];
+
+fn is_windows_lone_key(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.has_any() && WINDOWS_LONE_KEYS.contains(&code)
+}
+
+fn is_windows_lone_modifier(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.has_any() && WINDOWS_LONE_MODIFIERS.contains(&code)
+}
+
+/// The Mac key code of `code`, or on Windows `0` for a lone key that is not
+/// a modifier (F13 to F24, Pause, Insert...): the helper also takes it in a
+/// chord (Ctrl+F13), and it maps keys by `code`, not by Mac key code.
+fn key_code_for_platform(code: &str, windows: bool) -> Option<u32> {
+    key_code_for_code(code).or_else(|| {
+        (windows && WINDOWS_LONE_KEYS.contains(&code) && !WINDOWS_LONE_MODIFIERS.contains(&code))
+            .then_some(0)
+    })
+}
+
+fn is_windows_key_code(code: &str) -> bool {
+    matches!(code, "MetaLeft" | "MetaRight")
+}
+
 pub fn setup(app: &mut tauri::App) {
     app.manage(HudPosition {
-        inner: Mutex::new(None),
+        inner: Mutex::new(HudPositionState::default()),
     });
     app.manage(HudHoverState {
         stop_bounds: Mutex::new(None),
@@ -1381,6 +2314,9 @@ pub fn setup(app: &mut tauri::App) {
         tracing::warn!(%error, "failed to configure dictation HUD");
     }
     manage_settings(app.handle());
+    // Keys, token, and the transcription connection are ready before the
+    // first press (ditado-rapido D4).
+    crate::providers::transcription::warm_dictation_route_if_idle();
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
     });
@@ -1493,11 +2429,14 @@ pub async fn list_dictation_history(
 
 #[tauri::command]
 pub async fn delete_dictation_history_item(app: AppHandle, id: String) -> Result<(), AppError> {
-    crate::commands::repositories(&app)
-        .await?
-        .delete_dictation_history_item(&id)
-        .await
-        .map_err(AppError::from)
+    let profile = crate::commands::active_profile(&app);
+    let repos = crate::commands::repositories(&app).await?;
+    delete_history_for_profile(&repos.pool, &profile, &id).await?;
+    let _ = app.emit(
+        "clovy-data-changed",
+        serde_json::json!({"profile":profile,"kind":"dictations","id":id,"deleted":true}),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -1591,6 +2530,43 @@ pub fn set_dictation_style(
 }
 
 #[tauri::command]
+pub fn set_dictation_hud_placement(
+    app: AppHandle,
+    state: State<'_, DictationSettingsState>,
+    placement: DictationHudPlacement,
+) -> Result<DictationSettings, AppError> {
+    let settings = update_settings(&state, |settings| {
+        settings.hud_placement = placement;
+    })?;
+    if let Some(position) = app.try_state::<HudPosition>() {
+        if let Ok(mut saved) = position.inner.lock() {
+            saved.reset();
+        }
+    }
+    // Apply on the next dictation show. The shared window may currently
+    // contain a top-anchored meeting prompt, not dictation content.
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn set_dictation_cleanup(
+    state: State<'_, DictationSettingsState>,
+    enabled: bool,
+    model: Option<String>,
+) -> Result<DictationSettings, AppError> {
+    let model = model
+        .as_deref()
+        .map(validate_dictation_cleanup_model)
+        .transpose()?;
+    update_settings(&state, |settings| {
+        settings.cleanup_enabled = enabled;
+        if let Some(model) = model {
+            settings.cleanup_model = model;
+        }
+    })
+}
+
+#[tauri::command]
 pub fn set_dictation_language(
     state: State<'_, DictationSettingsState>,
     language: Option<String>,
@@ -1601,6 +2577,16 @@ pub fn set_dictation_language(
     })
 }
 
+fn validate_renderer_dictation_command(command: &serde_json::Value) -> Result<(), AppError> {
+    if command.get("type").and_then(serde_json::Value::as_str) == Some("repeat_last_dictation") {
+        return Err(AppError::new(
+            "invalid_input",
+            "Dictation reinsertion requires its native shortcut.",
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn dictation_helper_command(
     app: AppHandle,
@@ -1608,6 +2594,66 @@ pub fn dictation_helper_command(
     state: State<'_, HelperState>,
     command: serde_json::Value,
 ) -> Result<(), AppError> {
+    dictation_helper_command_with_authority(app, window, state, command, None)
+}
+
+fn dictation_helper_command_with_authority(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, HelperState>,
+    command: serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
+    validate_renderer_dictation_command(&command)?;
+    if command.get("type").and_then(serde_json::Value::as_str) == Some("agent_composer_delivered") {
+        if window.label() != "main" {
+            return Err(AppError::new(
+                "dictation_delivery_forbidden",
+                "Only the destination window can acknowledge delivery.",
+            ));
+        }
+        let mut active = state.agent_take.lock().map_err(|_| {
+            AppError::new("dictation_unavailable", "Dictation state is unavailable.")
+        })?;
+        let take = active
+            .as_mut()
+            .filter(|take| {
+                command.get("takeId").and_then(serde_json::Value::as_str)
+                    == Some(take.take_id.as_str())
+                    && command
+                        .get("composerRequestId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(take.composer_request_id.as_str())
+                    && take.phase == "deliveryClaimed"
+            })
+            .ok_or_else(|| {
+                AppError::new(
+                    "dictation_take_not_found",
+                    "The composer delivery has expired.",
+                )
+            })?;
+        take.phase = if command.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            "delivered"
+        } else {
+            "failed"
+        }
+        .into();
+        let take_id = take.take_id.clone();
+        let delivered = take.phase == "delivered";
+        if !delivered {
+            take.error_code = Some("dictation_composer_delivery_failed".into());
+            take.error=Some("The destination composer could not accept this dictation. Saved text remains in dictation history.".into());
+        }
+        drop(active);
+        state.agent_changed.notify_waiters();
+        let event = if delivered {
+            serde_json::json!({"type":"paste_completed","payload":{"composerRequestId":command.get("composerRequestId")}})
+        } else {
+            app_error_event(AppError::new("dictation_composer_delivery_failed","The destination composer could not accept the dictation. Its saved text remains in dictation history."))
+        };
+        emit_dictation_take_id_event(&app, &take_id, event);
+        return Ok(());
+    }
     if let Some(request_id) = command.get("composerRequestId") {
         let valid = request_id
             .as_str()
@@ -1731,12 +2777,15 @@ pub fn dictation_helper_command(
     ) {
         if let Some(take_state) = app.try_state::<DictationTakeState>() {
             let (_, result) = take_state.run_new_helper_command(|_| {
+                if let Some(authority) = authority {
+                    authority.check_live()?;
+                }
                 let current_take_id = take_state.current_take_id();
                 let requested_take_id = command
                     .get("takeId")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                let (_, take_id) = app
+                let (starts_recording, take_id) = app
                     .try_state::<ShortcutActivationState>()
                     .and_then(|activation| {
                         activation.controller.lock().ok().map(|mut controller| {
@@ -1759,6 +2808,9 @@ pub fn dictation_helper_command(
                         });
                         (starts_recording, take_id)
                     });
+                if starts_recording {
+                    admit_dictation_start(&app, take_id.as_deref())?;
+                }
 
                 let mut command = command;
                 if let (Some(take_id), Some(object)) = (take_id.as_deref(), command.as_object_mut())
@@ -1768,14 +2820,18 @@ pub fn dictation_helper_command(
                 if command_type == "discard_recording" {
                     cancel_dictation_take(&app, take_id.as_deref());
                 }
-                send_helper_command(&state, command)
+                send_helper_command_checked(&state, command, authority).inspect_err(|_| {
+                    if starts_recording {
+                        release_unsent_dictation_take(&app, take_id.as_deref());
+                    }
+                })
             });
             return result;
         }
-        return send_helper_command(&state, command);
+        return send_helper_command_checked(&state, command, authority);
     }
 
-    send_helper_command(&state, command)
+    send_helper_command_checked(&state, command, authority)
 }
 
 #[cfg(target_os = "windows")]
@@ -2055,17 +3111,59 @@ pub fn dictation_hud_set_size(app: AppHandle, width: f64, height: f64, animate: 
     animate_frame_to(&hud, new_size, animate);
 }
 
-/// Ease the window to `new_size`, keeping its center anchored. Skips the
-/// animation (snaps) when the window is hidden or `animate` is false.
+/// Arm capture before handing the gesture to the native window server.
+/// macOS returns immediately and may not send mouseUp; the existing HUD
+/// poll commits the final frame once the session button state is released.
+#[tauri::command]
+pub fn dictation_hud_start_drag(app: AppHandle) {
+    let Some(hud) = app.get_webview_window("hud") else {
+        return;
+    };
+    let app_for_drag = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let (Ok(position), Some(state)) = (
+            hud.outer_position(),
+            app_for_drag.try_state::<HudPosition>(),
+        ) else {
+            return;
+        };
+        let Ok(mut saved) = state.inner.lock() else {
+            return;
+        };
+        saved.begin_drag((position.x, position.y));
+        drop(saved);
+        if hud.start_dragging().is_err() {
+            cancel_hud_drag(&hud);
+        }
+    });
+}
+
+/// Ease the window to `new_size`, keeping the nearest vertical edge anchored.
+/// Hidden windows are positioned by show, not resized around their startup frame.
 fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: bool) {
+    cancel_hud_drag(hud);
     let (Ok(position), Ok(old_size)) = (hud.outer_position(), hud.outer_size()) else {
         return;
     };
     if new_size == old_size {
         return;
     }
-    let target_x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
-    let target_y = position.y + (old_size.height as i32 - new_size.height as i32) / 2;
+    if !hud.is_visible().unwrap_or(false) {
+        // Before the first show, the OS chooses an arbitrary initial frame.
+        // Centering a resize there used to emit Moved and masquerade as a drag.
+        let _ = hud.set_size(new_size);
+        return;
+    }
+    let monitor = hud
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| hud.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let (target_x, target_y) =
+        dictation_hud_resized_origin(*monitor.work_area(), position, old_size, new_size);
 
     if animate && hud.is_visible().unwrap_or(false) {
         const STEPS: u32 = 12;
@@ -2087,6 +3185,29 @@ fn animate_frame_to(hud: &WebviewWindow, new_size: PhysicalSize<u32>, animate: b
     }
     let _ = hud.set_size(new_size);
     let _ = hud.set_position(PhysicalPosition::new(target_x, target_y));
+}
+
+fn dictation_hud_resized_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    position: PhysicalPosition<i32>,
+    old_size: PhysicalSize<u32>,
+    new_size: PhysicalSize<u32>,
+) -> (i32, i32) {
+    let x = position.x + (old_size.width as i32 - new_size.width as i32) / 2;
+    let below_middle = position.y + old_size.height as i32 / 2
+        > work_area.position.y + work_area.size.height as i32 / 2;
+    let y = if below_middle {
+        position.y + old_size.height as i32 - new_size.height as i32
+    } else {
+        position.y
+    };
+    let max_x = work_area.position.x + (work_area.size.width as i32 - new_size.width as i32).max(0);
+    let max_y =
+        work_area.position.y + (work_area.size.height as i32 - new_size.height as i32).max(0);
+    (
+        x.clamp(work_area.position.x, max_x),
+        y.clamp(work_area.position.y, max_y),
+    )
 }
 
 /// Set the native window alpha. The exit dissolve is driven from the webview
@@ -2139,12 +3260,13 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let Some(hud) = app.get_webview_window("hud") else {
         return false;
     };
+    cancel_hud_drag(&hud);
     // A window woken at alpha 0 (wake_hud_window) reports visible but the
     // user can't see it — that still counts as a fresh entrance.
     let entering = enter.unwrap_or(false);
     let was_hidden = !hud.is_visible().unwrap_or(false)
         || HUD_WOKEN_FADED.load(std::sync::atomic::Ordering::Relaxed);
-    if !hud.is_visible().unwrap_or(false) && !entering {
+    if !entering {
         position_hud_window(&app, &hud);
     }
     HUD_WOKEN_FADED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2166,7 +3288,7 @@ pub fn dictation_hud_show(app: AppHandle, enter: Option<bool>, animate: Option<b
     let target = hud
         .outer_size()
         .ok()
-        .and_then(|size| default_hud_position(&hud, size));
+        .and_then(|size| hud_position_for_placement(&hud, size, DictationHudPlacement::Top));
     let Some((x, y)) = target else {
         let alpha_hud = hud.clone();
         let _ = app.run_on_main_thread(move || set_window_alpha(&alpha_hud, 1.0));
@@ -2253,6 +3375,7 @@ pub fn dictation_hud_exit(app: AppHandle) {
     let Some(hud) = app.get_webview_window("hud") else {
         return;
     };
+    cancel_hud_drag(&hud);
     if !hud.is_visible().unwrap_or(false) {
         return;
     }
@@ -2300,6 +3423,7 @@ pub fn dictation_hud_shake(app: AppHandle) {
         // mid-wobble position as its anchor (and vice versa).
         let lock = app.try_state::<HudFrameLock>();
         let _guard = lock.as_ref().and_then(|lock| lock.0.lock().ok());
+        cancel_hud_drag(&hud);
         const DURATION_MS: f64 = 380.0;
         const FRAME_MS: u64 = 16;
         // (progress, logical x offset) — the old CSS keyframes.
@@ -2417,6 +3541,7 @@ fn spawn_hud_hover_thread(app: AppHandle) {
             let Some(hud) = app.get_webview_window("hud") else {
                 continue;
             };
+            poll_hud_drag(&app, &hud);
             let visible = hud.is_visible().unwrap_or(false);
 
             let stop_rect = hover_state.stop_bounds.lock().ok().and_then(|g| g.clone());
@@ -2661,7 +3786,33 @@ pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
     })
 }
 
+pub(crate) fn write_helper_command(
+    writer: &mut impl Write,
+    command: &serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
+    let mut line = serde_json::to_string(command)
+        .map_err(|error| AppError::new("dictation_helper_command_invalid", error.to_string()))?;
+    line.push('\n');
+    if let Some(authority) = authority {
+        authority.check_live()?;
+    }
+    writer
+        .write_all(line.as_bytes())
+        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))?;
+    writer
+        .flush()
+        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))
+}
+
 fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Result<(), AppError> {
+    send_helper_command_checked(state, command, None)
+}
+fn send_helper_command_checked(
+    state: &HelperState,
+    command: serde_json::Value,
+    authority: Option<&crate::domain::turn_authority::TurnAuthority>,
+) -> Result<(), AppError> {
     let mut guard = state
         .process
         .lock()
@@ -2672,17 +3823,7 @@ fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Resul
             "Dictation helper process is not running.",
         )
     })?;
-    let mut line = serde_json::to_string(&command)
-        .map_err(|error| AppError::new("dictation_helper_command_invalid", error.to_string()))?;
-    line.push('\n');
-    process
-        .stdin
-        .write_all(line.as_bytes())
-        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))?;
-    process
-        .stdin
-        .flush()
-        .map_err(|error| AppError::new("dictation_helper_write_failed", error.to_string()))
+    write_helper_command(&mut process.stdin, &command, authority)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2817,11 +3958,14 @@ fn handle_shortcut_key_event(
         return;
     };
 
-    let edge = match event_type {
-        "fn_key_down" | "shortcut_key_down" => ShortcutKeyEdge::Down,
-        "fn_key_up" | "shortcut_key_up" => ShortcutKeyEdge::Up,
-        _ => return,
+    let Some(edge) = shortcut_key_edge(event_type) else {
+        return;
     };
+    if edge == ShortcutKeyEdge::Down {
+        // A pooled connection idle for over a minute is reopened while the
+        // user speaks, not after release.
+        crate::providers::transcription::warm_dictation_route_if_idle();
+    }
 
     let Some(kind) = shortcut_kind_from_event(event) else {
         reset_shortcut_activation(app);
@@ -2842,7 +3986,15 @@ fn handle_shortcut_key_event(
         app.try_state::<ShortcutActivationState>()
             .and_then(|state| {
                 state.controller.lock().ok().and_then(|mut state| {
-                    let command = state.handle_edge(edge, kind, Instant::now())?;
+                    let now = Instant::now();
+                    let held = state.push_started_at.map(|at| now.duration_since(at));
+                    let command = state.handle_edge(edge, kind, now);
+                    append_dictation_event_log(
+                        app,
+                        Some("shortcut_edge"),
+                        &shortcut_edge_log_event(kind, edge, command, held),
+                    );
+                    let command = command?;
                     let starts_recording = state.command_starts_recording(command);
                     let command_take_id = if starts_recording {
                         Some(uuid::Uuid::new_v4().to_string())
@@ -2861,7 +4013,7 @@ fn handle_shortcut_key_event(
     };
 
     if let Some(take_state) = app.try_state::<DictationTakeState>() {
-        take_state.run_new_helper_command_if(prepare_action, |start_attempt, action| {
+        take_state.run_new_helper_command_if(prepare_action, |_, action| {
             let (command, starts_recording, command_take_id) = action;
             let command_take_id = command_take_id.or_else(|| take_state.current_take_id());
             send_dictation_command(
@@ -2869,7 +4021,6 @@ fn handle_shortcut_key_event(
                 command,
                 &shortcut.label,
                 starts_recording,
-                Some(start_attempt),
                 command_take_id,
             );
         });
@@ -2882,7 +4033,6 @@ fn handle_shortcut_key_event(
             command,
             &shortcut.label,
             starts_recording,
-            None,
             command_take_id,
         );
     }
@@ -2911,17 +4061,6 @@ fn reset_shortcut_activation(app: &AppHandle) {
             controller.reset();
         }
     }
-}
-
-fn finish_shortcut_start_for_auth_failure(app: &AppHandle, take_id: &str) -> Option<bool> {
-    app.try_state::<ShortcutActivationState>()
-        .and_then(|state| {
-            state
-                .controller
-                .lock()
-                .ok()
-                .and_then(|mut controller| controller.finish_start_for_auth_failure(take_id))
-        })
 }
 
 fn dictation_take_id_from_event(event: &serde_json::Value) -> Option<&str> {
@@ -3156,6 +4295,7 @@ fn helper_event_serializes_with_commands(event_type: Option<&str>) -> bool {
         event_type,
         Some(
             "listening_started"
+                | "focus_target"
                 | "audio_level"
                 | "recording_ready"
                 | "recording_discarded"
@@ -3192,6 +4332,7 @@ fn untagged_take_event_disposition(
             event_type,
             Some(
                 "audio_level"
+                    | "focus_target"
                     | "finalizing_transcript"
                     | "final_transcript"
                     | "paste_target"
@@ -3214,6 +4355,7 @@ fn untagged_take_event_disposition(
 }
 
 fn emit_helper_event_without_lifecycle(app: &AppHandle, mut event: serde_json::Value) {
+    sync_update_gate_take(app, &event);
     if let Some(payload) = event
         .get_mut("payload")
         .and_then(serde_json::Value::as_object_mut)
@@ -3234,21 +4376,8 @@ fn send_dictation_command(
     command: DictationCommand,
     shortcut_label: &str,
     starts_recording: bool,
-    start_attempt: Option<u64>,
     command_take_id: Option<String>,
 ) {
-    // The start path needs a signed-in OS Accounts session for the
-    // transcription that follows, but the token check must not sit between
-    // the key press and the microphone: capture is local and the token is
-    // only consumed once the recording ends. Awaiting it here delayed every
-    // start by an executor hop, blocked on a network refresh whenever the
-    // cached token was stale, and could reorder a fast press-release so
-    // stop_and_paste reached the helper before start_listening. Start
-    // immediately and check in parallel; a signed-out session discards the
-    // moments-old local recording and lands on the same sign-in surface as
-    // before. ToggleListening can also start, but we can't tell
-    // start-from-stop without extra state; transcribe_recording_ready acts
-    // as the backstop there.
     let forwarded = forward_dictation_command(
         app,
         command,
@@ -3258,60 +4387,6 @@ fn send_dictation_command(
     );
     if !forwarded && matches!(command, DictationCommand::ToggleListening) {
         reset_shortcut_activation(app);
-    }
-    if forwarded && matches!(command, DictationCommand::StartListening) {
-        let Some(start_attempt) = start_attempt else {
-            return;
-        };
-        let app = app.clone();
-        let label = shortcut_label.to_string();
-        tauri::async_runtime::spawn(async move {
-            match classify_dictation_auth(&crate::os_accounts::access_token().await) {
-                DictationAuthGate::Proceed => {}
-                // A transient outage at the key press must not kill a live
-                // dictation: let it record. The recording_ready backstop
-                // re-checks at the end and, if still unavailable, cleans up
-                // the finalized audio and shows a retriable error.
-                DictationAuthGate::Unavailable(_) => {}
-                DictationAuthGate::SignedOut => {
-                    let Some(take_state) = app.try_state::<DictationTakeState>() else {
-                        return;
-                    };
-                    let Some(take_id) = command_take_id.as_deref() else {
-                        return;
-                    };
-                    let should_focus = take_state
-                        .run_if_current_helper_command(start_attempt, || {
-                            // A helper may reject this attempted start while a
-                            // previously confirmed take keeps recording. Retire
-                            // only the start this auth result belongs to; if that
-                            // take was already rejected, the result is stale even
-                            // though no newer command advanced the generation.
-                            let preserved_confirmed_take =
-                                finish_shortcut_start_for_auth_failure(&app, take_id)?;
-                            let _ = forward_dictation_command(
-                                &app,
-                                DictationCommand::DiscardListening,
-                                &label,
-                                false,
-                                Some(take_id),
-                            );
-                            Some(emit_start_auth_not_signed_in(
-                                &app,
-                                take_id,
-                                preserved_confirmed_take,
-                            ))
-                        })
-                        .flatten();
-                    // Focusing does not change helper or HUD lifecycle state,
-                    // so keep the serialized section above limited to the
-                    // ownership-sensitive discard and error emission.
-                    if should_focus == Some(true) {
-                        focus_main_window(&app);
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -3325,7 +4400,16 @@ fn forward_dictation_command(
     if matches!(command, DictationCommand::DiscardListening) {
         cancel_dictation_take(app, command_take_id);
     }
+    if starts_recording {
+        if let Err(error) = admit_dictation_start(app, command_take_id) {
+            emit_dictation_event_value(app, app_error_event(error));
+            return false;
+        }
+    }
     let Some(state) = app.try_state::<HelperState>() else {
+        if starts_recording {
+            release_unsent_dictation_take(app, command_take_id);
+        }
         emit_dictation_event_value(
             app,
             app_error_event(AppError::new(
@@ -3384,6 +4468,9 @@ fn forward_dictation_command(
         }
     }
     if let Err(error) = send_helper_command(&state, helper_command) {
+        if starts_recording {
+            release_unsent_dictation_take(app, command_take_id);
+        }
         if let Some(request_id) = composer_request_id.as_deref() {
             clear_shortcut_composer_request(app, request_id);
         }
@@ -3393,147 +4480,27 @@ fn forward_dictation_command(
     true
 }
 
-/// Instant (millis since the Unix epoch) of the last signed-out prompt.
-/// One press-release can hit two signed-out checks — the parallel
-/// fast-discard task on the down edge and the transcribe_recording_ready
-/// backstop on the up edge — and which of them fires (or both) depends on
-/// how far the recording got before the discard landed. Deduping here, at
-/// the notifier, collapses every ordering to a single prompt + focus pull
-/// without losing the prompt in the paths where only one check runs.
-static LAST_NOT_SIGNED_IN_AT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-const NOT_SIGNED_IN_DEDUPE_MS: u64 = 2_000;
-
-fn claim_not_signed_in_prompt() -> bool {
-    use std::sync::atomic::Ordering;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    let last = LAST_NOT_SIGNED_IN_AT_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < NOT_SIGNED_IN_DEDUPE_MS {
-        return false;
-    }
-    LAST_NOT_SIGNED_IN_AT_MS
-        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-}
-
-/// Emits a start-time auth failure while the caller holds the helper-command
-/// generation lock. This avoids recursively acquiring that lock through the
-/// general correlated emitter.
-fn emit_start_auth_not_signed_in(
-    app: &AppHandle,
-    take_id: &str,
-    preserved_confirmed_take: bool,
-) -> bool {
-    let mut event = dictation_not_signed_in_event();
-    add_dictation_take_id_to_event(&mut event, take_id);
-    if preserved_confirmed_take {
-        // The rejected start never owned the active recording. Keep the
-        // diagnostic event, but do not mutate that recording's lifecycle or
-        // consume the dedupe slot its own auth backstop may need.
-        emit_helper_event_without_lifecycle(app, event);
-        return false;
-    }
-    if !claim_not_signed_in_prompt() {
-        return false;
-    }
-    emit_dictation_event_value(app, event);
-    true
-}
-
-/// Emits the signed-out prompt and pulls the app forward, unless the same
-/// visible prompt fired within the dedupe window.
-fn notify_dictation_not_signed_in(app: &AppHandle, take_id: Option<&str>) {
-    let emitted_visible_prompt = if let Some(take_id) = take_id {
-        emit_correlated_not_signed_in(app, take_id)
-    } else if claim_not_signed_in_prompt() {
-        emit_dictation_event_value(app, dictation_not_signed_in_event());
-        true
-    } else {
-        false
-    };
-    if emitted_visible_prompt {
-        focus_main_window(app);
-    }
-}
-
-fn emit_correlated_not_signed_in(app: &AppHandle, take_id: &str) -> bool {
-    let mut event = dictation_not_signed_in_event();
-    add_dictation_take_id_to_event(&mut event, take_id);
-    let take_state = app.try_state::<DictationTakeState>();
-    let _helper_command_guard = take_state
-        .as_ref()
-        .map(|state| state.lock_helper_commands());
-    if !dictation_delivery_matches_active_take(app, take_id) {
-        // A late auth backstop is still useful in the event log, but it must
-        // neither mutate a replacement nor suppress that take's own prompt.
-        emit_helper_event_without_lifecycle(app, event);
-        return false;
-    }
-    if !claim_not_signed_in_prompt() {
-        return false;
-    }
-    emit_dictation_event_value(app, event);
-    true
-}
-
-fn dictation_not_signed_in_event() -> serde_json::Value {
-    serde_json::json!({
-        "type": "error",
-        "payload": {
-            "code": "not_signed_in",
-            "message": "Sign in to use dictation.",
-        },
-    })
-}
-
-/// How a dictation auth check should be handled. A transient OS Accounts
-/// failure is distinct from a genuine sign-out: the recording must be kept and
-/// a retriable error shown, never discarded behind a sign-in prompt.
-enum DictationAuthGate {
-    /// The token is usable; continue with transcription.
-    Proceed,
-    /// OS Accounts was momentarily unreachable. Keep the recording; show a
-    /// retriable error carrying the upstream message.
-    Unavailable(AppError),
-    /// The user is genuinely signed out. Discard and prompt to sign in.
-    SignedOut,
-}
-
-fn classify_dictation_auth(result: &Result<String, AppError>) -> DictationAuthGate {
-    match result {
-        Ok(_) => DictationAuthGate::Proceed,
-        Err(error) if crate::os_accounts::is_transient_auth_error(error) => {
-            DictationAuthGate::Unavailable(error.clone())
-        }
-        Err(_) => DictationAuthGate::SignedOut,
-    }
-}
-
-fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
+    crate::app_paths::app_config_dir(app)
         .ok()
         .map(|directory| directory.join("dictation-settings.json"))
 }
 
 fn manage_settings(app: &AppHandle) {
     let path = settings_path(app).unwrap_or_else(|| PathBuf::from("dictation-settings.json"));
-    let settings = load_settings(app);
+    let mut settings = load_settings(app);
+    let migrated = migrate_dictation_cleanup(&mut settings);
     replace_current_settings(settings.clone());
-    app.manage(DictationSettingsState {
+    let state = DictationSettingsState {
         path,
-        settings: Mutex::new(settings),
-    });
+        settings: Mutex::new(settings.clone()),
+    };
+    if migrated {
+        if let Err(error) = save_settings(&state, &settings) {
+            tracing::warn!(code = %error.code, "dictation cleanup migration not saved; retries next launch");
+        }
+    }
+    app.manage(state);
 }
 
 fn load_settings(app: &AppHandle) -> DictationSettings {
@@ -3600,17 +4567,27 @@ fn save_settings(
 fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let manifest_dir = PathBuf::from(manifest_dir);
+    // Debug builds use the helper build.rs prepares and signs in this checkout,
+    // resolved at compile time like the Computer use and system audio helpers:
+    // `pnpm tauri:dev` runs the signed dev bundle without Cargo's runtime
+    // environment. Release builds keep the runtime `CARGO_MANIFEST_DIR`
+    // fallback ahead of their bundled copies.
+    #[cfg(debug_assertions)]
+    let manifest_dir = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    #[cfg(not(debug_assertions))]
+    let runtime_manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok().map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let manifest_dir = runtime_manifest_dir.as_deref();
+    if let Some(manifest_dir) = manifest_dir {
         #[cfg(target_os = "macos")]
         if let Some(repo_dir) = manifest_dir.parent() {
             paths.push(
                 repo_dir
                     .join(".tauri-helper")
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
         }
         #[cfg(target_os = "windows")]
@@ -3618,7 +4595,7 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
             manifest_dir
                 .join("native")
                 .join("bin")
-                .join("june-dictation-helper.exe"),
+                .join("clovy-dictation-helper.exe"),
         );
     }
 
@@ -3626,25 +4603,25 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
         if let Some(exe_dir) = exe_path.parent() {
             #[cfg(target_os = "windows")]
             {
-                paths.push(exe_dir.join("june-dictation-helper.exe"));
+                paths.push(exe_dir.join("clovy-dictation-helper.exe"));
                 paths.push(
                     exe_dir
                         .join("native")
                         .join("bin")
-                        .join("june-dictation-helper.exe"),
+                        .join("clovy-dictation-helper.exe"),
                 );
                 paths.push(
                     exe_dir
                         .join("resources")
                         .join("native")
                         .join("bin")
-                        .join("june-dictation-helper.exe"),
+                        .join("clovy-dictation-helper.exe"),
                 );
             }
             #[cfg(target_os = "macos")]
             {
-                paths.push(exe_dir.join("june-dictation-helper"));
-                paths.push(exe_dir.join("../Resources/june-dictation-helper"));
+                paths.push(exe_dir.join("clovy-dictation-helper"));
+                paths.push(exe_dir.join("../Resources/clovy-dictation-helper"));
             }
         }
     }
@@ -3652,32 +4629,32 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
     if let Ok(resource_dir) = app.path().resource_dir() {
         #[cfg(target_os = "windows")]
         {
-            paths.push(resource_dir.join("june-dictation-helper.exe"));
+            paths.push(resource_dir.join("clovy-dictation-helper.exe"));
             paths.push(
                 resource_dir
                     .join("native")
                     .join("bin")
-                    .join("june-dictation-helper.exe"),
+                    .join("clovy-dictation-helper.exe"),
             );
         }
         #[cfg(target_os = "macos")]
         {
-            paths.push(resource_dir.join("june-dictation-helper"));
+            paths.push(resource_dir.join("clovy-dictation-helper"));
             paths.push(
                 resource_dir
                     .join("native")
                     .join("bin")
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
             paths.push(
                 resource_dir
-                    .join("June Dictation Helper.app")
+                    .join("Clovy Dictation Helper.app")
                     .join("Contents")
                     .join("MacOS")
-                    .join("june-dictation-helper"),
+                    .join("clovy-dictation-helper"),
             );
         }
     }
@@ -3688,7 +4665,7 @@ fn helper_candidates(app: &AppHandle) -> Vec<PathBuf> {
 /// The dictation helper binary's basename, used by the ownership-aware orphan
 /// reap below to confirm a recorded pid is still a dictation helper.
 #[cfg(target_os = "macos")]
-const DICTATION_HELPER_NAME: &str = "june-dictation-helper";
+const DICTATION_HELPER_NAME: &str = "clovy-dictation-helper";
 
 /// Filename prefix for the per-instance ownership records. One record per owning
 /// app pid (never a single shared file), so concurrent instances — allowed in
@@ -3785,7 +4762,7 @@ enum RecordAction {
 
 #[cfg(target_os = "macos")]
 fn helper_ownership_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    crate::app_paths::app_config_dir(app).ok()
 }
 
 /// This instance's own record path, keyed by our app pid so we never overwrite
@@ -3804,7 +4781,7 @@ fn helper_ownership_path(app: &AppHandle) -> Option<PathBuf> {
 /// pid (definitive `Gone`); a failure to run `ps` at all is `Unknown`.
 #[cfg(target_os = "macos")]
 fn probe_start_time(pid: u32) -> StartTimeProbe {
-    let output = Command::new("/bin/ps")
+    let output = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .arg("-o")
@@ -3830,7 +4807,7 @@ fn probe_start_time(pid: u32) -> StartTimeProbe {
 /// printable chars (`june-dictation-`) instead of the full 21-char name, so a
 /// basename that is a non-empty prefix of length ≥ 15 (the truncation length)
 /// counts as a match. No other expected process shares a 15-char prefix of
-/// `june-dictation-helper`, so this cannot false-positive. Handles both a bare
+/// `clovy-dictation-helper`, so this cannot false-positive. Handles both a bare
 /// `comm` and a full path (`rsplit('/')`).
 #[cfg(target_os = "macos")]
 fn comm_line_is_dictation_helper(comm_line: &str) -> bool {
@@ -3850,7 +4827,7 @@ fn comm_line_is_dictation_helper(comm_line: &str) -> bool {
 /// could not run; `NotHelper` when the pid is gone or is a different program.
 #[cfg(target_os = "macos")]
 fn inspect_helper_identity(pid: u32) -> HelperIdentity {
-    let output = Command::new("/bin/ps")
+    let output = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .arg("-o")
@@ -4225,7 +5202,7 @@ fn live_owner_claimed_helper_pids(app: &AppHandle) -> Result<Vec<u32>, AppError>
 /// exits non-zero with no matches, and any failure yields an empty list.
 #[cfg(target_os = "macos")]
 fn enumerate_running_helper_pids() -> Vec<u32> {
-    let output = Command::new("/usr/bin/pgrep")
+    let output = crate::hide_console::command("/usr/bin/pgrep")
         .arg("-f")
         .arg(DICTATION_HELPER_NAME)
         .stdin(Stdio::null())
@@ -4305,7 +5282,7 @@ fn reap_unrecorded_helpers(_app: &AppHandle) -> Result<(), AppError> {
 /// Submits SIGKILL to a single pid (best-effort; the caller confirms exit).
 #[cfg(target_os = "macos")]
 fn kill_pid(pid: u32) {
-    let _ = Command::new("/bin/kill")
+    let _ = crate::hide_console::command("/bin/kill")
         .arg("-KILL")
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -4344,7 +5321,7 @@ fn process_state_is_terminal(state: &str) -> bool {
 /// signalable indefinitely even though it is inert.
 #[cfg(target_os = "macos")]
 fn process_alive(pid: u32) -> bool {
-    if let Ok(output) = Command::new("/bin/ps")
+    if let Ok(output) = crate::hide_console::command("/bin/ps")
         .arg("-p")
         .arg(pid.to_string())
         .args(["-o", "state="])
@@ -4363,7 +5340,7 @@ fn process_alive(pid: u32) -> bool {
         }
     }
 
-    Command::new("/bin/kill")
+    crate::hide_console::command("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
         .stdin(Stdio::null())
@@ -4392,11 +5369,9 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
             )
         })?;
 
-    let mut command = Command::new(&helper_path);
+    let mut command = crate::hide_console::command(&helper_path);
     #[cfg(target_os = "macos")]
-    command
-        .env("CLOVY_OWNER_PID", std::process::id().to_string())
-        .env("JUNE_OWNER_PID", std::process::id().to_string());
+    command.env("CLOVY_OWNER_PID", std::process::id().to_string());
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4838,6 +5813,33 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let event_type = event_type.as_deref();
+    #[cfg(target_os = "macos")]
+    if event_type == Some("repeat_last_dictation_requested") {
+        if let Some(request) = event.as_ref() {
+            let state = app.state::<DictationTakeState>();
+            let _guard = state.lock_helper_commands();
+            let profile = crate::commands::active_profile(app);
+            if let Some(response) = state.last_dictation_response(&profile, request) {
+                if let Err(error) = send_helper_command(&app.state::<HelperState>(), response) {
+                    tracing::warn!(code = %error.code, "dictation repeat response could not be sent");
+                }
+            }
+        }
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(event) = event.as_mut() {
+        complete_windows_target(event, |hwnd, pid| {
+            crate::activity::windows::window::app_of_window(hwnd as isize, pid)
+        });
+    }
+    if event_type == Some("shortcut_trigger_diagnostic") {
+        // What the Windows hook saw: the event log only, never the HUD.
+        if let Some(event) = event.as_ref() {
+            append_dictation_event_log(app, event_type, event);
+        }
+        return;
+    }
     let take_state = app.try_state::<DictationTakeState>();
     // A helper outcome and a replacement command must have one total order.
     // If the outcome wins, its whole lifecycle transition and frontend emit
@@ -4850,9 +5852,15 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
                 .map(|state| state.lock_helper_commands())
         })
         .flatten();
+    // The filters below may drop this event for the HUD and the take
+    // lifecycle; the update gate still has to see a take end.
+    if let Some(event) = event.as_ref() {
+        end_gate_take_for_helper_event(&crate::update_gate::UPDATE_GATE, event);
+        forget_admission_for_terminal_event(app, event);
+    }
     note_helper_take_protocol(app, event.as_ref());
 
-    if event_type == Some("audio_level")
+    if matches!(event_type, Some("audio_level" | "focus_target"))
         && event
             .as_ref()
             .is_some_and(|event| !helper_audio_level_matches_active_take(app, event))
@@ -5210,6 +6218,14 @@ fn remove_cancelled_dictation_audio(
     let _ = fs::remove_file(recording_path);
 }
 
+/// Preserve the target captured by the helper before asynchronous transcription.
+fn history_target(recording: &RecordingReadyInfo) -> Option<String> {
+    recording
+        .target_bundle_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+}
+
 async fn transcribe_recording_ready_inner(
     app: &AppHandle,
     recording: RecordingReadyInfo,
@@ -5230,7 +6246,19 @@ async fn transcribe_recording_ready_inner(
     // Pin the owning profile now, like the paste target above: dictation
     // processing can take seconds, and a profile switch mid-flight must not
     // relabel this dictation's history row to the new profile.
-    let history_profile = crate::commands::active_profile(app);
+    let history_profile = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .filter(|target| target.take_id == take.id())
+                .map(|target| target.profile.clone())
+        })
+        .unwrap_or_else(|| crate::commands::active_profile(app));
+    let history_app = history_target(&recording);
     let low_speech_evidence = recording_has_low_speech_evidence(&recording);
     if low_speech_evidence {
         tracing::info!(
@@ -5240,53 +6268,20 @@ async fn transcribe_recording_ready_inner(
             "dictation capture had low speech evidence; automatic paste will be suppressed"
         );
     }
-    // Backstop for the toggle-start path (where the start-time gate in
-    // send_dictation_command can't tell start from stop) and for tokens that
-    // expired between start and finish.
-    let Some(access_token) =
-        run_dictation_take_step(take, crate::os_accounts::access_token()).await
-    else {
-        remove_cancelled_dictation_audio(&audio_path, None);
-        return;
-    };
-    match classify_dictation_auth(&access_token) {
-        DictationAuthGate::Proceed => {}
-        DictationAuthGate::Unavailable(error) => {
-            // OS Accounts is temporarily unreachable. The helper has already
-            // finalized this capture to a temp WAV, and there is no retained
-            // retry handle after recording_ready, so remove it before
-            // surfacing the retriable auth error.
-            remove_windows_dictation_audio(&recording.audio_path);
-            if send_dictation_take_command(
-                app,
-                take,
-                serde_json::json!({ "type": "discard_recording" }),
-            )
-            .is_some()
-            {
-                update_shortcut_helper_finalizing(app, false);
-                emit_dictation_take_event(app, take, app_error_event(error));
-            }
-            return;
-        }
-        DictationAuthGate::SignedOut => {
-            remove_windows_dictation_audio(&recording.audio_path);
-            if send_dictation_take_command(
-                app,
-                take,
-                serde_json::json!({ "type": "discard_recording" }),
-            )
-            .is_some()
-            {
-                update_shortcut_helper_finalizing(app, false);
-                notify_dictation_not_signed_in(app, Some(take.id()));
-            }
-            let _ = std::fs::remove_file(&audio_path);
-            return;
-        }
-    }
-    let provider = match dictation_transcription_provider(configured_transcription_provider()) {
-        Ok(provider) => provider,
+    let selection = &take.inner.transcription_settings;
+    let (provider, transcriber) = match dictation_transcription_provider(
+        selection.transcription_provider.clone(),
+    )
+    .and_then(|provider| {
+        crate::providers::transcription::effective_transcription_backend(
+            selection,
+            crate::providers::transcription::ready_directory(),
+            crate::providers::local_transcription_supported(),
+            || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+        )
+        .map(|backend| (provider, ServiceDictationTranscriber { backend }))
+    }) {
+        Ok(selected) => selected,
         Err(error) => {
             remove_windows_dictation_audio(&recording.audio_path);
             if send_dictation_take_command(
@@ -5304,20 +6299,16 @@ async fn transcribe_recording_ready_inner(
         }
     };
     let current_settings = current_dictation_settings(app).unwrap_or_default();
-    let style = current_settings.style;
+    let cleanup = DictationCleanupConfig::from_settings(&current_settings);
     let language = current_settings.language;
-    let Some(dictionary_context) =
-        run_dictation_take_step(take, dictionary_context_for_app(app)).await
+    let Some(dictionary) =
+        run_dictation_take_step(take, transcription_dictionary_for_app(app)).await
     else {
         remove_cancelled_dictation_audio(&audio_path, None);
         return;
     };
     let session_id = dictation_session_id();
     let utterance_id = uuid::Uuid::new_v4().to_string();
-    let transcription_context = merge_transcription_context(
-        dictionary_context.as_deref(),
-        Some(dictation_transcription_context(style).as_str()),
-    );
     let transcription_audio = match prepare_dictation_audio(&recording.audio_path, &utterance_id) {
         Ok(path) => path,
         Err(error) => {
@@ -5335,18 +6326,33 @@ async fn transcribe_recording_ready_inner(
             return;
         }
     };
-    let result = run_dictation_take_step(
+    let pipeline = run_dictation_take_step(
         take,
-        dictate_transcribe(DictateTranscribeRequest {
-            audio_path: transcription_audio.clone(),
-            context: transcription_context,
-            language,
-            session_id: session_id.clone(),
-            utterance_id: utterance_id.clone(),
-        }),
+        run_dictation_pipeline(
+            &transcriber,
+            &ServiceDictationCleaner,
+            DictateTranscribeRequest {
+                audio_path: transcription_audio.clone(),
+                // Whisper's prompt only steers spelling: it gets the short
+                // dictionary hint, and cleanup gets the full dictionary.
+                context: dictionary
+                    .as_ref()
+                    .and_then(|dictionary| dictionary.asr_hint.clone()),
+                language,
+                session_id,
+                utterance_id: utterance_id.clone(),
+            },
+            &cleanup,
+            DictationCleanupContext {
+                dictionary_context: dictionary.map(|dictionary| dictionary.context),
+                app_context,
+            },
+            recording.observed_audio_level,
+            recording.audio_seconds,
+        ),
     )
     .await;
-    let Some(result) = result else {
+    let Some(pipeline) = pipeline else {
         tracing::info!(
             take_id = take.id(),
             utterance_id,
@@ -5359,27 +6365,22 @@ async fn transcribe_recording_ready_inner(
         let _ = fs::remove_file(&transcription_audio);
     }
     remove_windows_dictation_audio(&recording.audio_path);
-    let result = run_dictation_take_step(
-        take,
-        maybe_cleanup_dictation_result(
-            app,
-            &provider,
-            result,
-            dictionary_context,
-            app_context,
-            style,
-            session_id,
-            utterance_id,
-        ),
-    )
-    .await;
-    let Some(result) = result else {
-        remove_cancelled_dictation_audio(&audio_path, None);
-        return;
-    };
-    let outcome = outcome_from_transcription_result(result, recording.observed_audio_level, style);
+    if let Some(error) = pipeline.cleanup_skipped.as_ref() {
+        emit_dictation_cleanup_skipped(app, &provider, error);
+    }
+    let outcome = pipeline.outcome;
     let mut delivery_claim = None;
-    let history_already_persisted = if low_speech_evidence {
+    let agent_owned = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .is_some_and(|active| {
+            active
+                .as_ref()
+                .is_some_and(|target| target.take_id == take.id())
+        });
+    let history_already_persisted = if low_speech_evidence || agent_owned {
         let recovery_transcript = outcome
             .transcript
             .as_ref()
@@ -5387,7 +6388,12 @@ async fn transcribe_recording_ready_inner(
         if let Some(transcript) = recovery_transcript {
             let staged = run_dictation_take_step(
                 take,
-                stage_dictation_history_item(app, transcript, &history_profile),
+                stage_dictation_history_item(
+                    app,
+                    transcript,
+                    &history_profile,
+                    history_app.as_deref(),
+                ),
             )
             .await;
             let Some(staged) = staged else {
@@ -5408,19 +6414,24 @@ async fn transcribe_recording_ready_inner(
                         return;
                     };
                     match pending.commit().await {
-                        Ok(_) => {
+                        Ok(item) => {
+                            let _=app.emit("clovy-data-changed",serde_json::json!({"profile":history_profile,"kind":"dictations","id":item.id}));
                             delivery_claim = Some(claim);
                             true
                         }
                         Err(error) => {
                             let error = dictation_history_save_error(error);
-                            retain_low_speech_evidence_recording(
-                                app,
-                                &claim,
-                                &audio_path,
-                                transcript,
-                                &error,
-                            );
+                            if agent_owned {
+                                retain_agent_history_failure(app, &claim, &error);
+                            } else {
+                                retain_low_speech_evidence_recording(
+                                    app,
+                                    &claim,
+                                    &audio_path,
+                                    transcript,
+                                    &error,
+                                );
+                            }
                             return;
                         }
                     }
@@ -5431,13 +6442,17 @@ async fn transcribe_recording_ready_inner(
                         remove_cancelled_dictation_audio(&audio_path, None);
                         return;
                     };
-                    retain_low_speech_evidence_recording(
-                        app,
-                        &claim,
-                        &audio_path,
-                        transcript,
-                        &error,
-                    );
+                    if agent_owned {
+                        retain_agent_history_failure(app, &claim, &error);
+                    } else {
+                        retain_low_speech_evidence_recording(
+                            app,
+                            &claim,
+                            &audio_path,
+                            transcript,
+                            &error,
+                        );
+                    }
                     return;
                 }
             }
@@ -5455,9 +6470,49 @@ async fn transcribe_recording_ready_inner(
         &audio_path,
         outcome,
         history_already_persisted,
-        &history_profile,
+        (&history_profile, history_app.as_deref()),
         recording.composer_request_id.as_deref(),
     );
+}
+
+fn retain_agent_history_failure(app: &AppHandle, claim: &DictationDeliveryClaim, error: &AppError) {
+    // Keep the stopped take's audio for recovery; do not send clipboard or app
+    // insertion commands when an agent's durable history write failed.
+    set_agent_dictation_phase(
+        &app.state::<HelperState>(),
+        claim.take.id(),
+        "failed",
+        Some(error.message.clone()),
+    );
+    update_shortcut_helper_finalizing(app, false);
+    emit_dictation_take_event(app, &claim.take, app_error_event(error.clone()));
+}
+fn agent_composer_text(outcome: &DictationTranscriptionOutcome) -> Option<&str> {
+    if outcome
+        .helper_command
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        == Some("paste_text")
+    {
+        return outcome
+            .helper_command
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty());
+    }
+    if outcome
+        .event
+        .as_ref()
+        .and_then(|event| event.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("agent_session_prompt")
+    {
+        return outcome
+            .transcript
+            .as_ref()
+            .map(|transcript| transcript.text.as_str());
+    }
+    None
 }
 
 fn deliver_dictation_outcome(
@@ -5467,10 +6522,10 @@ fn deliver_dictation_outcome(
     audio_path: &std::path::Path,
     outcome: DictationTranscriptionOutcome,
     history_already_persisted: bool,
-    history_profile: &str,
+    history: (&str, Option<&str>),
     composer_request_id: Option<&str>,
 ) {
-    let mut helper_command = outcome.helper_command;
+    let mut helper_command = outcome.helper_command.clone();
     let claim = delivery_claim.or_else(|| take.try_begin_delivery());
     let Some(claim) = claim else {
         let _ = std::fs::remove_file(audio_path);
@@ -5480,17 +6535,75 @@ fn deliver_dictation_outcome(
     // awaited history write. Normal transcripts keep the existing best-effort
     // background write so their paste path does not gain database latency.
     if let Some(transcript) = outcome.transcript.as_ref() {
-        crate::p3a::record_question_best_effort(
-            app.clone(),
-            crate::p3a::questions::Question::DictationSessions,
-        );
         if !history_already_persisted {
             spawn_dictation_history_write(
                 app.clone(),
                 transcript.clone(),
-                history_profile.to_string(),
+                history.0.to_string(),
+                history.1.map(str::to_owned),
             );
         }
+    }
+    let agent_target = app
+        .state::<HelperState>()
+        .agent_take
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .filter(|target| target.take_id == take.id())
+                .cloned()
+        });
+    if let Some(target) = agent_target {
+        if matches!(target.phase.as_str(), "cancelling" | "cancelled" | "failed") {
+            let _ = std::fs::remove_file(audio_path);
+            return;
+        }
+        // Never paste an agent-owned take to the foreground app. Native cleanup
+        // and composer delivery are separate, correlated operations.
+        let Some(text) = agent_composer_text(&outcome) else {
+            set_agent_dictation_phase(
+                &app.state::<HelperState>(),
+                &target.take_id,
+                "failed",
+                Some("No deliverable dictation text was produced.".into()),
+            );
+            let _ = send_claimed_dictation_take_command(
+                app,
+                &claim,
+                serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+            );
+            let _ = std::fs::remove_file(audio_path);
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        app.state::<DictationTakeState>()
+            .remember_last_dictation(&claim, history.0, &outcome);
+        set_agent_dictation_phase(
+            &app.state::<HelperState>(),
+            &target.take_id,
+            "delivering",
+            None,
+        );
+        let _ = send_claimed_dictation_take_command(
+            app,
+            &claim,
+            serde_json::json!({"type":"discard_recording","takeId":target.take_id}),
+        );
+
+        let result = app.get_webview_window(&target.window).ok_or_else(|| AppError::new("dictation_window_unavailable", "The destination window is unavailable.")).and_then(|window| window.emit("clovy://agent-dictation-delivery", serde_json::json!({"takeId":target.take_id,"composerRequestId":target.composer_request_id,"conversationId":target.conversation_id,"profile":target.profile,"text":text})).map_err(|error| AppError::new("dictation_delivery_failed",error.to_string())));
+        if let Err(error) = result {
+            set_agent_dictation_phase(
+                &app.state::<HelperState>(),
+                &target.take_id,
+                "failed",
+                Some(error.message),
+            );
+        }
+        update_shortcut_helper_finalizing(app, false);
+        let _ = std::fs::remove_file(audio_path);
+        return;
     }
     if helper_command
         .get("type")
@@ -5503,6 +6616,9 @@ fn deliver_dictation_outcome(
             object.insert("composerRequestId".into(), serde_json::json!(request_id));
         }
     }
+    #[cfg(target_os = "macos")]
+    app.state::<DictationTakeState>()
+        .remember_last_dictation(&claim, history.0, &outcome);
     if let Err(error) = send_claimed_dictation_take_command(app, &claim, helper_command) {
         update_shortcut_helper_finalizing(app, false);
         emit_dictation_take_event(app, &claim.take, app_error_event(error));
@@ -5595,20 +6711,17 @@ fn dictation_session_id() -> String {
 }
 
 fn dictation_transcription_provider(provider: String) -> Result<String, AppError> {
-    if provider != OPENAI_PROVIDER && provider != VENICE_PROVIDER {
+    if provider == crate::providers::PROVIDER_LOCAL {
+        crate::providers::transcription::require_local_ready()?;
+        return Ok(provider);
+    }
+    if provider != PROVIDER_GROQ {
         return Err(AppError::new(
             "dictation_provider_not_configured",
-            "Dictation requires an OpenAI or Venice transcription model through Clovy's model service.",
+            "Dictation requires a Groq transcription model.",
         ));
     }
     Ok(provider)
-}
-
-fn dictation_transcription_context(style: DictationStyle) -> String {
-    format!(
-        "{DICTATION_TRANSCRIPTION_CONTEXT}\n\n{}",
-        style.instruction()
-    )
 }
 
 fn is_email_app_bundle(bundle_id: &str) -> bool {
@@ -5639,67 +6752,208 @@ fn frontmost_bundle_id() -> Option<String> {
     Some(bundle_id.to_string())
 }
 
-async fn dictionary_context_for_app(app: &AppHandle) -> Option<String> {
+async fn transcription_dictionary_for_app(app: &AppHandle) -> Option<TranscriptionDictionary> {
     let repos = crate::commands::repositories(app).await.ok()?;
     let entries = repos.list_dictionary_entries().await.ok()?;
-    build_dictionary_context(&entries)
+    build_transcription_dictionary(&entries)
 }
 
-async fn maybe_cleanup_dictation_result(
-    app: &AppHandle,
-    provider: &str,
-    result: Result<TranscriptionProviderResult, AppError>,
+/// The cleanup choice one take reads once (ditado-rapido D1, D7).
+#[derive(Clone, Debug)]
+struct DictationCleanupConfig {
+    enabled: bool,
+    /// OpenRouter model id for the cleanup chat completion.
+    model: String,
+    style: DictationStyle,
+    /// Budget for the whole cleanup of a transcript of this many bytes.
+    timeout: fn(usize) -> Duration,
+}
+
+impl DictationCleanupConfig {
+    fn from_settings(settings: &DictationSettings) -> Self {
+        Self {
+            enabled: settings.cleanup_enabled,
+            model: settings.cleanup_model.clone(),
+            style: settings.style,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+}
+
+/// What the cleanup model gets besides the transcript.
+#[derive(Clone, Debug, Default)]
+struct DictationCleanupContext {
+    dictionary_context: Option<String>,
+    app_context: Option<String>,
+}
+
+/// One cleanup chat completion for one chunk of a transcript.
+#[derive(Clone, Debug)]
+struct DictationCleanupCall {
+    text: String,
     dictionary_context: Option<String>,
     app_context: Option<String>,
     style: DictationStyle,
+    model: String,
     session_id: String,
     utterance_id: String,
-) -> Result<TranscriptionProviderResult, AppError> {
-    let mut transcript = match result {
-        Ok(transcript) => transcript,
-        Err(error) => return Err(error),
-    };
-    let transcript_bytes = transcript.text.trim().len();
-    tracing::info!(
-        provider,
-        style = ?style,
-        app_context = app_context.as_deref(),
-        transcript_bytes,
-        timeout_ms = dictation_cleanup_timeout(transcript_bytes).as_millis() as u64,
-        "dictation cleanup starting",
-    );
-    let started_at = Instant::now();
-    match cleanup_dictation_text(
-        &transcript.text,
-        dictionary_context.as_deref(),
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-    {
-        Ok(cleaned) => {
-            if !cleaned.trim().is_empty() {
-                transcript.text = cleaned;
-                tracing::info!(
-                    provider,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "dictation cleanup applied",
-                );
+}
+
+/// Turns one finished recording into text using the captured backend.
+trait DictationTranscriber {
+    fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> impl Future<Output = Result<TranscriptionProviderResult, AppError>> + Send;
+}
+
+/// Cleans one chunk of a transcript with a single chat completion.
+trait DictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send;
+}
+
+/// The production transcriber.
+struct ServiceDictationTranscriber {
+    backend: crate::providers::transcription::TranscriptionBackend,
+}
+
+impl DictationTranscriber for ServiceDictationTranscriber {
+    async fn transcribe(
+        &self,
+        request: DictateTranscribeRequest,
+    ) -> Result<TranscriptionProviderResult, AppError> {
+        match &self.backend {
+            crate::providers::transcription::TranscriptionBackend::Groq { key, model } => {
+                dictate_transcribe_with(Some(key), model.clone(), request).await
+            }
+            crate::providers::transcription::TranscriptionBackend::Local { model_dir } => {
+                // Deselecting Local may have stopped its helper (D4). Keep this
+                // take's backend and propagate that local error to the HUD;
+                // never resolve the new provider and upload the captured audio.
+                crate::providers::local_transcriber::transcribe(
+                    model_dir,
+                    &request.audio_path,
+                    request.language.as_deref(),
+                )
+                .await?
+                .plain()
             }
         }
-        Err(error) => {
-            emit_dictation_cleanup_skipped(
-                app,
-                provider,
-                &error,
-                transcript_bytes,
-                started_at.elapsed(),
-            );
-        }
     }
-    Ok(transcript)
+}
+
+/// The production cleaner calls the chosen OpenRouter model directly.
+struct ServiceDictationCleaner;
+
+impl DictationCleaner for ServiceDictationCleaner {
+    fn clean(
+        &self,
+        call: DictationCleanupCall,
+    ) -> impl Future<Output = Result<String, AppError>> + Send {
+        dictate_cleanup(
+            DictateCleanupRequestParams {
+                text: call.text,
+                dictionary_context: call.dictionary_context,
+                app_context: call.app_context,
+                style: call.style.instruction().to_string(),
+                session_id: call.session_id,
+                utterance_id: call.utterance_id,
+            },
+            call.model,
+        )
+    }
+}
+
+struct DictationPipelineResult {
+    outcome: DictationTranscriptionOutcome,
+    /// Why cleanup was skipped; the raw transcript was used instead.
+    cleanup_skipped: Option<AppError>,
+}
+
+/// Transcribe one take and, only when cleanup is on, clean the transcript.
+/// A failed or timed-out cleanup keeps the whole raw transcript.
+async fn run_dictation_pipeline<T, C>(
+    transcriber: &T,
+    cleaner: &C,
+    request: DictateTranscribeRequest,
+    cleanup: &DictationCleanupConfig,
+    context: DictationCleanupContext,
+    observed_audio_level: Option<f32>,
+    audio_seconds: Option<f32>,
+) -> DictationPipelineResult
+where
+    T: DictationTranscriber + Sync,
+    C: DictationCleaner + Sync,
+{
+    if audio_seconds.is_some_and(|seconds| seconds < DICTATION_MIN_UPLOAD_SECONDS) {
+        // Whisper invents text ("Thank you.") for near-empty audio; such a
+        // take is no speech without an upload (design D5, R7).
+        tracing::info!(audio_seconds, "dictation take too short to transcribe");
+        return DictationPipelineResult {
+            outcome: whisper_no_speech_outcome(observed_audio_level),
+            cleanup_skipped: None,
+        };
+    }
+    let session_id = request.session_id.clone();
+    let utterance_id = request.utterance_id.clone();
+    let mut cleanup_skipped = None;
+    let result = match transcriber.transcribe(request).await {
+        Ok(mut transcript) if cleanup.enabled && !is_blank_transcript(&transcript.text) => {
+            let transcript_bytes = transcript.text.trim().len();
+            tracing::info!(
+                model = %cleanup.model,
+                style = ?cleanup.style,
+                app_context = context.app_context.as_deref(),
+                transcript_bytes,
+                timeout_ms = (cleanup.timeout)(transcript_bytes).as_millis() as u64,
+                "dictation cleanup starting",
+            );
+            let started_at = Instant::now();
+            match clean_dictation_transcript(
+                cleaner,
+                &transcript.text,
+                cleanup,
+                &context,
+                &session_id,
+                &utterance_id,
+            )
+            .await
+            {
+                Ok(cleaned) => {
+                    if !cleaned.trim().is_empty() {
+                        transcript.text = cleaned;
+                    }
+                    tracing::info!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup applied",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        code = %error.code,
+                        message = %error.message,
+                        transcript_bytes,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "dictation cleanup skipped; pasting raw transcript",
+                    );
+                    cleanup_skipped = Some(error);
+                }
+            }
+            Ok(transcript)
+        }
+        other => other,
+    };
+    DictationPipelineResult {
+        outcome: if cleanup.enabled {
+            outcome_from_transcription_result(result, observed_audio_level, cleanup.style)
+        } else {
+            outcome_from_raw_transcription_result(result, observed_audio_level)
+        },
+        cleanup_skipped,
+    }
 }
 
 /// Budget for one cleanup round-trip, scaled to the transcript so long
@@ -5712,153 +6966,67 @@ fn dictation_cleanup_timeout(text_bytes: usize) -> Duration {
     Duration::from_millis(scaled.min(DICTATION_CLEANUP_MAX_TIMEOUT_MS))
 }
 
-async fn cleanup_dictation_text(
+/// Clean a transcript within its budget. Long transcripts are cleaned a
+/// word-boundary chunk at a time, up to [`DICTATION_CLEANUP_PARALLEL_CHUNKS`]
+/// at once, and rejoined in order: the cleanup model reliably punctuates
+/// short passages but degrades into an unpunctuated verbatim echo on long
+/// run-on speech (JUN-212). Each chunk gets its own utterance id suffix so
+/// metering treats it as its own unit of work. Any chunk that fails or runs
+/// out of the budget fails the whole cleanup, so the caller pastes the raw
+/// transcript rather than a mix (ditado-rapido D7).
+async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
+    cleaner: &C,
     text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
+    config: &DictationCleanupConfig,
+    context: &DictationCleanupContext,
+    session_id: &str,
+    utterance_id: &str,
 ) -> Result<String, AppError> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(String::new());
     }
+    let call = |chunk: &str, utterance_id: String| DictationCleanupCall {
+        text: chunk.to_string(),
+        dictionary_context: context.dictionary_context.clone(),
+        app_context: context.app_context.clone(),
+        style: config.style,
+        model: config.model.clone(),
+        session_id: session_id.to_string(),
+        utterance_id,
+    };
     let chunks = split_dictation_cleanup_chunks(text, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
-    if chunks.len() == 1 {
-        return match tokio::time::timeout(
-            dictation_cleanup_timeout(text.len()).min(Duration::from_millis(
-                DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-            )),
-            cleanup_dictation_call(
-                text,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                utterance_id,
-            ),
-        )
+    let work = async {
+        if chunks.len() == 1 {
+            let cleaned =
+                cleanup_dictation_call(cleaner, call(text, utterance_id.to_string())).await?;
+            return Ok(trim_cleaned_dictation(&cleaned));
+        }
+        // Built eagerly: a lazily mapped stream trips the higher-ranked
+        // `Send` check of the spawned take future.
+        let calls: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                cleanup_dictation_call(cleaner, call(chunk, format!("{utterance_id}-c{index}")))
+            })
+            .collect();
+        let cleaned: Vec<String> = futures_util::stream::iter(calls)
+            .buffered(DICTATION_CLEANUP_PARALLEL_CHUNKS)
+            .map_ok(|cleaned| trim_cleaned_dictation_chunk(&cleaned))
+            .try_collect()
+            .await?;
+        tracing::info!(chunk_count = chunks.len(), "dictation cleanup ran chunked");
+        Ok(join_cleaned_dictation_chunks(&cleaned))
+    };
+    tokio::time::timeout((config.timeout)(text.len()), work)
         .await
-        {
-            Ok(result) => Ok(trim_cleaned_dictation(&result?)),
-            Err(_) => Err(AppError::new(
+        .unwrap_or_else(|_| {
+            Err(AppError::new(
                 "dictation_cleanup_timeout",
                 "Dictation cleanup timed out.",
-            )),
-        };
-    }
-    cleanup_dictation_chunks(
-        &chunks,
-        dictionary_context,
-        app_context,
-        style,
-        session_id,
-        utterance_id,
-    )
-    .await
-}
-
-/// Clean a long transcript through `/v1/dictate/cleanup` a word-boundary
-/// chunk at a time and rejoin the results. The cleanup model reliably
-/// punctuates short passages but degrades into an unpunctuated verbatim echo
-/// on long run-on speech (JUN-212). Each chunk gets its own utterance id
-/// suffix so metering treats it as its own unit of work.
-///
-/// Chunks that already cleaned up are never discarded: they were billed, so
-/// their output must reach the paste. Running out of the shared deadline or
-/// hitting a transport error mid-batch degrades the affected chunk and the
-/// rest to their raw text. Only an error before any chunk succeeds fails the
-/// whole cleanup (the caller's raw-transcript fallback, as before).
-async fn cleanup_dictation_chunks(
-    chunks: &[&str],
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
-) -> Result<String, AppError> {
-    let total_bytes: usize = chunks.iter().map(|chunk| chunk.len()).sum();
-    let deadline = Instant::now() + dictation_cleanup_timeout(total_bytes);
-    let chunk_count = chunks.len();
-    let mut cleaned_chunks: Vec<String> = Vec::with_capacity(chunk_count);
-    let mut raw_chunks = 0usize;
-    let mut any_cleaned = false;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            raw_chunks += 1;
-            cleaned_chunks.push((*chunk).to_string());
-            continue;
-        }
-        let chunk_utterance_id = format!("{utterance_id}-c{index}");
-        // Bounded by both the batch deadline and the per-request billing
-        // hold cap (the chunk budget covers at most two small requests).
-        let chunk_budget = remaining.min(Duration::from_millis(
-            DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS,
-        ));
-        match tokio::time::timeout(
-            chunk_budget,
-            cleanup_dictation_chunk_with_retry(
-                chunk,
-                dictionary_context,
-                app_context.clone(),
-                style,
-                session_id.clone(),
-                chunk_utterance_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(cleaned)) => {
-                any_cleaned = true;
-                cleaned_chunks.push(trim_cleaned_dictation_chunk(&cleaned));
-            }
-            Ok(Err(error)) => {
-                // Nothing cleaned yet: fail the whole cleanup so the caller
-                // emits the skip event and pastes the raw transcript.
-                if !any_cleaned {
-                    return Err(error);
-                }
-                // Mid-batch failure after billed successes: keep the cleaned
-                // chunks and degrade this one and the rest to raw. Retrying
-                // the remainder against a failing backend would only burn
-                // the deadline.
-                tracing::warn!(
-                    code = %error.code,
-                    chunk_index = index,
-                    "dictation cleanup chunk failed mid-batch; keeping raw for the rest",
-                );
-                for rest in &chunks[index..] {
-                    raw_chunks += 1;
-                    cleaned_chunks.push((*rest).to_string());
-                }
-                break;
-            }
-            Err(_) => {
-                // This chunk ran out of its budget (the batch deadline or the
-                // per-request cap): keep it raw and move on. Chunks that
-                // already cleaned up are preserved; later chunks still get
-                // whatever batch budget is left.
-                tracing::warn!(
-                    chunk_index = index,
-                    chunk_bytes = chunk.len(),
-                    "dictation cleanup chunk timed out; keeping raw chunk",
-                );
-                raw_chunks += 1;
-                cleaned_chunks.push((*chunk).to_string());
-            }
-        }
-    }
-    if raw_chunks > 0 {
-        tracing::warn!(
-            chunk_count,
-            raw_chunks,
-            "dictation cleanup degraded; some chunks pasted raw",
-        );
-    }
-    tracing::info!(chunk_count, raw_chunks, "dictation cleanup ran chunked");
-    Ok(join_cleaned_dictation_chunks(&cleaned_chunks))
+            ))
+        })
 }
 
 /// Trim a single-call cleanup result (the historical behavior).
@@ -5899,116 +7067,23 @@ fn join_cleaned_dictation_chunks(chunks: &[String]) -> String {
     joined
 }
 
-/// One chunk of a chunked cleanup. Transport errors propagate to the caller,
-/// which keeps any already-cleaned chunks and degrades the rest to raw.
-/// Content-quality failures get one retry — the provider is not deterministic
-/// even at temperature 0, and a retry usually punctuates a chunk the first
-/// attempt echoed — then degrade to the raw chunk so one bad chunk never
-/// costs the rest of the dictation its cleanup.
-async fn cleanup_dictation_chunk_with_retry(
-    chunk: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    chunk_utterance_id: String,
+/// One cleanup chat completion plus content-quality checks, capped at the
+/// per-request billing hold (`DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS`).
+async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
+    cleaner: &C,
+    call: DictationCleanupCall,
 ) -> Result<String, AppError> {
-    let first = cleanup_dictation_call(
-        chunk,
-        dictionary_context,
-        app_context.clone(),
-        style,
-        session_id.clone(),
-        chunk_utterance_id.clone(),
+    let cleaned = tokio::time::timeout(
+        Duration::from_millis(DICTATION_CLEANUP_REQUEST_MAX_TIMEOUT_MS),
+        cleaner.clean(call),
     )
-    .await;
-    // A distinct utterance id: the retry wants a fresh model completion, so
-    // it must not share the first attempt's idempotency identity.
-    let retry_utterance_id = format!("{chunk_utterance_id}r");
-    match first {
-        Ok(cleaned) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &cleaned) => Ok(cleaned),
-        Ok(unpunctuated) => {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
-                Ok(retried) if !cleaned_chunk_lacks_sentence_punctuation(chunk, &retried) => {
-                    Ok(retried)
-                }
-                // Keep the first attempt: unpunctuated but still cleaned
-                // (fillers stripped) beats both raw text and failing the
-                // whole dictation's cleanup over one stubborn chunk.
-                _ => {
-                    tracing::warn!(
-                        chunk_bytes = chunk.len(),
-                        "dictation cleanup chunk still unpunctuated after retry",
-                    );
-                    Ok(unpunctuated)
-                }
-            }
-        }
-        Err(error)
-            if error.code == "provider_response_invalid"
-                || error.code == "dictation_cleanup_invalid" =>
-        {
-            match cleanup_dictation_call(
-                chunk,
-                dictionary_context,
-                app_context,
-                style,
-                session_id,
-                retry_utterance_id,
-            )
-            .await
-            {
-                Ok(retried) => Ok(retried),
-                Err(retry_error) => {
-                    if retry_error.code == "provider_response_invalid"
-                        || retry_error.code == "dictation_cleanup_invalid"
-                    {
-                        // The model refused this chunk twice; keep the
-                        // speaker's words raw rather than dropping them or
-                        // failing the whole dictation's cleanup.
-                        tracing::warn!(
-                            code = %retry_error.code,
-                            chunk_bytes = chunk.len(),
-                            "dictation cleanup chunk kept raw after retry",
-                        );
-                        Ok(chunk.to_string())
-                    } else {
-                        Err(retry_error)
-                    }
-                }
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// One `/v1/dictate/cleanup` round-trip plus content-quality checks.
-async fn cleanup_dictation_call(
-    text: &str,
-    dictionary_context: Option<&str>,
-    app_context: Option<String>,
-    style: DictationStyle,
-    session_id: String,
-    utterance_id: String,
-) -> Result<String, AppError> {
-    let cleaned = cleanup_text(DictateCleanupRequestParams {
-        text: text.to_string(),
-        dictionary_context: dictionary_context.map(str::to_string),
-        app_context,
-        style: style.instruction().to_string(),
-        session_id,
-        utterance_id,
-    })
-    .await?;
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::new(
+            "dictation_cleanup_timeout",
+            "Dictation cleanup timed out.",
+        ))
+    })?;
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Err(AppError::new(
@@ -6068,32 +7143,9 @@ fn character_width_at(text: &str, index: usize) -> usize {
     text[index..].chars().next().map_or(1, char::len_utf8)
 }
 
-/// Whether a cleaned chunk came back without any sentence punctuation at a
-/// size where some is clearly expected — the JUN-212 failure shape, where the
-/// model echoes long run-on speech verbatim instead of punctuating it.
-fn cleaned_chunk_lacks_sentence_punctuation(chunk_input: &str, cleaned: &str) -> bool {
-    chunk_input.len() >= DICTATION_CLEANUP_RETRY_MIN_CHUNK_BYTES
-        && !cleaned.contains(['.', '!', '?', ':', ';', '\n', '。', '！', '？'])
-}
-
-/// The paste falls back to the raw ASR transcript when cleanup fails, so this
-/// warn line (with the transcript size and how long the attempt ran) is the
-/// only trace that the pasted text skipped punctuation and filler cleanup.
-fn emit_dictation_cleanup_skipped(
-    app: &AppHandle,
-    provider: &str,
-    error: &AppError,
-    transcript_bytes: usize,
-    elapsed: Duration,
-) {
-    tracing::warn!(
-        provider,
-        code = %error.code,
-        message = %error.message,
-        transcript_bytes,
-        elapsed_ms = elapsed.as_millis() as u64,
-        "dictation cleanup skipped; pasting raw transcript",
-    );
+/// The paste fell back to the raw ASR transcript; the pipeline already
+/// logged why. This event lets the HUD show a discreet notice.
+fn emit_dictation_cleanup_skipped(app: &AppHandle, provider: &str, error: &AppError) {
     emit_dictation_event_value(
         app,
         serde_json::json!({
@@ -6333,9 +7385,10 @@ fn spawn_dictation_history_write(
     app: AppHandle,
     transcript: TranscriptionProviderResult,
     profile: String,
+    app_bundle_id: Option<String>,
 ) {
     tauri::async_runtime::spawn(async move {
-        store_dictation_history_item(&app, &transcript, &profile).await;
+        store_dictation_history_item(&app, &transcript, &profile, app_bundle_id.as_deref()).await;
     });
 }
 
@@ -6358,6 +7411,8 @@ fn recording_ready_info_from_event(
         audio_path: PathBuf::from(path),
         take_id: dictation_take_id_from_event(event).map(str::to_string),
         observed_audio_level: observed_audio_level_from_event(event),
+        audio_seconds: finite_f32_from_event_payload(event, "audioDurationSeconds")
+            .filter(|seconds| *seconds >= 0.0),
         speech_confidence: speech_confidence_from_event(event),
         speech_analysis_status: speech_analysis_status_from_event(event),
         target_bundle_id: event
@@ -6431,6 +7486,8 @@ enum SpeechAnalysisStatus {
 #[derive(Debug)]
 struct RecordingReadyInfo {
     audio_path: PathBuf,
+    /// Length of the finished file. Missing from older helpers and Windows.
+    audio_seconds: Option<f32>,
     /// Opaque helper-generated identity for this capture. Older helper builds
     /// omit it and use the coordinator's single active legacy token.
     take_id: Option<String>,
@@ -6497,6 +7554,14 @@ fn outcome_from_transcription_result(
     style: DictationStyle,
 ) -> DictationTranscriptionOutcome {
     match result {
+        // Whisper heard nothing (design D5): the only "no speech" signal.
+        // The meter level is logged for diagnosis and decides nothing.
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
         Ok(mut transcript) => {
             let had_speech_before_cleaning = !transcript.text.trim().is_empty();
             transcript.text = clean_dictation_fillers(&transcript.text, style);
@@ -6510,19 +7575,82 @@ fn outcome_from_transcription_result(
             }
             outcome_from_clean_transcript(transcript, observed_audio_level)
         }
-        Err(error) => {
-            let event = promote_silent_error_if_audio_detected(
-                app_error_event(error),
-                observed_audio_level,
-            );
-            DictationTranscriptionOutcome {
-                helper_command: serde_json::json!({ "type": "discard_recording" }),
-                event: Some(event),
-                transcript: None,
-                quarantine_transcript: None,
-            }
-        }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
     }
+}
+
+/// Cleanup off (spec "Limpeza desligada"): the Whisper text, only trimmed.
+/// No filler backstop and no style; an empty transcript is still no speech.
+fn outcome_from_raw_transcription_result(
+    result: Result<TranscriptionProviderResult, AppError>,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    match result {
+        Ok(transcript) if is_blank_transcript(&transcript.text) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Err(error) if is_whisper_no_speech_error(&error) => {
+            whisper_no_speech_outcome(observed_audio_level)
+        }
+        Ok(mut transcript) => {
+            transcript.text = transcript.text.trim().to_string();
+            outcome_from_clean_transcript(transcript, observed_audio_level)
+        }
+        Err(error) => transcription_error_outcome(error, observed_audio_level),
+    }
+}
+
+fn transcription_error_outcome(
+    error: AppError,
+    observed_audio_level: Option<f32>,
+) -> DictationTranscriptionOutcome {
+    let event =
+        promote_silent_error_if_audio_detected(app_error_event(error), observed_audio_level);
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(event),
+        transcript: None,
+        quarantine_transcript: None,
+    }
+}
+
+/// No letter or digit in any script: empty, whitespace, or punctuation only.
+fn is_blank_transcript(text: &str) -> bool {
+    !text.chars().any(char::is_alphanumeric)
+}
+
+/// Accept the no-speech error spellings found in historical dictation results.
+fn is_whisper_no_speech_error(error: &AppError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    error.code == "no_speech"
+        || message.contains("no_speech")
+        || message.contains("dictation_text_empty")
+}
+
+fn whisper_no_speech_outcome(observed_audio_level: Option<f32>) -> DictationTranscriptionOutcome {
+    tracing::info!(
+        observed_audio_level,
+        "dictation transcript was empty; reporting no speech"
+    );
+    DictationTranscriptionOutcome {
+        helper_command: serde_json::json!({ "type": "discard_recording" }),
+        event: Some(whisper_no_speech_event()),
+        transcript: None,
+        quarantine_transcript: None,
+    }
+}
+
+/// Shown to the user ("No speech detected."), unlike the silent no-speech
+/// dismissal of filler-only or quarantined captures.
+fn whisper_no_speech_event() -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "payload": {
+            "code": "no_speech",
+            "message": "No speech detected.",
+            "silent": false,
+        },
+    })
 }
 
 fn silent_no_speech_outcome() -> DictationTranscriptionOutcome {
@@ -6562,29 +7690,15 @@ fn outcome_from_clean_transcript(
                 quarantine_transcript: Some(transcript),
             }
         }
-        transcript => {
-            if let Some(prompt) = agent_session_prompt_from_dictation(&transcript.text) {
-                DictationTranscriptionOutcome {
-                    helper_command: serde_json::json!({ "type": "discard_recording" }),
-                    event: Some(serde_json::json!({
-                        "type": "agent_session_prompt",
-                        "payload": { "prompt": prompt },
-                    })),
-                    transcript: Some(transcript),
-                    quarantine_transcript: None,
-                }
-            } else {
-                DictationTranscriptionOutcome {
-                    helper_command: serde_json::json!({
-                        "type": "paste_text",
-                        "text": transcript.text.clone(),
-                    }),
-                    event: None,
-                    transcript: Some(transcript),
-                    quarantine_transcript: None,
-                }
-            }
-        }
+        transcript => DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({
+                "type": "paste_text",
+                "text": transcript.text.clone(),
+            }),
+            event: None,
+            transcript: Some(transcript),
+            quarantine_transcript: None,
+        },
     }
 }
 
@@ -6908,45 +8022,15 @@ fn probable_speech_detected(observed_audio_level: Option<f32>) -> bool {
     observed_audio_level.is_some_and(|level| level >= DICTATION_AUDIO_ACTIVITY_THRESHOLD)
 }
 
-fn agent_session_prompt_from_dictation(text: &str) -> Option<String> {
-    let trimmed = text.trim_start();
-    let (first, after_first) = take_ascii_word(trimmed)?;
-    if !first.eq_ignore_ascii_case("hey") {
-        return None;
-    }
-    let after_first = skip_word_separators(after_first);
-    let (second, after_second) = take_ascii_word(after_first)?;
-    if !is_agent_session_wake_name(second) {
-        return None;
-    }
-    Some(skip_word_separators(after_second).trim().to_string())
-}
-
-fn is_agent_session_wake_name(word: &str) -> bool {
-    ["clovy", "clovie", "clovi", "june", "jun", "joon"]
-        .iter()
-        .any(|variant| word.eq_ignore_ascii_case(variant))
-}
-
-fn take_ascii_word(value: &str) -> Option<(&str, &str)> {
-    let end = value
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_alphabetic())
-        .map(|(index, ch)| index + ch.len_utf8())
-        .last()?;
-    Some(value.split_at(end))
-}
-
-fn skip_word_separators(value: &str) -> &str {
-    value.trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch.is_ascii_punctuation())
-}
-
 async fn store_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     profile: &str,
+    app_bundle_id: Option<&str>,
 ) {
-    if let Err(error) = persist_dictation_history_item(app, transcript, profile).await {
+    if let Err(error) =
+        persist_dictation_history_item(app, transcript, profile, app_bundle_id).await
+    {
         tracing::error!(
             code = %error.code,
             "dictation history save failed after transcript delivery"
@@ -6958,6 +8042,7 @@ async fn persist_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     profile: &str,
+    app_bundle_id: Option<&str>,
 ) -> Result<(), AppError> {
     let repos = crate::commands::repositories(app).await.map_err(|error| {
         tracing::error!(code = %error.code, "dictation history repository unavailable");
@@ -6966,12 +8051,22 @@ async fn persist_dictation_history_item(
             "Dictation history could not save this transcript.",
         )
     })?;
+    persist_history_with_repositories(&repos, transcript, profile, app_bundle_id).await
+}
+
+async fn persist_history_with_repositories(
+    repos: &crate::db::repositories::Repositories,
+    transcript: &TranscriptionProviderResult,
+    profile: &str,
+    app_bundle_id: Option<&str>,
+) -> Result<(), AppError> {
     repos
-        .create_dictation_history_item(
+        .create_dictation_history_item_with_app(
             profile,
             &transcript.text,
             transcript.language.clone(),
             &transcript.provider,
+            app_bundle_id,
         )
         .await
         .map_err(dictation_history_save_error)?;
@@ -6982,6 +8077,7 @@ async fn stage_dictation_history_item(
     app: &AppHandle,
     transcript: &TranscriptionProviderResult,
     data_partition: &str,
+    app_bundle_id: Option<&str>,
 ) -> Result<Option<crate::db::repositories::PendingDictationHistoryItem>, AppError> {
     let repos = crate::commands::repositories(app).await.map_err(|error| {
         tracing::error!(code = %error.code, "dictation history repository unavailable");
@@ -6990,12 +8086,22 @@ async fn stage_dictation_history_item(
             "Dictation history could not save this transcript.",
         )
     })?;
+    stage_history_with_repositories(&repos, transcript, data_partition, app_bundle_id).await
+}
+
+async fn stage_history_with_repositories(
+    repos: &crate::db::repositories::Repositories,
+    transcript: &TranscriptionProviderResult,
+    data_partition: &str,
+    app_bundle_id: Option<&str>,
+) -> Result<Option<crate::db::repositories::PendingDictationHistoryItem>, AppError> {
     repos
-        .stage_dictation_history_item(
+        .stage_dictation_history_item_with_app(
             data_partition,
             &transcript.text,
             transcript.language.clone(),
             &transcript.provider,
+            app_bundle_id,
         )
         .await
         .map_err(dictation_history_save_error)
@@ -7020,6 +8126,8 @@ fn app_error_event(error: AppError) -> serde_json::Value {
 }
 
 fn emit_dictation_event_value(app: &AppHandle, mut event: serde_json::Value) {
+    observe_agent_dictation_event(app, &event);
+    sync_update_gate_take(app, &event);
     annotate_silent_error(&mut event);
     let event_type = event.get("type").and_then(serde_json::Value::as_str);
     sync_capture_mic_duck(event_type);
@@ -7068,6 +8176,146 @@ fn mic_duck_action_for_event(event_type: Option<&str>) -> Option<bool> {
         _ => None,
     }
 }
+
+/// How a dictation event moves the update gate's record of takes in flight
+/// (`crate::update_gate`). This is the gate's only notion of "a dictation
+/// is running"; it does not reuse the menu-bar indicator.
+#[derive(Debug, PartialEq, Eq)]
+enum GateTakeTransition<'a> {
+    Started(&'a str),
+    Ended(&'a str),
+    AllEnded,
+}
+
+fn gate_take_transition<'a>(
+    event_type: Option<&str>,
+    take_id: Option<&'a str>,
+) -> Option<GateTakeTransition<'a>> {
+    let take_id = take_id.unwrap_or(UNTAGGED_DICTATION_TAKE);
+    match event_type {
+        Some("helper_unavailable" | "shutdown_ack") => Some(GateTakeTransition::AllEnded),
+        Some("recording_ready" | "listening_started") => Some(GateTakeTransition::Started(take_id)),
+        // The real end of a take. final_transcript and paste_target are not:
+        // the Windows helper still writes the clipboard, focuses and pastes
+        // after them, and a composer delivery waits for the composer's answer
+        // (paste_completed or a composer error).
+        Some("recording_discarded" | "paste_completed" | "agent_session_prompt" | "error") => {
+            Some(GateTakeTransition::Ended(take_id))
+        }
+        _ => None,
+    }
+}
+
+/// Keeps the update gate in step with every dictation event, whichever emit
+/// path it takes. A take the helper starts while an update installs is
+/// discarded at once.
+fn sync_update_gate_take(app: &AppHandle, event: &serde_json::Value) {
+    forget_admission_for_terminal_event(app, event);
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    let gate = &crate::update_gate::UPDATE_GATE;
+    match gate_take_transition(event_type, dictation_take_id_from_event(event)) {
+        Some(GateTakeTransition::Started(take_id)) => {
+            if gate.observe_dictation_start(take_id) == crate::update_gate::DictationStart::Stop {
+                stop_take_during_update(app, take_id.to_string());
+            }
+        }
+        Some(GateTakeTransition::Ended(take_id)) => gate.end_dictation_take(take_id),
+        Some(GateTakeTransition::AllEnded) => gate.end_all_dictation_takes(),
+        None => {}
+    }
+}
+
+/// Applies a helper event's end of take to the update gate by the event's own
+/// take id. Runs before any active-take or interface filter, which may drop
+/// the event for the HUD and the take lifecycle but must never keep a finished
+/// take holding the install.
+fn end_gate_take_for_helper_event(
+    gate: &crate::update_gate::UpdateGate,
+    event: &serde_json::Value,
+) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    match gate_take_transition(event_type, dictation_take_id_from_event(event)) {
+        Some(GateTakeTransition::Ended(take_id)) => gate.end_dictation_take(take_id),
+        Some(GateTakeTransition::AllEnded) => gate.end_all_dictation_takes(),
+        Some(GateTakeTransition::Started(_)) | None => {}
+    }
+}
+
+/// Discards a take the helper started while an update installs. Sent off the
+/// event thread so it never waits on the helper lock from inside an event.
+fn stop_take_during_update(app: &AppHandle, take_id: String) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        tracing::warn!("discarding a dictation take that started during an update install");
+        cancel_dictation_take(&app, Some(&take_id));
+        if let Some(state) = app.try_state::<HelperState>() {
+            let _ = send_helper_command(
+                &state,
+                serde_json::json!({ "type": "discard_recording", "takeId": take_id }),
+            );
+        }
+    });
+}
+
+/// Lets a take start unless an update is installing; a refused start clears
+/// the shortcut state it prepared.
+fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), AppError> {
+    let state = app.try_state::<DictationTakeState>().ok_or_else(|| {
+        reset_shortcut_activation(app);
+        AppError::new(
+            "dictation_helper_unavailable",
+            "Dictation state is not initialized.",
+        )
+    })?;
+    let settings = crate::providers::effective_current_settings();
+    crate::providers::transcription::effective_transcription_backend(
+        &settings,
+        crate::providers::transcription::ready_directory(),
+        crate::providers::local_transcription_supported(),
+        || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
+    )
+    .inspect_err(|_| reset_shortcut_activation(app))?;
+    let id = take_id.unwrap_or(UNTAGGED_DICTATION_TAKE);
+    crate::update_gate::UPDATE_GATE
+        .begin_dictation_take(id)
+        .inspect_err(|_| reset_shortcut_activation(app))?;
+    state.remember_admitted_settings(id, settings);
+    Ok(())
+}
+
+/// An admitted start never reached the helper, so no event will end it.
+fn release_unsent_dictation_take(app: &AppHandle, take_id: Option<&str>) {
+    if let Some(state) = app.try_state::<DictationTakeState>() {
+        state.forget_admitted_settings(Some(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE)));
+    }
+    let current = app
+        .try_state::<DictationTakeState>()
+        .and_then(|state| state.current_take_id());
+    if let (Some(take_id), Some(activation)) = (take_id, app.try_state::<ShortcutActivationState>())
+    {
+        if let Ok(mut controller) = activation.controller.lock() {
+            controller.finish_helper_take(take_id, current.as_deref());
+        }
+    }
+    crate::update_gate::UPDATE_GATE.end_dictation_take(take_id.unwrap_or(UNTAGGED_DICTATION_TAKE));
+}
+
+fn forget_admission_for_terminal_event(app: &AppHandle, event: &serde_json::Value) {
+    let Some(state) = app.try_state::<DictationTakeState>() else {
+        return;
+    };
+    match gate_take_transition(
+        event.get("type").and_then(serde_json::Value::as_str),
+        dictation_take_id_from_event(event),
+    ) {
+        Some(GateTakeTransition::Ended(id)) => state.forget_admitted_settings(Some(id)),
+        Some(GateTakeTransition::AllEnded) => state.forget_admitted_settings(None),
+        _ => {}
+    }
+}
+
+/// The gate's key for a take whose start or events carry no take id.
+const UNTAGGED_DICTATION_TAKE: &str = "untagged";
 
 /// Pushes the menu-bar dictation indicator to match the current take, but only
 /// on an actual edge. `audio_level` fires continuously while listening and is in
@@ -7203,7 +8451,133 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
             .and_then(serde_json::Value::as_str),
         "textChars": text_chars,
         "promptChars": prompt_chars,
+        "kind": payload
+            .and_then(|payload| payload.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        "trigger": trigger_log_fields(payload),
     })
+}
+
+/// The Windows helper names the pinned window only by handle and process;
+/// the dictation indicator needs `target` (app name and identity, for the
+/// icon), as the Mac helper sends it. Fills it for the start and paste
+/// events when `describe` can identify the app.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn complete_windows_target(
+    event: &mut serde_json::Value,
+    describe: impl Fn(i64, u32) -> Option<(String, String)>,
+) {
+    let event_type = event.get("type").and_then(serde_json::Value::as_str);
+    // The stop pins the window the text is pasted into (it may not be the
+    // one dictation started in), and the indicator pins what this names.
+    if !matches!(
+        event_type,
+        Some("listening_started" | "finalizing_transcript" | "paste_target")
+    ) {
+        return;
+    }
+    let Some(payload) = event
+        .get_mut("payload")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if payload
+        .get("target")
+        .is_some_and(|target| !target.is_null())
+    {
+        return;
+    }
+    let hwnd = payload
+        .get("targetWindowHandle")
+        .and_then(serde_json::Value::as_i64);
+    let pid = payload
+        .get("targetProcessId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let (Some(hwnd), Some(pid)) = (hwnd, pid) else {
+        return;
+    };
+    let Some((app, bundle_identifier)) = describe(hwnd, pid) else {
+        return;
+    };
+    payload.insert(
+        "target".to_string(),
+        serde_json::json!({
+            "app": app,
+            "bundleIdentifier": bundle_identifier,
+            "processIdentifier": pid,
+        }),
+    );
+}
+
+/// A log line for what the app did with a shortcut edge.
+fn shortcut_edge_log_event(
+    kind: DictationShortcutKind,
+    edge: ShortcutKeyEdge,
+    command: Option<DictationCommand>,
+    held: Option<Duration>,
+) -> serde_json::Value {
+    let action = match command {
+        None => "none",
+        Some(DictationCommand::StartListening) => "start",
+        Some(DictationCommand::StopAndPaste) => "stop_and_paste",
+        Some(DictationCommand::DiscardListening) => "discard",
+        Some(DictationCommand::ToggleListening) => "toggle",
+    };
+    let reason = match (edge, command) {
+        (ShortcutKeyEdge::Up, Some(DictationCommand::DiscardListening)) => "short_hold",
+        (ShortcutKeyEdge::Cancel, Some(DictationCommand::DiscardListening)) => "chord",
+        (_, None) => "busy_or_not_held",
+        _ => "shortcut",
+    };
+    serde_json::json!({
+        "type": "shortcut_edge",
+        "payload": {
+            "kind": match kind {
+                DictationShortcutKind::PushToTalk => "push_to_talk",
+                DictationShortcutKind::Toggle => "toggle",
+            },
+            "trigger": {
+                "edge": match edge {
+                    ShortcutKeyEdge::Down => "down",
+                    ShortcutKeyEdge::Up => "up",
+                    ShortcutKeyEdge::Cancel => "cancel",
+                },
+                "heldMs": held.map(|held| held.as_millis() as u64),
+                "action": action,
+                "reason": reason,
+            },
+        },
+    })
+}
+
+/// The trigger diagnostic fields worth keeping: the helper's own bounded
+/// vocabulary (key codes of modifiers only, decisions, reasons), never more.
+fn trigger_log_fields(payload: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(trigger) = payload
+        .and_then(|payload| payload.get("trigger"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return serde_json::Value::Null;
+    };
+    let mut fields = serde_json::Map::new();
+    for name in [
+        "key", "edge", "injected", "alone", "heldMs", "decision", "action", "reason",
+    ] {
+        let Some(value) = trigger.get(name) else {
+            continue;
+        };
+        let kept = match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(text.chars().take(40).collect())
+            }
+            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.clone(),
+            _ => continue,
+        };
+        fields.insert(name.to_string(), kept);
+    }
+    serde_json::Value::Object(fields)
 }
 
 /// Tag error events with `payload.silent: bool` so the HUD doesn't have to
@@ -7217,7 +8591,10 @@ fn annotate_silent_error(event: &mut serde_json::Value) {
         .get_mut("payload")
         .and_then(serde_json::Value::as_object_mut)
     {
-        payload.insert("silent".to_string(), serde_json::Value::Bool(silent));
+        // An event that already decided (Whisper's visible no speech) keeps it.
+        payload
+            .entry("silent")
+            .or_insert(serde_json::Value::Bool(silent));
     }
 }
 
@@ -7239,13 +8616,67 @@ fn update_hud_window(app: &AppHandle, event_type: Option<&str>, event: Option<&s
 fn update_latest_event(app: &AppHandle, event_type: Option<&str>, line: Option<String>) {
     if let Some(state) = app.try_state::<LastDictationEvent>() {
         if let Ok(mut event) = state.event.lock() {
-            match dictation_event_visibility(event_type) {
-                DictationEventVisibility::Show => *event = line,
-                DictationEventVisibility::Hide => *event = None,
-                DictationEventVisibility::Ignore => {}
+            *event = latest_hud_snapshot(event.as_deref(), event_type, line.as_deref());
+        }
+    }
+}
+
+/// Retain a replayable lifecycle snapshot, not a lone meter/focus update.
+/// This lets a late HUD subscriber start with the current take's destination.
+fn latest_hud_snapshot(
+    previous: Option<&str>,
+    event_type: Option<&str>,
+    line: Option<&str>,
+) -> Option<String> {
+    if dictation_event_visibility(event_type) == DictationEventVisibility::Hide {
+        return None;
+    }
+    let prior = previous.and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    let incoming = line.and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    if matches!(event_type, Some("audio_level" | "focus_target")) {
+        let (Some(mut prior), Some(incoming)) = (prior, incoming) else {
+            return previous.map(str::to_owned);
+        };
+        if prior["type"] == "listening_started"
+            && dictation_take_id_from_event(&prior) == dictation_take_id_from_event(&incoming)
+        {
+            if let Some(target) = incoming["payload"].get("target") {
+                if let Some(payload) = prior
+                    .get_mut("payload")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    payload.insert("target".to_string(), target.clone());
+                }
+            }
+        }
+        return Some(prior.to_string());
+    }
+    if dictation_event_visibility(event_type) != DictationEventVisibility::Show {
+        return previous.map(str::to_owned);
+    }
+    let Some(mut incoming) = incoming else {
+        return line.map(str::to_owned);
+    };
+    if event_type != Some("listening_started") {
+        if let Some(prior) = prior {
+            if dictation_take_id_from_event(&prior) == dictation_take_id_from_event(&incoming)
+                && incoming["payload"].get("target").is_none()
+            {
+                if let Some(target) = prior["payload"].get("target") {
+                    if incoming.get("payload").is_none() {
+                        incoming["payload"] = serde_json::json!({});
+                    }
+                    if let Some(payload) = incoming
+                        .get_mut("payload")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        payload.insert("target".to_string(), target.clone());
+                    }
+                }
             }
         }
     }
+    Some(incoming.to_string())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7282,6 +8713,10 @@ fn hud_hide_delay_for_event(
 ) -> Duration {
     match event_type {
         Some("shutdown_ack") => Duration::ZERO,
+        // The webview normally hides immediately after paste, but keeps a
+        // missing-cleanup-key notice for 3 s before its exit animation.
+        // This native fallback must not cut that notice short.
+        Some("paste_completed") => Duration::from_millis(3500),
         Some("error") if event.is_some_and(is_silent_transcription_error) => {
             Duration::from_millis(900)
         }
@@ -7315,9 +8750,7 @@ fn is_silent_transcription_error(event: &serde_json::Value) -> bool {
         || normalized_message.contains("no recorded audio")
         || normalized_message.contains("audio file is too short")
         || normalized_message.contains("did not return any transcript")
-        // Clovy API collapses an empty dictation to a BadRequest whose message
-        // is the service reason (e.g. "no_speech", "dictation_text_empty").
-        // Treat those as "nothing captured", not a fault.
+        // Historical no-speech results mean nothing was captured.
         || normalized_message.contains("no_speech")
         || normalized_message.contains("dictation_text_empty")
 }
@@ -7377,18 +8810,19 @@ fn schedule_hud_hide(app: &AppHandle, delay: Duration) {
 }
 
 fn position_hud_window(app: &AppHandle, hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
 
     // Restore the in-memory drag position if it's still on-screen. This
     // doesn't persist across app restarts — that's deliberate; quitting
-    // Clovy resets the HUD to top-center so it can't end up lost on a
+    // Clovy resets the HUD to the configured edge so it can't end up lost on a
     // monitor that's no longer connected.
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 let _ = hud.set_position(PhysicalPosition::new(x, y));
                 return;
             }
@@ -7414,9 +8848,9 @@ fn current_or_next_hud_position(
     }
 
     if let Some(state) = app.try_state::<HudPosition>() {
-        let saved = state.inner.lock().ok().and_then(|guard| *guard);
+        let saved = state.inner.lock().ok().and_then(|guard| guard.saved);
         if let Some((x, y)) = saved {
-            if hud_position_is_visible(hud, x, y, window_size) {
+            if let Some((x, y)) = restored_hud_position(hud, x, y, window_size) {
                 return Some(PhysicalPosition::new(x, y));
             }
         }
@@ -7431,17 +8865,25 @@ fn current_or_next_hud_position(
 /// transient notifications, not the user's parked dictation pill, so the
 /// saved drag position doesn't apply to them.
 fn position_hud_window_top_center(hud: &WebviewWindow) {
+    cancel_hud_drag(hud);
     let Ok(window_size) = hud.outer_size() else {
         return;
     };
-    if let Some((x, y)) = default_hud_position(hud, window_size) {
+    if let Some((x, y)) = hud_position_for_placement(hud, window_size, DictationHudPlacement::Top) {
         let _ = hud.set_position(PhysicalPosition::new(x, y));
     }
 }
 
 fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> Option<(i32, i32)> {
-    const HUD_TOP_MARGIN: i32 = 12;
+    let placement = settings_store().lock().ok()?.hud_placement;
+    hud_position_for_placement(hud, window_size, placement)
+}
 
+fn hud_position_for_placement(
+    hud: &WebviewWindow,
+    window_size: PhysicalSize<u32>,
+    placement: DictationHudPlacement,
+) -> Option<(i32, i32)> {
     let monitor = hud
         .cursor_position()
         .ok()
@@ -7449,33 +8891,45 @@ fn default_hud_position(hud: &WebviewWindow, window_size: PhysicalSize<u32>) -> 
         .or_else(|| hud.current_monitor().ok().flatten())
         .or_else(|| hud.primary_monitor().ok().flatten())?;
 
-    let work_area = monitor.work_area();
-    let work_top = work_area.position.y;
-    let work_center_x = work_area.position.x + work_area.size.width as i32 / 2;
-
-    // The window is the pill plus its transparent shadow gutter. Anchor the
-    // full frame; the webview centers the pill inside it.
-    let x = work_center_x - window_size.width as i32 / 2;
-    let y = work_top + HUD_TOP_MARGIN;
-    Some((x, y))
+    Some(dictation_hud_origin(
+        *monitor.work_area(),
+        window_size,
+        monitor.scale_factor(),
+        placement,
+    ))
 }
 
-/// Treat a saved position as still usable as long as the pill overlaps a
-/// connected monitor by at least this many pixels on each axis. Guards
-/// against "I unplugged the external display" losing the HUD off-screen.
-fn hud_position_is_visible(
+fn dictation_hud_origin(
+    work_area: tauri::PhysicalRect<i32, u32>,
+    window_size: PhysicalSize<u32>,
+    scale: f64,
+    placement: DictationHudPlacement,
+) -> (i32, i32) {
+    let margin = (12.0 * scale).round() as i32;
+    let x = work_area.position.x + (work_area.size.width as i32 - window_size.width as i32) / 2;
+    let top = work_area.position.y + margin;
+    let bottom =
+        work_area.position.y + work_area.size.height as i32 - window_size.height as i32 - margin;
+    let y = match placement {
+        DictationHudPlacement::Bottom => bottom.max(top),
+        DictationHudPlacement::Top => top,
+    };
+    (x, y)
+}
+
+/// Restore only onto a connected monitor, clamping the current window size
+/// without rewriting the manual anchor. A pill can grow after the drag.
+fn restored_hud_position(
     hud: &WebviewWindow,
     x: i32,
     y: i32,
     window_size: PhysicalSize<u32>,
-) -> bool {
+) -> Option<(i32, i32)> {
     const MIN_OVERLAP_PX: i32 = 24;
-    let Ok(monitors) = hud.available_monitors() else {
-        return false;
-    };
+    let monitors = hud.available_monitors().ok()?;
     let pill_w = window_size.width as i32;
     let pill_h = window_size.height as i32;
-    monitors.iter().any(|monitor| {
+    monitors.iter().find_map(|monitor| {
         let work = monitor.work_area();
         let mx = work.position.x;
         let my = work.position.y;
@@ -7483,7 +8937,15 @@ fn hud_position_is_visible(
         let mh = work.size.height as i32;
         let overlap_x = (x + pill_w).min(mx + mw) - x.max(mx);
         let overlap_y = (y + pill_h).min(my + mh) - y.max(my);
-        overlap_x >= MIN_OVERLAP_PX && overlap_y >= MIN_OVERLAP_PX
+        if overlap_x < MIN_OVERLAP_PX || overlap_y < MIN_OVERLAP_PX {
+            return None;
+        }
+        Some(dictation_hud_resized_origin(
+            *work,
+            PhysicalPosition::new(x, y),
+            window_size,
+            window_size,
+        ))
     })
 }
 
@@ -7510,17 +8972,6 @@ fn configure_hud_window(app: &AppHandle) -> Result<(), String> {
                 tracing::warn!(%error, "failed to clear dictation HUD vibrancy");
             }
         }
-
-        let app_for_events = app.clone();
-        hud.on_window_event(move |event| {
-            if let WindowEvent::Moved(position) = event {
-                if let Some(state) = app_for_events.try_state::<HudPosition>() {
-                    if let Ok(mut guard) = state.inner.lock() {
-                        *guard = Some((position.x, position.y));
-                    }
-                }
-            }
-        });
     }
     Ok(())
 }
@@ -7893,6 +9344,382 @@ pub fn key_code_for_code(code: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    fn last_dictation_outcome(text: &str) -> DictationTranscriptionOutcome {
+        DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({"type":"paste_text", "text":text}),
+            event: None,
+            transcript: Some(TranscriptionProviderResult {
+                text: text.into(),
+                language: None,
+                provider: "test".into(),
+            }),
+            quarantine_transcript: None,
+        }
+    }
+
+    fn last_dictation_read(state: &DictationTakeState, profile: &str) -> serde_json::Value {
+        state
+            .last_dictation_response(
+                profile,
+                &serde_json::json!({"payload":{"requestId":"request-1"}}),
+            )
+            .unwrap()["text"]
+            .clone()
+    }
+
+    fn last_dictation_claim(
+        state: &DictationTakeState,
+        take: &DictationTakeToken,
+        delivery_claim: Option<DictationDeliveryClaim>,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) -> Option<DictationDeliveryClaim> {
+        let claim = delivery_claim.or_else(|| take.try_begin_delivery())?;
+        state.remember_last_dictation(&claim, profile, outcome);
+        Some(claim)
+    }
+
+    #[test]
+    fn last_dictation_renderer_cannot_supply_repeat_text() {
+        assert!(validate_renderer_dictation_command(&serde_json::json!({"type":"repeat_last_dictation","requestId":"guessed","text":"untrusted"})).is_err());
+        assert!(validate_renderer_dictation_command(
+            &serde_json::json!({"type":"start_listening"})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn last_dictation_preclaimed_stale_result_cannot_overwrite_new_take() {
+        let state = DictationTakeState::default();
+        let old = state.begin("old".into());
+        assert!(old.try_begin_processing());
+        let old_claim = old.try_begin_delivery().unwrap();
+        last_dictation_deliver(&state, "new", "a", &last_dictation_outcome("new"));
+        state.remember_last_dictation(&old_claim, "a", &last_dictation_outcome("old"));
+        assert_eq!(last_dictation_read(&state, "a"), "new");
+    }
+
+    fn last_dictation_deliver(
+        state: &DictationTakeState,
+        id: &str,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) {
+        let take = state.begin(id.into());
+        assert!(take.try_begin_processing());
+        assert!(last_dictation_claim(state, &take, None, profile, outcome).is_some());
+    }
+
+    #[test]
+    fn last_dictation_initial_and_restart_are_empty() {
+        assert!(last_dictation_read(&DictationTakeState::default(), "a").is_null());
+    }
+
+    #[test]
+    fn last_dictation_valid_result_replaces_and_paste_failure_retains() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("primeiro"));
+        assert_eq!(last_dictation_read(&state, "a"), "primeiro");
+        // Cache admission precedes helper I/O: no successful paste acknowledgement is needed.
+        last_dictation_deliver(&state, "two", "a", &last_dictation_outcome("segundo"));
+        assert_eq!(last_dictation_read(&state, "a"), "segundo");
+        assert!(last_dictation_read(&DictationTakeState::default(), "a").is_null());
+    }
+
+    #[test]
+    fn last_dictation_cancelled_and_late_results_do_not_replace() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("keep"));
+        let cancelled = state.begin("cancelled".into());
+        assert!(cancelled.try_begin_processing());
+        assert!(cancelled.cancel());
+        assert!(last_dictation_claim(
+            &state,
+            &cancelled,
+            None,
+            "a",
+            &last_dictation_outcome("lost")
+        )
+        .is_none());
+        let late = state.begin("late".into());
+        assert!(late.try_begin_processing());
+        state.begin("replacement".into());
+        assert!(
+            last_dictation_claim(&state, &late, None, "a", &last_dictation_outcome("late"))
+                .is_none()
+        );
+        assert_eq!(last_dictation_read(&state, "a"), "keep");
+    }
+
+    #[test]
+    fn last_dictation_empty_rejected_and_quarantined_do_not_replace() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("keep"));
+        let mut empty = last_dictation_outcome("  ");
+        let mut rejected = last_dictation_outcome("rejected");
+        rejected.helper_command = serde_json::json!({"type":"discard_recording"});
+        let mut quarantined = last_dictation_outcome("quarantined");
+        quarantined.quarantine_transcript = quarantined.transcript.take();
+        for (id, outcome) in [
+            ("empty", &mut empty),
+            ("rejected", &mut rejected),
+            ("quarantined", &mut quarantined),
+        ] {
+            last_dictation_deliver(&state, id, "a", outcome);
+            assert_eq!(last_dictation_read(&state, "a"), "keep");
+        }
+    }
+
+    #[test]
+    fn last_dictation_profile_isolation_and_single_slot() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("private a"));
+        assert!(last_dictation_read(&state, "b").is_null());
+        last_dictation_deliver(&state, "two", "b", &last_dictation_outcome("private b"));
+        assert!(last_dictation_read(&state, "a").is_null());
+        assert_eq!(last_dictation_read(&state, "b"), "private b");
+    }
+
+    #[test]
+    fn last_dictation_response_is_correlated_and_does_not_start_take() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(
+            &state,
+            "one",
+            "a",
+            &last_dictation_outcome("ação 🧑🏽‍💻\n".repeat(5000).as_str()),
+        );
+        let request = serde_json::json!({"payload":{"requestId":"fresh"}});
+        let response = state.last_dictation_response("a", &request).unwrap();
+        assert_eq!(response["requestId"], "fresh");
+        assert_eq!(response["text"], "ação 🧑🏽‍💻\n".repeat(5000));
+        assert_eq!(
+            state.last_dictation_response("a", &request).unwrap(),
+            response
+        );
+        assert_eq!(state.current_take_id().as_deref(), Some("one"));
+        assert_eq!(
+            state.current.lock().unwrap().as_ref().unwrap().state(),
+            DICTATION_TAKE_DELIVERING
+        );
+        assert!(state
+            .last_dictation_response("a", &serde_json::json!({"payload":{"requestId":""}}))
+            .is_none());
+        assert!(state
+            .last_dictation_response(
+                "a",
+                &serde_json::json!({"payload":{"requestId":"x".repeat(129)}})
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn last_dictation_voice_command_repeats_as_literal_text() {
+        let state = DictationTakeState::default();
+        let mut outcome = last_dictation_outcome("Hey Clovy faça algo");
+        outcome.helper_command = serde_json::json!({"type":"discard_recording"});
+        outcome.event = Some(
+            serde_json::json!({"type":"agent_session_prompt", "payload":{"prompt":"faça algo"}}),
+        );
+        last_dictation_deliver(&state, "one", "a", &outcome);
+        let response = state
+            .last_dictation_response("a", &serde_json::json!({"payload":{"requestId":"fresh"}}))
+            .unwrap();
+        assert_eq!(response["type"], "repeat_last_dictation");
+        assert_eq!(response["text"], "Hey Clovy faça algo");
+        assert!(response.get("event").is_none());
+    }
+
+    #[test]
+    fn dictation_hud_drag_start_does_not_replace_the_last_completed_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_prompt_resize_does_not_replace_the_saved_dictation_drag() {
+        let mut state = HudPositionState {
+            saved: Some((500, 900)),
+            ..Default::default()
+        };
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((500, 900)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_commits_the_release_position_not_the_start_or_last_held_sample() {
+        let mut state = HudPositionState::default();
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        assert_eq!(state.saved, None);
+        state.observe_drag((620, 940), false);
+        assert_eq!(state.saved, Some((620, 940)));
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_drag_release_without_movement_keeps_the_previous_anchor() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((864, 1120), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_automatic_motion_cancels_an_inflight_drag_without_saving_the_prompt() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.observe_drag((700, 1000), true);
+        state.cancel_drag();
+        state.observe_drag((749, 42), false);
+        assert_eq!(state.saved, Some((620, 940)));
+    }
+
+    #[test]
+    fn dictation_hud_preference_change_discards_the_drag_so_next_dictation_uses_the_new_edge() {
+        let mut state = HudPositionState {
+            saved: Some((620, 940)),
+            ..Default::default()
+        };
+        state.begin_drag((864, 1120));
+        state.reset();
+        state.observe_drag((700, 1000), false);
+        assert_eq!(state.saved, None);
+    }
+
+    #[test]
+    fn dictation_hud_origin_uses_the_selected_work_area_edge_at_each_scale() {
+        // Physical work areas: menu excluded, with bottom/side/no Dock and a
+        // secondary display to the left and above the primary one.
+        let cases = [
+            ((0, 30, 1920, 1170), (200, 68), 1.0, (860, 1120), (860, 42)),
+            ((0, 30, 1920, 1090), (200, 68), 1.0, (860, 1040), (860, 42)),
+            (
+                (0, 60, 3840, 2340),
+                (400, 136),
+                2.0,
+                (1720, 2240),
+                (1720, 84),
+            ),
+            (
+                (0, 60, 3840, 2180),
+                (400, 136),
+                2.0,
+                (1720, 2080),
+                (1720, 84),
+            ),
+            ((80, 30, 1840, 1170), (200, 68), 1.0, (900, 1120), (900, 42)),
+            (
+                (-2560, -1380, 2560, 1380),
+                (400, 136),
+                2.0,
+                (-1480, -160),
+                (-1480, -1356),
+            ),
+        ];
+        for ((x, y, width, height), (w, h), scale, bottom, top) in cases {
+            let work_area = tauri::PhysicalRect {
+                position: PhysicalPosition::new(x, y),
+                size: PhysicalSize::new(width, height),
+            };
+            for (placement, expected) in [("bottom", bottom), ("top", top)] {
+                let settings: DictationSettings =
+                    serde_json::from_value(serde_json::json!({"hudPlacement": placement})).unwrap();
+                assert_eq!(
+                    dictation_hud_origin(
+                        work_area,
+                        PhysicalSize::new(w, h),
+                        scale,
+                        settings.hud_placement
+                    ),
+                    expected,
+                    "{placement} at {scale}x in {work_area:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dictation_hud_origin_keeps_growing_pills_above_the_dock() {
+        let work_area = tauri::PhysicalRect {
+            position: PhysicalPosition::new(0, 60),
+            size: PhysicalSize::new(3840, 2180),
+        };
+        let settings: DictationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(400, 136),
+                2.0,
+                settings.hud_placement
+            ),
+            (1720, 2080),
+        );
+        assert_eq!(
+            dictation_hud_origin(
+                work_area,
+                PhysicalSize::new(800, 400),
+                2.0,
+                settings.hud_placement
+            ),
+            (1520, 1816),
+        );
+    }
+
+    #[test]
+    fn dictation_hud_settings_preserve_the_anchor_across_save_and_reload() {
+        let legacy: DictationSettings = serde_json::from_str(r#"{"style":"formal"}"#).unwrap();
+        let old_json = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(old_json["hudPlacement"], "bottom");
+        for placement in ["top", "bottom"] {
+            let settings: DictationSettings = serde_json::from_value(serde_json::json!({
+                "style": "formal", "hudPlacement": placement
+            }))
+            .unwrap();
+            let reloaded: DictationSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reloaded).unwrap()["hudPlacement"],
+                placement
+            );
+            assert_eq!(reloaded.style, DictationStyle::Formal);
+        }
+    }
+
+    #[test]
+    fn dictation_hud_resize_keeps_the_nearest_edge_and_clamps_dragged_pills() {
+        let work = tauri::PhysicalRect {
+            position: PhysicalPosition::new(-2560, -1380),
+            size: PhysicalSize::new(2560, 1380),
+        };
+        let short = PhysicalSize::new(400, 136);
+        let tall = PhysicalSize::new(800, 400);
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -160), short, tall),
+            (-1680, -424),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-1480, -1356), short, tall),
+            (-1680, -1356),
+        );
+        assert_eq!(
+            dictation_hud_resized_origin(work, PhysicalPosition::new(-300, -100), short, tall),
+            (-800, -400),
+        );
+    }
+
     #[test]
     fn cancel_tooltip_intent_has_independent_open_and_close_delays() {
         let mut intent = CancelTooltipIntent::default();
@@ -7946,17 +9773,17 @@ mod tests {
     fn comm_line_identity_is_truncation_tolerant() {
         // Full path (comm= returned the executable path).
         assert!(comm_line_is_dictation_helper(
-            "/Applications/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
+            "/Applications/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
         ));
         // Bare full name.
-        assert!(comm_line_is_dictation_helper("june-dictation-helper"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation-helper"));
         // Kernel p_comm truncated to 15 chars: the real orphan MUST still read
         // as the helper, or it is deleted-not-killed and JUN-338 reopens.
-        assert!(comm_line_is_dictation_helper("june-dictation-"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation"));
         // Trailing whitespace/newline from ps is tolerated.
-        assert!(comm_line_is_dictation_helper("june-dictation-helper\n"));
+        assert!(comm_line_is_dictation_helper("clovy-dictation-helper\n"));
         // A shorter prefix (< 15) is ambiguous and must NOT match.
-        assert!(!comm_line_is_dictation_helper("june-dictation"));
+        assert!(!comm_line_is_dictation_helper("clovy-dictatio"));
         // Unrelated process and empty output never match.
         assert!(!comm_line_is_dictation_helper("/usr/bin/login"));
         assert!(!comm_line_is_dictation_helper("bash"));
@@ -8156,7 +9983,7 @@ mod tests {
     #[test]
     fn wait_for_pid_exit_confirms_a_kill_and_bounds_a_survivor() {
         // A dead pid is observed as exited.
-        let mut victim = Command::new("/bin/sleep")
+        let mut victim = std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -8170,7 +9997,7 @@ mod tests {
 
         // ...and a live process is NOT declared exited, so the reap aborts the
         // replacement spawn rather than racing a helper that still holds the tap.
-        let mut survivor = Command::new("/bin/sleep")
+        let mut survivor = std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -8223,6 +10050,133 @@ mod tests {
     fn mic_duck_ignores_unrelated_events() {
         assert_eq!(mic_duck_action_for_event(Some("permission_status")), None);
         assert_eq!(mic_duck_action_for_event(None), None);
+    }
+
+    #[test]
+    fn the_gate_take_outlives_the_transcript_until_delivery_ends() {
+        // On Windows the helper emits final_transcript before it writes the
+        // clipboard, focuses the target and pastes; a composer delivery then
+        // waits for the composer's answer. None of that may be cut.
+        for event_type in ["final_transcript", "paste_target", "finalizing_transcript"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                None,
+                "{event_type} must not end the take"
+            );
+        }
+        for event_type in [
+            "paste_completed",
+            "recording_discarded",
+            "agent_session_prompt",
+            "error",
+        ] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                Some(GateTakeTransition::Ended("take-a")),
+                "{event_type} ends the take"
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_terminal_event_for_an_older_take_still_ends_it_in_the_gate() {
+        let gate = crate::update_gate::UpdateGate::new();
+        let event = |event_type: &str, take_id: &str| serde_json::json!({ "type": event_type, "payload": { "takeId": take_id } });
+        // final_transcript(A), then B starts, then A's paste completes late:
+        // the active-take filter drops paste_completed(A) for the HUD.
+        gate.begin_dictation_take("take-a").unwrap();
+        end_gate_take_for_helper_event(&gate, &event("final_transcript", "take-a"));
+        gate.begin_dictation_take("take-b").unwrap();
+        end_gate_take_for_helper_event(&gate, &event("paste_completed", "take-a"));
+        end_gate_take_for_helper_event(&gate, &event("paste_completed", "take-b"));
+        assert!(gate.try_begin_install(|| false).is_ok());
+    }
+
+    #[test]
+    fn every_terminal_event_of_a_stale_take_ends_it_in_the_gate() {
+        for event_type in ["recording_discarded", "error", "agent_session_prompt"] {
+            let gate = crate::update_gate::UpdateGate::new();
+            gate.begin_dictation_take("take-stale").unwrap();
+            end_gate_take_for_helper_event(
+                &gate,
+                &serde_json::json!({ "type": event_type, "payload": { "takeId": "take-stale" } }),
+            );
+            assert!(
+                gate.try_begin_install(|| false).is_ok(),
+                "{event_type} left the take in the gate"
+            );
+        }
+        let gate = crate::update_gate::UpdateGate::new();
+        gate.begin_dictation_take("take-x").unwrap();
+        end_gate_take_for_helper_event(&gate, &serde_json::json!({ "type": "helper_unavailable" }));
+        assert!(gate.try_begin_install(|| false).is_ok());
+    }
+
+    #[test]
+    fn a_take_rust_cancels_leaves_the_gate() {
+        // A superseded or discarded take produces no delivery, and its
+        // transcription task returns without emitting anything.
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        gate.begin_dictation_take("gate-cancel-a").unwrap();
+        let take_a = state.begin("gate-cancel-a".into());
+        assert!(take_a.try_begin_processing());
+        gate.begin_dictation_take("gate-cancel-b").unwrap();
+        state.begin("gate-cancel-b".into());
+        assert!(!gate.has_dictation_take("gate-cancel-a"));
+        assert!(state.cancel(Some("gate-cancel-b")));
+        assert!(!gate.has_dictation_take("gate-cancel-b"));
+    }
+
+    #[test]
+    fn a_stale_recording_leaves_the_gate() {
+        // Rust drops a recording that is not the current take's without
+        // transcribing it or sending the helper anything back.
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        state.begin("gate-current".into());
+        gate.begin_dictation_take("gate-stale").unwrap();
+        assert!(matches!(
+            state.claim_finalized(Some("gate-stale")),
+            DictationFinalizedTake::Stale
+        ));
+        assert!(!gate.has_dictation_take("gate-stale"));
+        gate.end_dictation_take("gate-current");
+    }
+
+    #[test]
+    fn a_take_already_delivering_stays_in_the_gate_when_superseded() {
+        let gate = &crate::update_gate::UPDATE_GATE;
+        let state = DictationTakeState::default();
+        gate.begin_dictation_take("gate-delivering-a").unwrap();
+        let take_a = state.begin("gate-delivering-a".into());
+        assert!(take_a.try_begin_processing());
+        let _claim = take_a.try_begin_delivery().unwrap();
+        state.begin("gate-delivering-b".into());
+        // Its paste is in flight; paste_completed or an error will end it.
+        assert!(gate.has_dictation_take("gate-delivering-a"));
+        gate.end_dictation_take("gate-delivering-a");
+        gate.end_dictation_take("gate-delivering-b");
+    }
+
+    #[test]
+    fn the_gate_take_starts_and_the_helper_going_away_ends_every_take() {
+        for event_type in ["recording_ready", "listening_started"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), Some("take-a")),
+                Some(GateTakeTransition::Started("take-a"))
+            );
+        }
+        for event_type in ["helper_unavailable", "shutdown_ack"] {
+            assert_eq!(
+                gate_take_transition(Some(event_type), None),
+                Some(GateTakeTransition::AllEnded)
+            );
+        }
+        assert_eq!(
+            gate_take_transition(Some("audio_level"), Some("take-a")),
+            None
+        );
     }
 
     #[test]
@@ -8281,19 +10235,13 @@ mod tests {
         let mut controller = ShortcutActivationController::default();
         controller.prepare_helper_start("take-b");
         assert!(controller.matches_helper_take("take-b", None));
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(false)
-        );
-        assert!(!controller.matches_helper_take("take-b", None));
     }
 
     #[test]
     fn untagged_listening_start_promotes_the_pending_coordinator_take() {
         let event = serde_json::json!({
             "type": "listening_started",
-            "payload": { "recognitionMode": "venice_recording" }
+            "payload": { "microphone": "Built-in Microphone", "escapeCancelAvailable": true }
         });
         let mut controller = ShortcutActivationController::default();
         controller.prepare_helper_start("take-pending");
@@ -8460,6 +10408,575 @@ mod tests {
         );
         assert_eq!(settings.style, DictationStyle::Standard);
         assert_eq!(settings.language, None);
+    }
+
+    #[test]
+    fn default_settings_leave_dictation_cleanup_off_on_the_default_openrouter_model() {
+        let settings = DictationSettings::default();
+        assert!(!settings.cleanup_enabled);
+        assert_eq!(settings.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+        assert!(settings.cleanup_migrated);
+    }
+
+    #[test]
+    fn settings_saved_before_optional_cleanup_migrate_to_off_once() {
+        // A file from before ditado-rapido: cleanup always ran (on the CLI,
+        // an endpoint, or Clovy API). It migrates to off, once.
+        let mut settings: DictationSettings = serde_json::from_str(
+            r#"{"pushToTalkShortcut":{"keyCode":0,"code":"Fn","modifiers":{"command":false,"control":false,"option":false,"shift":false,"function":true},"label":"Fn","pressCount":1},"style":"formal","cleanupEnabled":true}"#,
+        )
+        .expect("legacy settings should deserialize");
+        assert!(!settings.cleanup_migrated);
+        assert!(migrate_dictation_cleanup(&mut settings));
+        assert!(!settings.cleanup_enabled);
+        assert!(settings.cleanup_migrated);
+        assert_eq!(settings.style, DictationStyle::Formal);
+
+        // After the migration the user turns cleanup on; the next launch
+        // reads it back and the migration does not run again.
+        settings.cleanup_enabled = true;
+        let stored = serde_json::to_string(&settings).unwrap();
+        let mut reloaded: DictationSettings = serde_json::from_str(&stored).unwrap();
+        assert!(!migrate_dictation_cleanup(&mut reloaded));
+        assert!(reloaded.cleanup_enabled);
+        assert_eq!(reloaded.cleanup_model, DEFAULT_DICTATION_CLEANUP_MODEL);
+    }
+
+    #[test]
+    fn dictation_cleanup_model_accepts_only_openrouter_model_ids() {
+        assert_eq!(
+            validate_dictation_cleanup_model(" openai/gpt-5-mini ").unwrap(),
+            "openai/gpt-5-mini"
+        );
+        assert_eq!(
+            validate_dictation_cleanup_model("nvidia/nemotron-3-nano-30b-a3b:free").unwrap(),
+            "nvidia/nemotron-3-nano-30b-a3b:free"
+        );
+        for invalid in [
+            "",
+            "   ",
+            "claude",
+            "cli:claude",
+            "endpoint:ep",
+            "/model",
+            "vendor/",
+            "vendor/model name",
+            "__june_local_generation__:x/y",
+        ] {
+            assert_eq!(
+                validate_dictation_cleanup_model(invalid).unwrap_err().code,
+                "dictation_cleanup_model_invalid",
+                "{invalid:?}"
+            );
+        }
+        assert!(validate_dictation_cleanup_model(&format!("a/{}", "b".repeat(200))).is_err());
+    }
+
+    /// A transcriber that returns a fixed result and counts its calls.
+    struct FakeTranscriber {
+        result: Result<String, AppError>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeTranscriber {
+        fn text(text: &str) -> Self {
+            Self {
+                result: Ok(text.to_string()),
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl DictationTranscriber for FakeTranscriber {
+        async fn transcribe(
+            &self,
+            _request: DictateTranscribeRequest,
+        ) -> Result<TranscriptionProviderResult, AppError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone().map(|text| TranscriptionProviderResult {
+                text,
+                language: None,
+                provider: "groq".to_string(),
+            })
+        }
+    }
+
+    /// A cleaner that records every call and the peak number of calls in
+    /// flight. `fail_on` makes calls whose text contains it fail; `delay`
+    /// keeps each call open long enough to observe parallel chunks.
+    #[derive(Default)]
+    struct FakeCleaner {
+        calls: Mutex<Vec<DictationCleanupCall>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak_in_flight: std::sync::atomic::AtomicUsize,
+        delay: Duration,
+        fail_on: Option<String>,
+        failure_code: Option<&'static str>,
+        /// Calls whose text contains it answer with empty text.
+        blank_on: Option<String>,
+        /// Answers without any sentence punctuation.
+        unpunctuated: bool,
+    }
+
+    impl DictationCleaner for FakeCleaner {
+        async fn clean(&self, call: DictationCleanupCall) -> Result<String, AppError> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+            self.calls.lock().unwrap().push(call.clone());
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if self
+                .fail_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Err(AppError::new(
+                    self.failure_code.unwrap_or("clovy_request_failed"),
+                    "upstream failed",
+                ));
+            }
+            if self
+                .blank_on
+                .as_deref()
+                .is_some_and(|marker| call.text.contains(marker))
+            {
+                return Ok(String::new());
+            }
+            if self.unpunctuated {
+                return Ok(call.text.to_uppercase());
+            }
+            Ok(format!("{}.", call.text.to_uppercase()))
+        }
+    }
+
+    fn pipeline_request() -> DictateTranscribeRequest {
+        DictateTranscribeRequest {
+            audio_path: PathBuf::from("/tmp/take.m4a"),
+            context: None,
+            language: None,
+            session_id: "session".to_string(),
+            utterance_id: "utterance".to_string(),
+        }
+    }
+
+    fn cleanup_config(enabled: bool) -> DictationCleanupConfig {
+        DictationCleanupConfig {
+            enabled,
+            model: "openai/gpt-5-mini".to_string(),
+            style: DictationStyle::Standard,
+            timeout: dictation_cleanup_timeout,
+        }
+    }
+
+    fn pasted_text(result: &DictationPipelineResult) -> Option<&str> {
+        let command = &result.outcome.helper_command;
+        (command["type"] == "paste_text").then(|| command["text"].as_str().unwrap())
+    }
+
+    /// Words long enough that the transcript splits into several cleanup
+    /// chunks; `marker` tags the one word a failing cleaner trips on.
+    fn long_transcript(chunks: usize, marker: &str) -> String {
+        let mut words = Vec::new();
+        for index in 0..chunks * 100 {
+            if index == chunks * 50 {
+                words.push(marker.to_string());
+            } else {
+                words.push(format!("word{index}"));
+            }
+        }
+        words.join(" ")
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_the_transcript_without_calling_the_cleaner() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(false),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
+        assert!(cleaner.calls.lock().unwrap().is_empty());
+        assert!(result.cleanup_skipped.is_none());
+        // No LLM and no filler backstop: the Whisper text, trimmed.
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_off_pastes_whisper_text_only_trimmed() {
+        // Spec "Limpeza desligada": no filler backstop, no style either.
+        let transcriber = FakeTranscriber::text("  um, so Send it to Samir, uh  ");
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &FakeCleaner::default(),
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::CasualLowercase,
+                ..cleanup_config(false)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("um, so Send it to Samir, uh"));
+        assert_eq!(
+            result.outcome.transcript.as_ref().map(|t| t.text.as_str()),
+            Some("um, so Send it to Samir, uh")
+        );
+    }
+
+    #[tokio::test]
+    async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                style: DictationStyle::Formal,
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext {
+                dictionary_context: Some("Samir".to_string()),
+                app_context: Some(APP_CONTEXT_EMAIL.to_string()),
+            },
+            Some(0.3),
+            None,
+        )
+        .await;
+        let calls = cleaner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].model, "openai/gpt-5-mini");
+        assert_eq!(calls[0].style, DictationStyle::Formal);
+        assert_eq!(calls[0].dictionary_context.as_deref(), Some("Samir"));
+        assert_eq!(calls[0].app_context.as_deref(), Some(APP_CONTEXT_EMAIL));
+        assert_eq!(calls[0].utterance_id, "utterance");
+        assert_eq!(pasted_text(&result), Some("SEND IT TO SAMIR."));
+        assert!(result.cleanup_skipped.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_pastes_the_raw_transcript_and_reports_the_skip() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("clovy_request_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_cleanup_pastes_the_raw_transcript() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(500),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &DictationCleanupConfig {
+                timeout: |_| Duration::from_millis(20),
+                ..cleanup_config(true)
+            },
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("dictation_cleanup_timeout")
+        );
+    }
+
+    #[test]
+    fn paste_completion_fallback_keeps_the_cleanup_notice_readable() {
+        // hud.ts keeps the missing-key notice for 3 s, then allows 240 ms
+        // for its exit animation plus a 60 ms timeout margin.
+        let notice_and_exit = Duration::from_millis(3300);
+        assert!(hud_hide_delay_for_event(Some("paste_completed"), None) >= notice_and_exit);
+        assert_eq!(
+            hud_hide_delay_for_event(Some("recording_discarded"), None),
+            Duration::from_millis(900)
+        );
+        assert_eq!(
+            hud_hide_delay_for_event(Some("shutdown_ack"), None),
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_openrouter_key_pastes_raw_dictation_with_a_reason_for_the_notice() {
+        let transcriber = FakeTranscriber::text("send it to samir");
+        let cleaner = FakeCleaner {
+            fail_on: Some("samir".to_string()),
+            failure_code: Some("openrouter_api_key_missing"),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("openrouter_api_key_missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn long_dictation_cleans_chunks_in_parallel_up_to_four_and_keeps_their_order() {
+        let transcript = long_transcript(7, "word350");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        assert!(chunks.len() > 4, "{} chunks", chunks.len());
+        let expected = chunks
+            .iter()
+            .map(|chunk| format!("{}.", chunk.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(40),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+        let peak = cleaner.peak_in_flight.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&peak), "peak in flight {peak}");
+        assert_eq!(pasted_text(&result), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn each_chunk_gets_exactly_one_cleanup_call() {
+        // D7: one chat completion per chunk, no content-quality retries.
+        let transcript = long_transcript(6, "word300");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            unpunctuated: true,
+            ..FakeCleaner::default()
+        };
+        run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(cleaner.calls.lock().unwrap().len(), chunks.len());
+    }
+
+    #[tokio::test]
+    async fn a_chunk_with_an_invalid_answer_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "blankme");
+        let chunks =
+            split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
+        let cleaner = FakeCleaner {
+            blank_on: Some("blankme".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &FakeTranscriber::text(&transcript),
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert_eq!(
+            result.cleanup_skipped.map(|error| error.code).as_deref(),
+            Some("provider_response_invalid")
+        );
+        assert!(cleaner.calls.lock().unwrap().len() <= chunks.len());
+    }
+
+    #[tokio::test]
+    async fn one_failed_chunk_pastes_the_whole_raw_transcript() {
+        let transcript = long_transcript(6, "explode");
+        let transcriber = FakeTranscriber::text(&transcript);
+        let cleaner = FakeCleaner {
+            fail_on: Some("explode".to_string()),
+            ..FakeCleaner::default()
+        };
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        let pasted = pasted_text(&result).unwrap();
+        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
+        assert!(pasted.contains("explode"));
+        assert!(result.cleanup_skipped.is_some());
+    }
+
+    fn assert_visible_no_speech(result: &DictationPipelineResult) {
+        assert_eq!(
+            result.outcome.helper_command,
+            serde_json::json!({ "type": "discard_recording" })
+        );
+        assert!(result.outcome.transcript.is_none());
+        let mut event = result
+            .outcome
+            .event
+            .clone()
+            .expect("no speech emits an event");
+        annotate_silent_error(&mut event);
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        // The user sees "No speech detected"; the HUD does not just vanish.
+        assert_eq!(event["payload"]["silent"], false);
+    }
+
+    #[tokio::test]
+    async fn an_empty_whisper_transcript_is_no_speech_whatever_the_audio_level() {
+        // The meter level is diagnostic only (design D5): loud, quiet, or
+        // unknown, an empty transcript means no speech, and nothing is cleaned.
+        for level in [Some(0.9), Some(0.001), None] {
+            for text in ["", "   ", " . , ? ", "…"] {
+                let transcriber = FakeTranscriber::text(text);
+                let cleaner = FakeCleaner::default();
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &cleaner,
+                    pipeline_request(),
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    level,
+                    None,
+                )
+                .await;
+                assert_visible_no_speech(&result);
+                assert!(cleaner.calls.lock().unwrap().is_empty(), "{text:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_take_under_half_a_second_never_reaches_whisper() {
+        // R7a: Whisper invents text for near-empty audio; such a take is no
+        // speech without an upload. Unknown length (older helpers) uploads.
+        for (seconds, uploads) in [
+            (Some(0.2), false),
+            (Some(0.49), false),
+            (Some(0.5), true),
+            (Some(3.0), true),
+            (None, true),
+        ] {
+            let transcriber = FakeTranscriber::text("Thank you.");
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.3),
+                seconds,
+            )
+            .await;
+            assert_eq!(
+                transcriber.calls.load(Ordering::SeqCst) == 1,
+                uploads,
+                "{seconds:?}"
+            );
+            if !uploads {
+                assert_visible_no_speech(&result);
+            }
+        }
+    }
+
+    #[test]
+    fn recording_ready_info_reads_the_audio_length() {
+        let event = |value: serde_json::Value| {
+            serde_json::json!({
+                "type": "recording_ready",
+                "payload": { "path": "/tmp/take.m4a", "audioDurationSeconds": value },
+            })
+        };
+        let seconds = |value| {
+            recording_ready_info_from_event(&event(value))
+                .unwrap()
+                .audio_seconds
+        };
+        assert_eq!(seconds(serde_json::json!("0.4200")), Some(0.42));
+        assert_eq!(seconds(serde_json::json!(2.5)), Some(2.5));
+        assert_eq!(seconds(serde_json::json!("-1")), None);
+        assert_eq!(seconds(serde_json::json!("nope")), None);
+    }
+
+    #[tokio::test]
+    async fn clovy_apis_empty_dictation_answer_is_the_same_no_speech() {
+        for message in ["no_speech", "dictation_text_empty"] {
+            let transcriber = FakeTranscriber {
+                result: Err(AppError::new("clovy_request_failed", message)),
+                calls: Default::default(),
+            };
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner::default(),
+                pipeline_request(),
+                &cleanup_config(false),
+                DictationCleanupContext::default(),
+                Some(0.5),
+                None,
+            )
+            .await;
+            assert_visible_no_speech(&result);
+        }
     }
 
     #[test]
@@ -8742,6 +11259,251 @@ mod tests {
         assert_eq!(err.code, "dictation_shortcut_unsupported");
     }
 
+    fn lone(code: &str, label: &str) -> DictationShortcutInput {
+        DictationShortcutInput {
+            code: code.to_string(),
+            modifiers: DictationShortcutModifiers::default(),
+            label: label.to_string(),
+            press_count: Some(1),
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_accepts_a_lone_right_modifier() {
+        for (code, label) in [
+            ("ControlRight", "Right Ctrl"),
+            ("AltRight", "Right Alt"),
+            ("ShiftRight", "Right Shift"),
+        ] {
+            let shortcut = lone(code, label)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+            assert_eq!(shortcut.code, code);
+            assert_eq!(shortcut.label, label);
+            assert_eq!(shortcut.modifiers, DictationShortcutModifiers::default());
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_accepts_a_lone_key_windows_sees() {
+        for code in ["F13", "F24", "Pause", "ScrollLock", "Insert"] {
+            lone(code, code)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_needs_a_modifier_for_ordinary_keys() {
+        for code in ["KeyD", "F5", "Space"] {
+            let error = lone(code, code)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_modifier_required", "{code}");
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_accepts_ctrl_alt_and_shift_of_either_side() {
+        for (code, label) in [
+            ("ControlLeft", "Left Ctrl"),
+            ("AltLeft", "Left Alt"),
+            ("ShiftLeft", "Left Shift"),
+            ("ControlRight", "Right Ctrl"),
+            ("AltRight", "Right Alt"),
+            ("ShiftRight", "Right Shift"),
+        ] {
+            let shortcut = lone(code, label)
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{code}: {error:?}"));
+            assert_eq!(shortcut.code, code);
+            assert_eq!(shortcut.press_count, 1);
+        }
+    }
+
+    /// The Mac Fn toggle gesture: a double tap of the same lone modifier.
+    #[test]
+    fn windows_lone_modifiers_take_a_double_tap_and_nothing_else_does() {
+        let double = |code: &str, label: &str| DictationShortcutInput {
+            press_count: Some(2),
+            ..lone(code, label)
+        };
+        let shortcut = double("ControlLeft", "Left Ctrl+Left Ctrl")
+            .into_setting_for_platform(true)
+            .expect("a double-tapped lone modifier");
+        assert_eq!(shortcut.press_count, 2);
+        for (code, label) in [("F13", "F13+F13"), ("Pause", "Pause+Pause")] {
+            let error = double(code, label)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_unsupported", "{code}");
+        }
+    }
+
+    #[test]
+    fn windows_shortcut_input_refuses_the_windows_key_alone() {
+        for code in ["MetaLeft", "MetaRight"] {
+            let error = lone(code, code)
+                .into_setting_for_platform(true)
+                .expect_err(code);
+            assert_eq!(error.code, "dictation_shortcut_unsupported", "{code}");
+        }
+    }
+
+    fn chord(
+        code: &str,
+        label: &str,
+        modifiers: DictationShortcutModifiers,
+    ) -> DictationShortcutInput {
+        DictationShortcutInput {
+            code: code.to_string(),
+            modifiers,
+            label: label.to_string(),
+            press_count: Some(1),
+        }
+    }
+
+    /// The helper captures chords on the keys Windows has beyond the Mac
+    /// table (F13 to F24, Pause, Insert...); they save and survive loading
+    /// on Windows only.
+    #[test]
+    fn windows_shortcut_input_accepts_chords_on_extended_keys() {
+        let control = DictationShortcutModifiers {
+            control: true,
+            ..DictationShortcutModifiers::default()
+        };
+        let shift = DictationShortcutModifiers {
+            shift: true,
+            ..DictationShortcutModifiers::default()
+        };
+        for (code, label, modifiers) in [
+            ("F13", "Ctrl+F13", &control),
+            ("Insert", "Shift+Insert", &shift),
+            ("Pause", "Ctrl+Pause", &control),
+            ("F24", "Ctrl+F24", &control),
+            ("ScrollLock", "Shift+Scroll Lock", &shift),
+        ] {
+            let saved = chord(code, label, modifiers.clone())
+                .into_setting_for_platform(true)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert_eq!(saved.code, code);
+            assert_eq!(&saved.modifiers, modifiers);
+            assert_eq!(saved.label, label);
+            for kind in [
+                DictationShortcutKind::PushToTalk,
+                DictationShortcutKind::Toggle,
+            ] {
+                assert_eq!(
+                    saved.clone().normalized_for_platform(kind, true),
+                    saved,
+                    "{label} survives loading"
+                );
+            }
+            assert!(
+                chord(code, label, modifiers.clone())
+                    .into_setting_for_platform(false)
+                    .is_err(),
+                "{label} stays unsupported on macOS"
+            );
+        }
+        // A right-hand modifier is only a shortcut on its own.
+        assert!(chord("ControlRight", "Shift+Right Ctrl", shift)
+            .into_setting_for_platform(true)
+            .is_err());
+    }
+
+    #[test]
+    fn mac_shortcut_input_keeps_its_own_lone_key_rules() {
+        assert!(lone("ControlRight", "Right Ctrl")
+            .into_setting_for_platform(false)
+            .is_err());
+    }
+
+    #[test]
+    fn windows_default_push_to_talk_is_right_ctrl() {
+        let windows = DictationSettings::default_for_platform(true);
+        assert_eq!(windows.push_to_talk_shortcut.code, "ControlRight");
+        assert_eq!(windows.push_to_talk_shortcut.label, "Right Ctrl");
+        assert_eq!(windows.toggle_shortcut.code, "KeyT");
+        let mac = DictationSettings::default_for_platform(false);
+        assert_eq!(mac.push_to_talk_shortcut.code, "KeyD");
+    }
+
+    #[test]
+    fn windows_saved_lone_shortcuts_survive_loading() {
+        for code in ["ControlRight", "ControlLeft", "AltLeft", "F13", "Pause"] {
+            let saved = lone(code, code).into_setting_for_platform(true).unwrap();
+            let loaded = saved
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::PushToTalk, true);
+            assert_eq!(loaded, saved, "{code}");
+        }
+        let double_tap = DictationShortcutInput {
+            press_count: Some(2),
+            ..lone("ShiftLeft", "Left Shift+Left Shift")
+        }
+        .into_setting_for_platform(true)
+        .unwrap();
+        assert_eq!(
+            double_tap
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::Toggle, true),
+            double_tap
+        );
+        // A saved chord stays a saved chord: an existing install keeps it.
+        let chord = DictationShortcutSetting::control_option_d();
+        assert_eq!(
+            chord
+                .clone()
+                .normalized_for_platform(DictationShortcutKind::PushToTalk, true),
+            chord
+        );
+    }
+
+    #[test]
+    fn push_to_talk_cancel_discards_the_take() {
+        let mut controller = ShortcutActivationController::default();
+        let down = Instant::now();
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                down
+            ),
+            Some(DictationCommand::StartListening)
+        );
+        let later = down + PUSH_TO_TALK_MIN_HOLD * 3;
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Cancel,
+                DictationShortcutKind::PushToTalk,
+                later
+            ),
+            Some(DictationCommand::DiscardListening)
+        );
+        // The release that follows does nothing more.
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Up,
+                DictationShortcutKind::PushToTalk,
+                later
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn helper_cancel_event_maps_to_the_cancel_edge() {
+        assert_eq!(
+            shortcut_key_edge("shortcut_key_cancel"),
+            Some(ShortcutKeyEdge::Cancel)
+        );
+        assert_eq!(
+            shortcut_key_edge("shortcut_key_down"),
+            Some(ShortcutKeyEdge::Down)
+        );
+    }
+
     #[test]
     fn windows_shortcut_input_accepts_supported_chord() {
         let shortcut = DictationShortcutInput {
@@ -8875,6 +11637,7 @@ mod tests {
             microphone: DictationMicrophoneSetting::default(),
             style: DictationStyle::Standard,
             language: None,
+            ..DictationSettings::default()
         };
 
         assert!(validate_shortcut_update(
@@ -9004,49 +11767,6 @@ mod tests {
         assert_eq!(controller.helper_take_id.as_deref(), Some("take-a"));
         assert!(controller.pending_helper_take_id.is_none());
         assert!(controller.helper_is_listening);
-    }
-
-    #[test]
-    fn signed_out_pending_start_cleanup_preserves_the_confirmed_take() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-a"));
-        controller.prepare_helper_start("take-b");
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(true)
-        );
-        assert_eq!(controller.helper_take_id.as_deref(), Some("take-a"));
-        assert!(controller.pending_helper_take_id.is_none());
-        assert!(controller.helper_is_listening);
-    }
-
-    #[test]
-    fn signed_out_cleanup_ignores_an_already_rejected_start() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-a"));
-        controller.prepare_helper_start("take-b");
-        assert_eq!(
-            controller.finish_for_helper_event(Some("take-b"), Some("take-a")),
-            HelperLifecycleDisposition::EmitOnly
-        );
-
-        assert_eq!(controller.finish_start_for_auth_failure("take-b"), None);
-        assert_eq!(controller.helper_take_id.as_deref(), Some("take-a"));
-        assert!(controller.helper_is_listening);
-    }
-
-    #[test]
-    fn signed_out_cleanup_finishes_the_confirmed_start_it_owns() {
-        let mut controller = ShortcutActivationController::default();
-        controller.set_helper_listening(true, Some("take-b"));
-
-        assert_eq!(
-            controller.finish_start_for_auth_failure("take-b"),
-            Some(false)
-        );
-        assert!(controller.helper_take_id.is_none());
-        assert!(!controller.helper_is_listening);
     }
 
     #[test]
@@ -9599,7 +12319,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Paste this transcript.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9625,7 +12345,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Here's the API key to Poncho.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9651,7 +12371,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "User performed a very long dictation session. Instead of producing a full transcription, the app emitted an error.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9673,7 +12393,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Ums and uhs.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9696,7 +12416,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Um, uh.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
             DictationStyle::Standard,
@@ -9730,7 +12450,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Um, uh, Send this, please.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9895,7 +12615,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Hey, Clovy, summarize the open document.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9943,36 +12663,12 @@ mod tests {
     }
 
     #[test]
-    fn hey_clovy_detection_requires_first_two_words_and_keeps_june_aliases() {
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey Clovy open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey Clovie open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("Hey June open settings").as_deref(),
-            Some("open settings")
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("well hey clovy open"),
-            None
-        );
-        assert_eq!(
-            agent_session_prompt_from_dictation("hey juniper open"),
-            None
-        );
-    }
-
-    #[test]
-    fn empty_transcription_discards_silently() {
+    fn empty_transcription_discards_with_a_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             None,
             DictationStyle::Standard,
@@ -9984,32 +12680,145 @@ mod tests {
         );
         assert!(outcome.transcript.is_none());
         let event = outcome.event.expect("empty capture emits an event");
-        assert!(is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
-    fn empty_transcription_with_detected_audio_is_visible_error() {
+    fn empty_transcription_with_detected_audio_is_still_no_speech() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
             DictationStyle::Standard,
         );
 
+        // The level is diagnostic only (ditado-rapido D5).
         let event = outcome.event.expect("empty capture emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["message"], "No speech detected.");
+        assert_eq!(event["payload"]["silent"], false);
+    }
+
+    #[test]
+    fn hud_snapshot_replays_candidate_and_pinned_target_without_audio_restarting_it() {
+        let a = serde_json::json!({"app": "Finder", "bundleIdentifier": "com.apple.finder", "processIdentifier": 1});
+        let b = serde_json::json!({"app": "Terminal", "bundleIdentifier": "com.apple.Terminal", "processIdentifier": 2});
+        let event = |kind: &str, target: serde_json::Value| {
+            serde_json::json!({"type": kind, "payload": {"takeId": "take-1", "target": target}})
+                .to_string()
+        };
+        let listening = event("listening_started", a);
+        let focus = event("focus_target", b.clone());
+        let current =
+            latest_hud_snapshot(Some(&listening), Some("focus_target"), Some(&focus)).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(snapshot["type"], "listening_started");
+        assert_eq!(snapshot["payload"]["target"], b);
+        let finalizing = event("finalizing_transcript", b.clone());
+        let current = latest_hud_snapshot(
+            Some(&current),
+            Some("finalizing_transcript"),
+            Some(&finalizing),
+        )
+        .unwrap();
+        let audio = serde_json::json!({"type": "audio_level", "payload": {"takeId": "take-1", "level": "0.2"}}).to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("audio_level"), Some(&audio)).unwrap();
+        let transcript =
+            serde_json::json!({"type": "final_transcript", "payload": {"takeId": "take-1"}})
+                .to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("final_transcript"), Some(&transcript))
+                .unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert_eq!(snapshot["type"], "final_transcript");
+        assert_eq!(snapshot["payload"]["target"], b);
+        assert!(latest_hud_snapshot(Some(&current), Some("recording_discarded"), None).is_none());
+        let next =
+            serde_json::json!({"type": "listening_started", "payload": {"takeId": "take-2"}})
+                .to_string();
+        let current =
+            latest_hud_snapshot(Some(&current), Some("listening_started"), Some(&next)).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&current).unwrap();
+        assert!(snapshot["payload"].get("target").is_none());
+    }
+
+    #[test]
+    fn hud_focus_snapshot_never_changes_another_take_or_processing_destination() {
+        let prior = serde_json::json!({"type": "listening_started", "payload": {"takeId": "new", "target": null}}).to_string();
+        let stale = serde_json::json!({"type": "focus_target", "payload": {"takeId": "old", "target": {"app": "stale"}}}).to_string();
+        let current =
+            latest_hud_snapshot(Some(&prior), Some("focus_target"), Some(&stale)).unwrap();
         assert_eq!(
-            event["payload"]["message"],
-            "Dictation detected audio but produced no text. Try again."
+            serde_json::from_str::<serde_json::Value>(&current).unwrap()["payload"]["target"],
+            serde_json::Value::Null
         );
-        let observed = event["payload"]["observedAudioLevel"]
-            .as_f64()
-            .expect("observed audio level");
-        assert!((observed - 0.04).abs() < 0.001);
-        assert!(!is_silent_transcription_error(&event));
+        let prior = prior.replace("listening_started", "finalizing_transcript");
+        let focus = stale.replace("old", "new");
+        let current =
+            latest_hud_snapshot(Some(&prior), Some("focus_target"), Some(&focus)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&current).unwrap()["payload"]["target"],
+            serde_json::Value::Null
+        );
+        assert!(helper_event_serializes_with_commands(Some("focus_target")));
+        assert_eq!(indicator_action_for_event(Some("focus_target")), None);
+    }
+
+    #[tokio::test]
+    async fn history_uses_recording_ready_target_for_staged_and_normal_writes() {
+        let event = serde_json::json!({ "type": "recording_ready", "payload": {
+            "path": "/tmp/fixture.m4a", "targetBundleIdentifier": "org.example.first"
+        }});
+        let recording = recording_ready_info_from_event(&event).unwrap();
+        let pinned = history_target(&recording);
+        // A later event from another app must not change the pinned target.
+        let later = serde_json::json!({ "type": "recording_ready", "payload": {
+            "path": "/tmp/fixture.m4a", "targetBundleIdentifier": "org.example.second"
+        }});
+        assert_ne!(
+            history_target(&recording_ready_info_from_event(&later).unwrap()),
+            pinned
+        );
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run_migrations(&pool).await.unwrap();
+        let repos = crate::db::repositories::Repositories::new(pool);
+        let transcript = TranscriptionProviderResult {
+            text: "short".into(),
+            language: None,
+            provider: "test".into(),
+        };
+        stage_history_with_repositories(&repos, &transcript, "default", pinned.as_deref())
+            .await
+            .unwrap()
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        let transcript = TranscriptionProviderResult {
+            text: "normal".into(),
+            ..transcript
+        };
+        persist_history_with_repositories(&repos, &transcript, "default", pinned.as_deref())
+            .await
+            .unwrap();
+        let rows = repos
+            .list_dictation_history("default", 10)
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| row.app_bundle_id.as_deref() == Some("org.example.first")));
     }
 
     #[test]
@@ -10164,6 +12973,120 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_take_cancellations_have_one_winner() {
+        for processing in [false, true] {
+            let id = format!("cancel-race-{}", uuid::Uuid::new_v4());
+            let gate = &crate::update_gate::UPDATE_GATE;
+            gate.begin_dictation_take(&id).unwrap();
+            let take = DictationTakeState::default().begin(id.clone());
+            if processing {
+                assert!(take.try_begin_processing());
+            }
+            let cancellation = take.inner.cancellation.subscribe();
+            let barrier = std::sync::Barrier::new(4);
+            let winners = std::thread::scope(|scope| {
+                let attempts: Vec<_> = (0..4)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            take.cancel()
+                        })
+                    })
+                    .collect();
+                attempts
+                    .into_iter()
+                    .map(|attempt| attempt.join().unwrap())
+                    .filter(|cancelled| *cancelled)
+                    .count()
+            });
+            assert_eq!(winners, 1);
+            assert_eq!(take.state(), DICTATION_TAKE_CANCELLED);
+            assert!(*cancellation.borrow());
+            assert!(!gate.has_dictation_take(&id));
+            assert!(!take.try_begin_processing());
+            assert!(take.try_begin_delivery().is_none());
+            assert!(!take.cancel());
+        }
+    }
+
+    #[test]
+    fn take_cancellation_races_processing_and_delivery_without_reopening_authority() {
+        for delivery in [false, true] {
+            for _ in 0..16 {
+                let id = format!("transition-race-{}", uuid::Uuid::new_v4());
+                let gate = &crate::update_gate::UPDATE_GATE;
+                gate.begin_dictation_take(&id).unwrap();
+                let take = DictationTakeState::default().begin(id.clone());
+                if delivery {
+                    assert!(take.try_begin_processing());
+                }
+                let cancellation = take.inner.cancellation.subscribe();
+                let barrier = std::sync::Barrier::new(2);
+                let (cancelled, transitioned) = std::thread::scope(|scope| {
+                    let cancel = scope.spawn(|| {
+                        barrier.wait();
+                        take.cancel()
+                    });
+                    let transition = scope.spawn(|| {
+                        barrier.wait();
+                        if delivery {
+                            take.try_begin_delivery().is_some()
+                        } else {
+                            take.try_begin_processing()
+                        }
+                    });
+                    (cancel.join().unwrap(), transition.join().unwrap())
+                });
+                if delivery {
+                    assert_ne!(cancelled, transitioned);
+                } else {
+                    // A Processing winner still leaves the take cancellable.
+                    assert!(cancelled);
+                }
+                assert_eq!(*cancellation.borrow(), cancelled);
+                assert_eq!(gate.has_dictation_take(&id), !cancelled);
+                assert_eq!(
+                    take.state(),
+                    if cancelled {
+                        DICTATION_TAKE_CANCELLED
+                    } else {
+                        DICTATION_TAKE_DELIVERING
+                    }
+                );
+                assert!(!take.cancel());
+                assert!(!take.try_begin_processing());
+                assert!(take.try_begin_delivery().is_none());
+                if !cancelled {
+                    // Only this synthetic paste still owns a gate entry.
+                    gate.end_dictation_take(&id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_refuses_delivering_terminal_and_unknown_take_states() {
+        for phase in [
+            DICTATION_TAKE_DELIVERING,
+            DICTATION_TAKE_CANCELLED,
+            4,
+            u8::MAX,
+        ] {
+            let id = format!("cancel-refusal-{}", uuid::Uuid::new_v4());
+            let gate = &crate::update_gate::UPDATE_GATE;
+            gate.begin_dictation_take(&id).unwrap();
+            let take = DictationTakeState::default().begin(id.clone());
+            take.inner.state.store(phase, Ordering::SeqCst);
+            let cancellation = take.inner.cancellation.subscribe();
+            assert!(!take.cancel());
+            assert_eq!(take.state(), phase);
+            assert!(!*cancellation.borrow());
+            assert!(gate.has_dictation_take(&id));
+            gate.end_dictation_take(&id);
+        }
+    }
+
+    #[test]
     fn a_late_ready_event_recovers_the_terminal_cancelled_take() {
         let state = DictationTakeState::default();
         let cancelled = state.begin("take-1".to_string());
@@ -10205,113 +13128,6 @@ mod tests {
             state.claim_finalized(Some("take-1")),
             DictationFinalizedTake::Duplicate
         ));
-    }
-
-    #[test]
-    fn a_new_helper_command_invalidates_an_older_auth_result() {
-        let state = DictationTakeState::default();
-        let (first, ()) = state.run_new_helper_command(|_| ());
-        assert!(state.run_if_current_helper_command(first, || ()).is_some());
-
-        let (second, ()) = state.run_new_helper_command(|_| ());
-
-        assert!(state.run_if_current_helper_command(first, || ()).is_none());
-        assert!(state.run_if_current_helper_command(second, || ()).is_some());
-    }
-
-    #[test]
-    fn start_attempt_waits_for_current_auth_discard_to_finish() {
-        use std::sync::mpsc;
-
-        let state = Arc::new(DictationTakeState::default());
-        let controller = Arc::new(Mutex::new(ShortcutActivationController::default()));
-        let (first, ()) = state.run_new_helper_command(|_| ());
-        let (auth_entered_tx, auth_entered_rx) = mpsc::channel();
-        let (release_auth_tx, release_auth_rx) = mpsc::channel();
-        let auth_state = Arc::clone(&state);
-        let auth_controller = Arc::clone(&controller);
-        let auth = thread::spawn(move || {
-            let result = auth_state.run_if_current_helper_command(first, || {
-                auth_entered_tx
-                    .send(())
-                    .expect("test should observe the auth discard");
-                release_auth_rx
-                    .recv()
-                    .expect("test should release the auth discard");
-                auth_controller
-                    .lock()
-                    .expect("shortcut controller should lock")
-                    .reset();
-            });
-            assert!(result.is_some());
-        });
-        auth_entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("auth discard should acquire the generation lock");
-
-        let (start_attempted_tx, start_attempted_rx) = mpsc::channel();
-        let (start_finished_tx, start_finished_rx) = mpsc::channel();
-        let start_state = Arc::clone(&state);
-        let start_controller = Arc::clone(&controller);
-        let start = thread::spawn(move || {
-            start_attempted_tx
-                .send(())
-                .expect("test should observe the replacement start attempt");
-            let (generation, ()) = start_state
-                .run_new_helper_command_if(
-                    || {
-                        let mut controller = start_controller
-                            .lock()
-                            .expect("shortcut controller should lock");
-                        let command = controller.handle_edge(
-                            ShortcutKeyEdge::Down,
-                            DictationShortcutKind::PushToTalk,
-                            Instant::now(),
-                        )?;
-                        controller.prepare_helper_start("take-b");
-                        Some(command)
-                    },
-                    |_, command| {
-                        assert_eq!(command, DictationCommand::StartListening);
-                    },
-                )
-                .expect("replacement shortcut should start");
-            start_finished_tx
-                .send(generation)
-                .expect("test should observe the replacement start");
-        });
-        start_attempted_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("replacement start should reach the serialized operation");
-        assert!(matches!(
-            start_finished_rx.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-
-        release_auth_tx
-            .send(())
-            .expect("test should release the auth discard");
-        auth.join().expect("auth discard thread should finish");
-        start
-            .join()
-            .expect("replacement start thread should finish");
-        assert_eq!(
-            start_finished_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("replacement start should finish after auth discard"),
-            first.wrapping_add(1)
-        );
-        assert_eq!(
-            controller
-                .lock()
-                .expect("shortcut controller should lock")
-                .handle_edge(
-                    ShortcutKeyEdge::Up,
-                    DictationShortcutKind::PushToTalk,
-                    Instant::now() + PUSH_TO_TALK_MIN_HOLD,
-                ),
-            Some(DictationCommand::StopAndPaste)
-        );
     }
 
     #[test]
@@ -10530,6 +13346,7 @@ mod tests {
     fn low_speech_evidence_requires_both_low_audio_signals() {
         let info =
             |speech_confidence, speech_analysis_status, observed_audio_level| RecordingReadyInfo {
+                audio_seconds: None,
                 audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
                 take_id: None,
                 observed_audio_level,
@@ -10569,6 +13386,7 @@ mod tests {
     #[test]
     fn short_capture_is_quarantined_regardless_of_level_but_analysis_failure_fails_open() {
         let info = |status, speech_confidence| RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(0.0305),
@@ -10583,6 +13401,7 @@ mod tests {
             None,
         )));
         let loud_short_capture = RecordingReadyInfo {
+            audio_seconds: None,
             audio_path: PathBuf::from("/tmp/clovy-dictation-test.m4a"),
             take_id: None,
             observed_audio_level: Some(DICTATION_AUDIO_ACTIVITY_THRESHOLD),
@@ -10609,7 +13428,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "Oh, yeah.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10632,19 +13451,20 @@ mod tests {
     }
 
     #[test]
-    fn low_speech_evidence_cannot_emit_an_agent_session_prompt() {
+    fn greeting_is_plain_dictation_and_low_evidence_blocks_paste() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
-                text: "Hey Clovy delete this note.".to_string(),
+                text: "Hey Clovy open settings.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
         );
+        assert!(outcome.event.is_none());
         assert_eq!(
-            outcome.event.as_ref().and_then(|event| event.get("type")),
-            Some(&serde_json::json!("agent_session_prompt"))
+            outcome.helper_command,
+            serde_json::json!({"type":"paste_text","text":"Hey Clovy open settings."})
         );
 
         let outcome = quarantine_low_speech_evidence_outcome(outcome, true);
@@ -10666,7 +13486,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "User report summary: the user said hello.".to_string(),
                 language: Some("en".to_string()),
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10697,7 +13517,7 @@ mod tests {
             Ok(TranscriptionProviderResult {
                 text: "   ".to_string(),
                 language: None,
-                provider: crate::providers::VENICE_PROVIDER.to_string(),
+                provider: crate::providers::PROVIDER_GROQ.to_string(),
             }),
             Some(0.0305),
             DictationStyle::Standard,
@@ -10789,6 +13609,136 @@ mod tests {
         assert!(!entry.to_string().contains("Sensitive dictated sentence"));
     }
 
+    fn notepad(hwnd: i64, pid: u32) -> Option<(String, String)> {
+        (hwnd == 5678 && pid == 1234)
+            .then(|| ("Bloco de Notas".to_string(), "notepad.exe".to_string()))
+    }
+
+    #[test]
+    fn windows_start_and_paste_events_name_the_target_app() {
+        for event_type in ["listening_started", "paste_target"] {
+            let mut event = serde_json::json!({
+                "type": event_type,
+                "payload": {
+                    "takeId": "take-1",
+                    "targetProcessId": 1234,
+                    "targetWindowHandle": 5678,
+                    "targetWindowTitle": "notas.txt - Bloco de Notas",
+                }
+            });
+            complete_windows_target(&mut event, notepad);
+            assert_eq!(
+                event["payload"]["target"],
+                serde_json::json!({
+                    "app": "Bloco de Notas",
+                    "bundleIdentifier": "notepad.exe",
+                    "processIdentifier": 1234,
+                }),
+                "{event_type}"
+            );
+        }
+    }
+
+    /// Started in app A, stopped in app B: the helper pins B at the stop and
+    /// says so in `finalizing_transcript`, which pins the indicator.
+    #[test]
+    fn the_windows_stop_names_the_app_the_text_goes_to() {
+        let mut event = serde_json::json!({
+            "type": "finalizing_transcript",
+            "payload": {
+                "takeId": "take-1",
+                "targetProcessId": 1234,
+                "targetWindowHandle": 5678,
+            }
+        });
+        complete_windows_target(&mut event, notepad);
+        assert_eq!(event["payload"]["target"]["app"], "Bloco de Notas");
+        assert_eq!(
+            event["payload"]["target"]["bundleIdentifier"],
+            "notepad.exe"
+        );
+    }
+
+    #[test]
+    fn a_windows_target_is_left_alone_when_unknown_or_already_named() {
+        let mut unknown = serde_json::json!({
+            "type": "listening_started",
+            "payload": { "targetProcessId": 1, "targetWindowHandle": 2 }
+        });
+        complete_windows_target(&mut unknown, notepad);
+        assert!(unknown["payload"].get("target").is_none());
+
+        let named = serde_json::json!({"app": "Terminal", "bundleIdentifier": "wt.exe"});
+        let mut already = serde_json::json!({
+            "type": "paste_target",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678, "target": named }
+        });
+        complete_windows_target(&mut already, notepad);
+        assert_eq!(already["payload"]["target"]["app"], "Terminal");
+
+        let mut other = serde_json::json!({
+            "type": "recording_ready",
+            "payload": { "targetProcessId": 1234, "targetWindowHandle": 5678 }
+        });
+        complete_windows_target(&mut other, notepad);
+        assert!(other["payload"].get("target").is_none());
+    }
+
+    #[test]
+    fn dictation_event_log_keeps_trigger_diagnostics_without_typed_content() {
+        let event = serde_json::json!({
+            "type": "shortcut_trigger_diagnostic",
+            "payload": {
+                "kind": "push_to_talk",
+                "trigger": {
+                    "key": "ControlLeft",
+                    "edge": "up",
+                    "injected": false,
+                    "alone": true,
+                    "heldMs": 240,
+                    "decision": "up",
+                    "action": "push_end",
+                    "reason": "clean",
+                    "typed": "secret"
+                }
+            }
+        });
+
+        let entry = dictation_event_log_entry("shortcut_trigger_diagnostic", &event);
+
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["key"], "ControlLeft");
+        assert_eq!(entry["trigger"]["heldMs"], 240);
+        assert_eq!(entry["trigger"]["action"], "push_end");
+        assert_eq!(entry["trigger"]["injected"], false);
+        assert!(!entry.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn a_shortcut_edge_logs_what_the_app_decided_and_why() {
+        let short = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Up,
+            Some(DictationCommand::DiscardListening),
+            Some(Duration::from_millis(90)),
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &short);
+        assert_eq!(entry["kind"], "push_to_talk");
+        assert_eq!(entry["trigger"]["edge"], "up");
+        assert_eq!(entry["trigger"]["action"], "discard");
+        assert_eq!(entry["trigger"]["reason"], "short_hold");
+        assert_eq!(entry["trigger"]["heldMs"], 90);
+
+        let ignored = shortcut_edge_log_event(
+            DictationShortcutKind::PushToTalk,
+            ShortcutKeyEdge::Down,
+            None,
+            None,
+        );
+        let entry = dictation_event_log_entry("shortcut_edge", &ignored);
+        assert_eq!(entry["trigger"]["action"], "none");
+    }
+
     #[test]
     fn dictation_event_log_preserves_unconfirmed_input_submission_details() {
         let event = serde_json::json!({
@@ -10857,7 +13807,7 @@ mod tests {
     }
 
     #[test]
-    fn no_speech_error_with_detected_audio_is_visible_error() {
+    fn no_speech_error_with_detected_audio_is_visible_no_speech() {
         let outcome = outcome_from_transcription_result(
             Err(AppError::new("june_request_failed", "no_speech")),
             Some(0.2),
@@ -10865,10 +13815,8 @@ mod tests {
         );
 
         let event = outcome.event.expect("no speech emits an event");
-        assert_eq!(event["payload"]["code"], "dictation_audio_without_text");
-        assert_eq!(event["payload"]["underlyingCode"], "june_request_failed");
-        assert_eq!(event["payload"]["underlyingMessage"], "no_speech");
-        assert!(!is_silent_transcription_error(&event));
+        assert_eq!(event["payload"]["code"], "no_speech");
+        assert_eq!(event["payload"]["silent"], false);
     }
 
     #[test]
@@ -10880,31 +13828,235 @@ mod tests {
     }
 
     #[test]
-    fn dictation_accepts_openai_provider() {
+    fn parakeet_review_admission_selection_survives_helper_acknowledgement() {
+        for (id, missing_started) in [
+            ("admitted-local", false),
+            ("admitted-local", true),
+            (UNTAGGED_DICTATION_TAKE, false),
+        ] {
+            let state = DictationTakeState::default();
+            let mut settings = crate::providers::default_settings_for_tests();
+            settings.transcription_provider = "local".into();
+            settings.transcription_model = "parakeet-ultra".into();
+            state.remember_admitted_settings(id, settings);
+            // The helper acknowledges later, while the current selection is Groq.
+            let take = if missing_started {
+                match state.claim_finalized(Some("admitted-local")) {
+                    DictationFinalizedTake::Start(take) => take,
+                    _ => panic!("admitted take must be claimed"),
+                }
+            } else {
+                state.begin("admitted-local".into())
+            };
+            assert_eq!(
+                take.inner.transcription_settings.transcription_provider,
+                "local"
+            );
+            assert_eq!(
+                take.inner.transcription_settings.transcription_model,
+                "parakeet-ultra"
+            );
+            let backend = crate::providers::transcription::effective_transcription_backend(
+                &take.inner.transcription_settings,
+                Some("/fixture/model".into()),
+                true,
+                || panic!("Local admission must not consult Groq credentials"),
+            )
+            .unwrap();
+            assert!(matches!(
+                backend,
+                crate::providers::transcription::TranscriptionBackend::Local { .. }
+            ));
+            assert!(state.admitted_settings.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn parakeet_review_admission_does_not_replace_current_take_before_acknowledgement() {
+        let state = DictationTakeState::default();
+        let current = state.begin("current".into());
+        let mut local = crate::providers::default_settings_for_tests();
+        local.transcription_provider = "local".into();
+        local.transcription_model = "parakeet-ultra".into();
+        state.remember_admitted_settings("replacement", local.clone());
+        assert_eq!(state.current_take_id().as_deref(), Some("current"));
+        assert_eq!(current.state(), DICTATION_TAKE_CAPTURING);
+        // A rejected send forgets only its admission, without cancelling the running take.
+        state.remember_admitted_settings("unsent", local);
+        state.forget_admitted_settings(Some("unsent"));
+        assert_eq!(state.admitted_settings.lock().unwrap().len(), 1);
+        assert_eq!(current.state(), DICTATION_TAKE_CAPTURING);
+        let replacement = state.begin("replacement".into());
+        assert_eq!(current.state(), DICTATION_TAKE_CANCELLED);
         assert_eq!(
-            dictation_transcription_provider(crate::providers::OPENAI_PROVIDER.to_string())
-                .expect("openai should be accepted"),
-            crate::providers::OPENAI_PROVIDER
+            replacement
+                .inner
+                .transcription_settings
+                .transcription_provider,
+            "local"
+        );
+        assert!(state.admitted_settings.lock().unwrap().is_empty());
+        state.remember_admitted_settings("pending", crate::providers::default_settings_for_tests());
+        state.forget_admitted_settings(None);
+        assert!(state.admitted_settings.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn parakeet_review_dictation_keeps_its_backend_across_an_await() {
+        use crate::providers::local_transcriber::{
+            NetworkSentinel, LOCAL_TRANSCRIBER_FAILED_MESSAGE,
+        };
+        use crate::providers::{
+            local_transcriber::{FakeLocalTranscriber, TEST_LOCAL},
+            transcription::{TranscriptionBackend, TEST_BACKEND},
+        };
+        let sentinel = NetworkSentinel::start().await;
+        for fail in [false, true] {
+            let fake = Arc::new(FakeLocalTranscriber {
+                fail,
+                ..Default::default()
+            });
+            crate::providers::TEST_ORIGIN
+                .scope(
+                    sentinel.origin.clone(),
+                    TEST_BACKEND.scope(
+                        TranscriptionBackend::Local {
+                            model_dir: "/fixture/model".into(),
+                        },
+                        async {
+                            let transcriber = ServiceDictationTranscriber {
+                                backend: crate::providers::transcription::current_backend()
+                                    .unwrap(),
+                            };
+                            tokio::task::yield_now().await;
+                            TEST_BACKEND
+                                .scope(
+                                    TranscriptionBackend::Groq {
+                                        key: "fixture-key".into(),
+                                        model: "whisper-large-v3".into(),
+                                    },
+                                    TEST_LOCAL.scope(fake.clone(), async {
+                                        let result = transcriber
+                                            .transcribe(DictateTranscribeRequest {
+                                                audio_path: "/fixture/take.m4a".into(),
+                                                language: Some("pt".into()),
+                                                context: None,
+                                                session_id: "session".into(),
+                                                utterance_id: "take".into(),
+                                            })
+                                            .await;
+                                        if fail {
+                                            // D4 ends the helper on a switch. Its failure must
+                                            // remain actionable in the HUD, never become Groq.
+                                            let outcome = outcome_from_raw_transcription_result(
+                                                result,
+                                                Some(0.2),
+                                            );
+                                            assert!(outcome.transcript.is_none());
+                                            assert_eq!(
+                                                outcome.helper_command,
+                                                serde_json::json!({"type":"discard_recording"})
+                                            );
+                                            let event = outcome
+                                                .event
+                                                .expect("Local failure must be visible");
+                                            assert_eq!(
+                                                event["payload"]["code"],
+                                                "local_transcriber_failed"
+                                            );
+                                            assert_eq!(
+                                                event["payload"]["message"],
+                                                LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                                            );
+                                        } else {
+                                            let transcript = result.expect(
+                                                "the captured Local backend must be retained",
+                                            );
+                                            assert_eq!(transcript.provider, "local");
+                                            assert_eq!(transcript.text, "Olá mundo");
+                                        }
+                                        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+                                    }),
+                                )
+                                .await;
+                        },
+                    ),
+                )
+                .await;
+        }
+        sentinel.assert_unused();
+    }
+
+    #[tokio::test]
+    async fn local_dictation_passes_m4a_and_language_without_groq_requests() {
+        use crate::providers::{
+            local_transcriber::{FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL},
+            transcription::{TranscriptionBackend, TEST_BACKEND},
+            TEST_ORIGIN,
+        };
+        let sentinel = NetworkSentinel::start().await;
+        for fail in [false, true] {
+            let fake = Arc::new(FakeLocalTranscriber {
+                fail,
+                ..Default::default()
+            });
+            TEST_ORIGIN
+                .scope(
+                    sentinel.origin.clone(),
+                    TEST_BACKEND.scope(
+                        TranscriptionBackend::Local {
+                            model_dir: "/fixture/model".into(),
+                        },
+                        TEST_LOCAL.scope(fake.clone(), async {
+                            let result = ServiceDictationTranscriber {
+                                backend: crate::providers::transcription::current_backend()
+                                    .unwrap(),
+                            }
+                            .transcribe(DictateTranscribeRequest {
+                                audio_path: "/fixture/take.m4a".into(),
+                                language: Some("pt".into()),
+                                context: None,
+                                session_id: "session".into(),
+                                utterance_id: "utterance".into(),
+                            })
+                            .await;
+                            if fail {
+                                assert_eq!(result.unwrap_err().code, "local_transcriber_failed");
+                            } else {
+                                assert_eq!(result.unwrap().text, "Olá mundo");
+                            }
+                            assert_eq!(
+                                *fake.calls.lock().unwrap(),
+                                vec![(PathBuf::from("/fixture/take.m4a"), Some("pt".into()))]
+                            );
+                        }),
+                    ),
+                )
+                .await;
+        }
+        sentinel.assert_unused();
+    }
+
+    #[test]
+    fn dictation_local_without_model_reports_install_action() {
+        let error = dictation_transcription_provider("local".into()).unwrap_err();
+        assert_eq!(
+            error.code,
+            if crate::providers::local_transcription_supported() {
+                "local_model_not_installed"
+            } else {
+                "local_transcription_unsupported"
+            }
         );
     }
 
     #[test]
-    fn dictation_context_guides_clean_hands_free_typing() {
-        let context = dictation_transcription_context(DictationStyle::Standard);
-
-        assert!(context.contains("hands-free dictation"));
-        assert!(context.contains("Remove filler sounds"));
-        assert!(context.contains("quote/unquote"));
-        assert!(context.contains("actual quotation marks"));
-        assert!(context.contains("Do not remove intentional articles"));
-    }
-
-    #[test]
-    fn dictation_context_includes_selected_style() {
-        let context = dictation_transcription_context(DictationStyle::CasualLowercase);
-
-        assert!(context.contains("Writing style: casual lowercase"));
-        assert!(context.contains("Use lowercase"));
+    fn dictation_accepts_groq_provider() {
+        assert_eq!(
+            dictation_transcription_provider(crate::providers::PROVIDER_GROQ.to_string())
+                .expect("groq should be accepted"),
+            crate::providers::PROVIDER_GROQ
+        );
     }
 
     #[test]
@@ -11199,25 +14351,6 @@ mod tests {
     }
 
     #[test]
-    fn unpunctuated_echo_of_a_long_chunk_triggers_a_retry() {
-        let input = jun_212_style_transcript();
-        let chunk = &input[..500];
-
-        // The echo failure: same run-on words back, zero punctuation.
-        assert!(cleaned_chunk_lacks_sentence_punctuation(chunk, chunk));
-        // A punctuated cleaning passes.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            chunk,
-            "The side nav looks really sharp. Meeting should be used sparingly."
-        ));
-        // A short chunk may legitimately be one unterminated sentence.
-        assert!(!cleaned_chunk_lacks_sentence_punctuation(
-            "add milk to the shopping list",
-            "add milk to the shopping list"
-        ));
-    }
-
-    #[test]
     fn joining_cleaned_chunks_preserves_boundary_line_breaks() {
         let chunks = vec![
             "First topic wrapped up.\n\n".to_string(),
@@ -11290,80 +14423,164 @@ mod tests {
             "type": "error",
             "payload": {
                 "code": "transcription_empty",
-                "message": "OpenAI did not return any transcript text."
+                "message": "Groq did not return any transcript text."
             }
         });
 
         assert!(is_silent_transcription_error(&event));
     }
+}
 
-    #[test]
-    fn dictation_not_signed_in_event_carries_actionable_code() {
-        let mut event = dictation_not_signed_in_event();
-        annotate_silent_error(&mut event);
-
-        assert_eq!(event["type"], "error");
-        assert_eq!(event["payload"]["code"], "not_signed_in");
-        assert_eq!(event["payload"]["message"], "Sign in to use dictation.");
-        // Must be classified as non-silent so the HUD renders the actionable
-        // message instead of the "Nothing recorded" terminal state.
-        assert_eq!(event["payload"]["silent"], false);
-    }
-
-    #[test]
-    fn dictation_auth_gate_keeps_recording_on_transient_failure() {
-        let transient: Result<String, AppError> = Err(AppError::new(
-            "auth_refresh_unavailable",
-            "Couldn't reach your account.",
-        ));
-        assert!(matches!(
-            classify_dictation_auth(&transient),
-            DictationAuthGate::Unavailable(_)
-        ));
-    }
-
-    #[test]
-    fn dictation_auth_gate_signs_out_on_genuine_rejection() {
-        let signed_out: Result<String, AppError> =
-            Err(AppError::new("signed_out", "Not signed in."));
-        assert!(matches!(
-            classify_dictation_auth(&signed_out),
-            DictationAuthGate::SignedOut
-        ));
-        let expired: Result<String, AppError> = Err(AppError::new(
-            "session_expired",
-            "Your session expired. Sign in again.",
-        ));
-        assert!(matches!(
-            classify_dictation_auth(&expired),
-            DictationAuthGate::SignedOut
-        ));
-    }
-
-    #[test]
-    fn dictation_auth_gate_proceeds_with_a_token() {
-        let ok: Result<String, AppError> = Ok("token".to_string());
-        assert!(matches!(
-            classify_dictation_auth(&ok),
-            DictationAuthGate::Proceed
-        ));
-    }
-
-    #[test]
-    fn transient_auth_error_renders_as_a_visible_hud_error() {
-        // The kept-recording branch emits app_error_event for the transient
-        // failure; it must not be silent-classified, or the HUD would swallow
-        // it and the user would see nothing after their dictation vanished.
-        let error = AppError::new(
-            "auth_refresh_unavailable",
-            "Couldn't reach your account. Try again in a moment.",
+#[cfg(test)]
+mod agent_management_tests {
+    use super::*;
+    #[tokio::test]
+    async fn deleting_history_is_atomic_and_profile_qualified() {
+        let pool = sqlx_sqlite::SqlitePool::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query::query("CREATE TABLE dictation_history(id TEXT PRIMARY KEY,profile TEXT NOT NULL,text TEXT NOT NULL)").execute(&pool).await.unwrap();
+        sqlx::query::query(
+            "INSERT INTO dictation_history VALUES('same-id','owner','Synthetic private text')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_history_for_profile(&pool, "other", "same-id")
+                .await
+                .unwrap_err()
+                .code,
+            "dictation_not_found"
         );
-        let mut event = app_error_event(error);
-        annotate_silent_error(&mut event);
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM dictation_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        delete_history_for_profile(&pool, "owner", "same-id")
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM dictation_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    #[test]
+    fn composer_delivery_never_runs_wake_word_actions_or_pastes_quarantined_text() {
+        let transcript = TranscriptionProviderResult {
+            text: "Hey Clovy inspect notes".into(),
+            language: None,
+            provider: "fixture".into(),
+        };
+        let outcome = DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({"type":"discard_recording"}),
+            event: Some(
+                serde_json::json!({"type":"agent_session_prompt","payload":{"prompt":"inspect notes"}}),
+            ),
+            transcript: Some(transcript),
+            quarantine_transcript: None,
+        };
+        assert_eq!(
+            agent_composer_text(&outcome),
+            Some("Hey Clovy inspect notes")
+        );
+        let outcome = quarantine_low_speech_evidence_outcome(outcome, true);
+        assert_eq!(agent_composer_text(&outcome), None);
+    }
+    #[test]
+    fn wrong_take_and_late_confirmations_cannot_resurrect_cancelled_delivery() {
+        let state = HelperState::default();
+        let mut target = agent_dictation_target("owner", "conversation-a");
+        target.phase = "listening".into();
+        *state.agent_take.lock().unwrap() = Some(target.clone());
+        set_agent_dictation_phase(&state, "other-take", "delivering", None);
+        assert_eq!(
+            state.agent_take.lock().unwrap().as_ref().unwrap().phase,
+            "listening"
+        );
+        set_agent_dictation_phase(&state, &target.take_id, "cancelled", None);
+        set_agent_dictation_phase(&state, &target.take_id, "listening", None);
+        set_agent_dictation_phase(&state, &target.take_id, "delivering", None);
+        let current = state.agent_take.lock().unwrap().clone().unwrap();
+        assert_eq!(current.phase, "cancelled");
+        assert_eq!(current.composer_request_id, target.composer_request_id);
+        assert_eq!(current.conversation_id, "conversation-a");
+    }
+}
 
-        assert_eq!(event["type"], "error");
-        assert_eq!(event["payload"]["code"], "auth_refresh_unavailable");
-        assert_eq!(event["payload"]["silent"], false);
-        assert!(!is_silent_transcription_error(&event));
+#[cfg(all(test, unix))]
+mod serialized_agent_write_tests {
+    use super::*;
+    use crate::domain::turn_authority::TurnAuthority;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    fn denied_after_serialization(wait_for_generation: bool) {
+        let authority = TurnAuthority::new();
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let process = Arc::new(Mutex::new(writer));
+        let generation = Arc::new(Mutex::new(0_u64));
+        let generation_held = wait_for_generation.then(|| generation.lock().unwrap());
+        let process_held = (!wait_for_generation).then(|| process.lock().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let process = process.clone();
+            let generation = generation.clone();
+            let authority = authority.clone();
+            std::thread::spawn(move || {
+                let mut entered_tx = Some(entered_tx);
+                if wait_for_generation {
+                    entered_tx.take().unwrap().send(()).unwrap();
+                }
+                let _generation = generation.lock().unwrap();
+                if let Some(entered_tx) = entered_tx {
+                    entered_tx.send(()).unwrap();
+                }
+                let mut process = process.lock().unwrap();
+                write_helper_command(
+                    &mut *process,
+                    &serde_json::json!({"type":"start_listening","takeId":"serialized-proof"}),
+                    Some(&authority),
+                )
+            })
+        };
+        entered_rx.recv().unwrap();
+        authority.revoke();
+        drop(generation_held);
+        drop(process_held);
+        assert_eq!(worker.join().unwrap().unwrap_err().code, "turn_expired");
+        let mut byte = [0_u8];
+        assert_eq!(
+            reader.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    #[test]
+    fn revoked_while_waiting_for_process_lock_writes_no_start_command() {
+        denied_after_serialization(false);
+    }
+    #[test]
+    fn revoked_while_waiting_for_generation_lock_writes_no_start_command() {
+        denied_after_serialization(true);
+    }
+    #[test]
+    fn live_authority_writes_one_real_ipc_command() {
+        let authority = TurnAuthority::new();
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        write_helper_command(
+            &mut writer,
+            &serde_json::json!({"type":"start_listening","takeId":"live-proof"}),
+            Some(&authority),
+        )
+        .unwrap();
+        let mut bytes = [0_u8; 256];
+        let count = reader.read(&mut bytes).unwrap();
+        let command: serde_json::Value = serde_json::from_slice(&bytes[..count]).unwrap();
+        assert_eq!(command["type"], "start_listening");
+        assert_eq!(command["takeId"], "live-proof");
+        assert_eq!(bytes[count - 1], b'\n');
     }
 }

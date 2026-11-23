@@ -41,3 +41,16 @@ names — never the model's marketing `traits`, and never a model-name heuristic
   — kept in sync by tests; a model's vision flag must be correct in both.
 - Capability strings are matched normalized (lowercased, non-alpha stripped) so a
   Venice rename (`supportsVision` → `supports_vision`) keeps working.
+
+## Addendum - 2026-10-08 (OpenRouter replaces Venice for remote text)
+
+Venice is no longer a Clovy provider (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`). Remote text capabilities now
+come from the OpenRouter catalog (`architecture.input_modalities` and
+`supported_parameters`), normalized by Clovy API into the same capability
+names the clients already match (`supportsVision`, `supportsFunctionCalling`,
+...). The rule of this ADR stands unchanged: capabilities come only from the
+catalog data, never from traits, model names, or branding. The desktop's
+local-dev Auto vision fallback is `moonshotai/kimi-k2.6` (text and image input,
+tools in the public catalog); GLM 5.2 and Nemotron 3 Nano are text-only and are
+not treated as vision models.

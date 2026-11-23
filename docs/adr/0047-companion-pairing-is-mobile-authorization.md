@@ -55,3 +55,7 @@ credential used for later relay connections.
   pairing and never trusts a user id supplied by the phone.
 - Reinstalling, revoking, or losing the device credential still requires a new
   Desktop-approved pairing; the QR secret is never a reconnect credential.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

@@ -6,18 +6,68 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, vi } from "vitest";
 import { Toaster, toast } from "../components/ui/Toaster";
 import { markOnboardingComplete } from "../lib/onboarding";
-import { installStorageCompatibilityBridge } from "../lib/storage-compat";
-
-installStorageCompatibilityBridge();
 
 // Resolve framer-motion animations instantly. Without this the frameloop
 // stalls when tests swap fake/real timers, leaving AnimatePresence exits
 // stuck in the DOM and exit-dependent assertions flaky.
 MotionGlobalConfig.skipAnimations = true;
 
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: vi.fn(async () => undefined),
-}));
+// A formatter without a locale follows the machine's LANG, so a pt-BR machine
+// would read "Segunda-feira" and "10.000" wherever code formats with the
+// system's locale. Pin that default to en-US so every suite formats the same
+// on every machine; an explicit locale (the interface language) still wins.
+// A suite that proves the interface language beats the system's sets
+// `globalThis.__clovyTestSystemLocale` to a different tag for its duration.
+const TEST_DEFAULT_LOCALE = "en-US";
+declare global {
+  var __clovyTestSystemLocale: string | undefined;
+}
+const testSystemLocale = () => globalThis.__clovyTestSystemLocale ?? TEST_DEFAULT_LOCALE;
+function withTestDefaultLocale<T extends object>(formatter: T): T {
+  return new Proxy(formatter, {
+    construct: (target, [locales, ...rest]) =>
+      Reflect.construct(target as new (...args: unknown[]) => object, [
+        locales ?? testSystemLocale(),
+        ...rest,
+      ]),
+    apply: (target, thisArg, [locales, ...rest]) =>
+      Reflect.apply(target as (...args: unknown[]) => unknown, thisArg, [
+        locales ?? testSystemLocale(),
+        ...rest,
+      ]),
+  });
+}
+for (const name of [
+  "DateTimeFormat",
+  "NumberFormat",
+  "RelativeTimeFormat",
+  "PluralRules",
+  "ListFormat",
+] as const) {
+  Object.defineProperty(Intl, name, {
+    configurable: true,
+    writable: true,
+    value: withTestDefaultLocale(Intl[name]),
+  });
+}
+for (const method of ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"] as const) {
+  const native = Date.prototype[method];
+  Date.prototype[method] = function (
+    this: Date,
+    locales?: Intl.LocalesArgument,
+    options?: Intl.DateTimeFormatOptions,
+  ) {
+    return native.call(this, locales ?? testSystemLocale(), options);
+  };
+}
+const nativeNumberToLocaleString = Number.prototype.toLocaleString;
+Number.prototype.toLocaleString = function (
+  this: number,
+  locales?: Intl.LocalesArgument,
+  options?: Intl.NumberFormatOptions,
+) {
+  return nativeNumberToLocaleString.call(this, locales ?? testSystemLocale(), options);
+};
 
 // jsdom ships no ResizeObserver; the SegmentedControl relies on one.
 if (!("ResizeObserver" in globalThis)) {

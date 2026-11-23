@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { invalidateNoteTabs } from "./tabs/tabs";
-import { getNote, listAgentSessions, listFolders, listNotes } from "../lib/tauri";
+import { getNote, listFolders, listNotes } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
+import { useClovyDataChanged } from "../lib/clovy-data-events";
 import type { UseDataPartitionRefreshDependencies } from "./use-data-partition-refresh-types";
 
 export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDependencies) {
@@ -10,18 +11,13 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
     activeViewRef,
     appBlocked,
     bootstrapped,
-    commitAgentSessions,
     crossPartitionRecordingNoteIdRef,
     dispatch,
     lastDataPartitionRef,
     lastDataPartitionRefreshRevisionRef,
-    pendingSessionProjectRef,
     dataPartitionRefreshRevision,
     recordingNoteIdRef,
-    refreshSessionPartitions,
-    setActiveAgentSession,
     setActiveView,
-    setAgentOrigin,
     setError,
     setFolderReturnTarget,
     setOriginAllNotes,
@@ -30,10 +26,30 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
     tabsRef,
   } = dependencies;
 
+  useClovyDataChanged("notes", (change) => {
+    if (!change.deleted || !change.id) return;
+    const next = invalidateNoteTabs(tabsRef.current, new Set([change.id]));
+    if (next !== tabsRef.current) {
+      tabsRef.current = next;
+      setTabs(next);
+    }
+  });
+
+  useClovyDataChanged("projects", async (_change, isCurrent) => {
+    try {
+      const folders = await listFolders();
+      if (!isCurrent()) return;
+      // Notes and conversations have their own refresh owners. A project
+      // snapshot must not replace their newer deletion/update results.
+      dispatch({ type: "foldersLoaded", folders });
+    } catch (error) {
+      if (isCurrent()) setError(messageFromError(error));
+    }
+  });
+
   useEffect(() => {
     if (appBlocked || !bootstrapped) return;
     const previous = lastDataPartitionRef.current;
-    const partitionChanged = previous !== undefined && previous !== currentDataPartitionName;
     const refreshRequested =
       lastDataPartitionRefreshRevisionRef.current !== dataPartitionRefreshRevision;
     lastDataPartitionRef.current = currentDataPartitionName;
@@ -41,21 +57,11 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
     if (!refreshRequested && (previous === undefined || previous === currentDataPartitionName)) {
       return;
     }
-    // A project-scoped new-session request belongs to the data partition that started
-    // it. Clear the handoff before any async reload can race a session-created
-    // event from the newly selected data partition.
-    if (partitionChanged) pendingSessionProjectRef.current = null;
     let cancelled = false;
     void (async () => {
       try {
-        const [notesResponse, folders, sessions, partitions] = await Promise.all([
-          listNotes(),
-          listFolders(),
-          listAgentSessions(),
-          refreshSessionPartitions(),
-        ]);
+        const [notesResponse, folders] = await Promise.all([listNotes(), listFolders()]);
         if (cancelled) return;
-        commitAgentSessions(sessions, partitions);
         const visibleNoteIds = new Set(notesResponse.items.map((note) => note.id));
         const recordingNoteId = recordingNoteIdRef.current;
         crossPartitionRecordingNoteIdRef.current =
@@ -80,10 +86,6 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
         setOriginFolderId(undefined);
         setOriginAllNotes(false);
         setFolderReturnTarget(undefined);
-        // The open chat came from the previous partition's list. Keeping it selected
-        // would reopen it (workspace re-applies initialSessionId on mount).
-        setActiveAgentSession(undefined);
-        setAgentOrigin(undefined);
         const nextNoteId = recordingNoteIdRef.current ?? notesResponse.items[0]?.id;
         if (nextNoteId) {
           const note = await getNote(nextNoteId);
@@ -101,13 +103,5 @@ export function useDataPartitionRefresh(dependencies: UseDataPartitionRefreshDep
     return () => {
       cancelled = true;
     };
-  }, [
-    currentDataPartitionName,
-    appBlocked,
-    bootstrapped,
-    commitAgentSessions,
-    dataPartitionRefreshRevision,
-    refreshSessionPartitions,
-    setActiveAgentSession,
-  ]);
+  }, [currentDataPartitionName, appBlocked, bootstrapped, dataPartitionRefreshRevision]);
 }

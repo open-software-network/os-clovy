@@ -1,3 +1,4 @@
+import { useT } from "../../i18n";
 import { DotSpinner } from "../DotSpinner";
 import type { SpinnerSize } from "../../lib/spinner-grid";
 
@@ -18,12 +19,13 @@ export function Spinner({
   "aria-hidden": ariaHidden,
   "aria-label": ariaLabel,
 }: SpinnerProps) {
+  const t = useT();
   const classes = ["spinner", className].filter(Boolean).join(" ");
   return (
     <span
       role={ariaHidden ? undefined : "status"}
       aria-hidden={ariaHidden}
-      aria-label={ariaHidden ? undefined : (ariaLabel ?? "Loading")}
+      aria-label={ariaHidden ? undefined : (ariaLabel ?? t("shell.spinner.loading"))}
       className={classes}
     >
       <DotSpinner size={size} />

@@ -5,7 +5,7 @@ import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import { revealMainWindowForMeetingStartError } from "./app-helpers";
 import {
   MEETING_START_LISTENER_RETRY_DELAYS_MS,
-  MEETING_START_REQUEST_EXPIRED_MESSAGE,
+  meetingStartRequestExpiredMessage,
 } from "./app-shell";
 import type { UseRecordingEventsDependencies } from "./use-recording-events-types";
 
@@ -55,7 +55,7 @@ export function useRecordingEvents(dependencies: UseRecordingEventsDependencies)
           }
           if (request.expired) {
             revealMainWindowForMeetingStartError();
-            setError(MEETING_START_REQUEST_EXPIRED_MESSAGE);
+            setError(meetingStartRequestExpiredMessage());
             const acknowledged = await acknowledgeMeetingStartRequest(request.requestId);
             shouldRetry = !acknowledged;
             return;

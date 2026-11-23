@@ -12,63 +12,63 @@ import { IconStop } from "central-icons/IconStop";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
+import { t as translate, useT } from "../../i18n";
 import {
   displayedComposerUserMessageText,
   type AgentChatPart,
   type AgentChatTurn,
 } from "../../lib/agent-chat-runtime";
-import { shouldBlockTextOnFunding, type TextFundingModelContext } from "../../lib/account-gate";
+import { type ChatEngineCatalog, chatEngineCatalog } from "../../lib/chat-engine";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
-import {
-  dictationHelperCommand,
-  listVeniceModels,
-  providerModelSettings,
-  type VeniceModelDto,
-} from "../../lib/tauri";
+import { dictationHelperCommand } from "../../lib/tauri";
 import { MarkdownContent } from "../agent/MarkdownContent";
 import { AgentAttachmentTile } from "../agent/composer/AgentAttachmentTile";
+import { ChatEnginePicker } from "../agent/composer/ChatEnginePicker";
 import { ComposerEditor, type ComposerEditorHandle } from "../agent/composer/ComposerEditor";
 import { UpstreamProviderFailureNoticePart } from "../agent/chat-turns/RunNotices";
-import {
-  ComposerModelPicker,
-  ComposerModelPopover,
-  type ComposerModelFlyout,
-} from "../agent/composer/ModelPicker";
-import { modelOptions, selectedModel } from "../settings/ModelPickerDialog";
-import type { TextFundingNoticeContext } from "../account/FundingNotice";
 import type { NoteChat, NoteChatAttachment } from "./useNoteChat";
 
 /** Note-tailored presets, shown as the main session view's preset chips (icon
  * + label). Like those, a click prefills the composer rather than sending —
  * the prompt lands in the box so the person sees exactly what will run before
- * spending credits. The note reference is prepended by useNoteChat on the
- * first message, so these are just the questions. */
+ * starting a turn. The note reference is prepended by useNoteChat on the
+ * first message, so these are just the questions. The prompt is sent to the
+ * model, so it stays in English; only the chip label follows the interface
+ * language (a getter, so it reads the locale at render time). */
 type NotePreset = { key: string; icon: ReactNode; label: string; prompt: string };
 
 const NOTE_PRESETS: NotePreset[] = [
   {
     key: "summary",
     icon: <IconFileSparkle size={16} />,
-    label: "Summarize",
+    get label() {
+      return translate("notes.chat.preset.summary");
+    },
     prompt: "Summarize this note.",
   },
   {
     key: "actions",
     icon: <IconChecklist size={16} />,
-    label: "Action items",
+    get label() {
+      return translate("notes.chat.preset.actions");
+    },
     prompt: "List the action items from this note and who owns each.",
   },
   {
     key: "decisions",
     icon: <IconFlag1 size={16} />,
-    label: "Key decisions",
+    get label() {
+      return translate("notes.chat.preset.decisions");
+    },
     prompt: "What decisions were made in this note?",
   },
   {
     key: "followup",
     icon: <IconEmail1Sparkle size={16} />,
-    label: "Draft follow-up",
+    get label() {
+      return translate("notes.chat.preset.followup");
+    },
     prompt: "Draft a follow-up email summarizing this note and its action items.",
   },
 ];
@@ -138,8 +138,6 @@ export function NoteChatPanel({
   note,
   chat,
   recordingActive,
-  creditActionsDisabledReason,
-  renderFundingNotice,
   onClose,
   onOpenInAgent,
 }: {
@@ -151,13 +149,10 @@ export function NoteChatPanel({
    * ducks the recording's mic while dictation listens (so a dictated question
    * never lands in the note); this only tunes the tooltip to say so. */
   recordingActive?: boolean;
-  creditActionsDisabledReason?: string;
-  /** App owns the account and billing action; the composer owns the active
-   * session model and picker. */
-  renderFundingNotice?: (context: TextFundingNoticeContext) => ReactNode;
   onClose: () => void;
   onOpenInAgent: (sessionId: string | undefined) => void;
 }) {
+  const t = useT();
   const {
     turns,
     working,
@@ -188,7 +183,7 @@ export function NoteChatPanel({
   // session workspace before the run begins.
   async function pickAttachments() {
     try {
-      const selected = await openFileDialog({ multiple: true, title: "Attach files" });
+      const selected = await openFileDialog({ multiple: true, title: t("notes.chat.attachFiles") });
       if (!selected) return;
       const paths = (Array.isArray(selected) ? selected : [selected])
         .map((path) => path.trim())
@@ -212,10 +207,6 @@ export function NoteChatPanel({
   // Focus the composer, then explicitly start the dictation helper. Stop and
   // discard controls are correlated separately with the take shown in the HUD.
   async function startDictation() {
-    if (creditActionsDisabledReason) {
-      setComposerError(creditActionsDisabledReason);
-      return;
-    }
     composerRef.current?.focus();
     try {
       await dictationHelperCommand({ type: "start_listening" });
@@ -227,83 +218,35 @@ export function NoteChatPanel({
   // Model picking shares the regular agent catalog. The runtime receives the
   // selected model with each run, so the panel can change it without a legacy
   // transport-side configuration step.
-  const [models, setModels] = useState<VeniceModelDto[]>([]);
-  const [veniceApiKeyConfigured, setVeniceApiKeyConfigured] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelFlyout, setModelFlyout] = useState<ComposerModelFlyout>(null);
-  const [modelSearch, setModelSearch] = useState("");
-  const modelTriggerRef = useRef<HTMLButtonElement>(null);
-  const modelPopoverRef = useRef<HTMLDivElement>(null);
-  const modelSearchRef = useRef<HTMLInputElement>(null);
-  // Catalog hydration is presentation-only. The session-local staged choice
-  // is authoritative until a run applies it, including choices acknowledged
-  // to a linked companion while this panel is already open.
+  const [engineCatalog, setEngineCatalog] = useState<ChatEngineCatalog | null>(null);
+  const footerRef = useRef<HTMLElement>(null);
   useEffect(() => {
     let stale = false;
-    void listVeniceModels("generation")
+    void chatEngineCatalog()
       .then((catalog) => {
-        if (stale) return;
-        setModels(catalog.models);
+        if (!stale) setEngineCatalog(catalog);
       })
       .catch(() => undefined);
-    void providerModelSettings()
-      .then((response) =>
-        setVeniceApiKeyConfigured(response.effectiveSettings.veniceApiKeyConfigured),
-      )
-      .catch(() => setVeniceApiKeyConfigured(false));
     return () => {
       stale = true;
     };
   }, []);
-  const model = selectedModel(models, activeModelId);
-  const textFundingContext: TextFundingModelContext = {
-    activeModelId: activeModelId || undefined,
-    activeModel: model,
-    veniceApiKeyConfigured,
-  };
-  const textActionsDisabledReason = shouldBlockTextOnFunding(
-    Boolean(creditActionsDisabledReason),
-    textFundingContext,
-  )
-    ? creditActionsDisabledReason
-    : undefined;
-
   function selectModel(nextModelId: string) {
     setModel(nextModelId);
-    setModelOpen(false);
     setComposerError(null);
   }
 
   useEffect(() => {
-    if (!modelOpen) return;
-    function handlePointerDown(event: MouseEvent) {
-      const target = event.target as Node;
-      if (modelPopoverRef.current?.contains(target)) return;
-      if (modelTriggerRef.current?.contains(target)) return;
-      // The hover detail cards are portaled to document.body, so a click inside
-      // one (its "Show more" toggle) lands outside the popover — treat it as in.
-      if (target instanceof Element && target.closest(".agent-composer-model-hovercard")) return;
-      setModelOpen(false);
-    }
-    window.addEventListener("mousedown", handlePointerDown);
-    return () => window.removeEventListener("mousedown", handlePointerDown);
-  }, [modelOpen]);
-
-  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      // Esc walks back one layer at a time: model menu, then the panel. A
+      // The engine menu consumes Escape first. A
       // draft in progress blocks the final close — it must not eat the words.
-      if (modelOpen) {
-        setModelOpen(false);
-        return;
-      }
       if (!draftEmpty) return;
       onCloseRef.current();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [draftEmpty, modelOpen]);
+  }, [draftEmpty]);
 
   // Restore the remembered width once per mount; the var lives on .app-shell
   // because the main card's margin and the editor footer consume it too.
@@ -361,7 +304,7 @@ export function NoteChatPanel({
   }, [turns.length, lastTurnSize, working, fade.update]);
 
   async function handleSend() {
-    if (working || textActionsDisabledReason) return;
+    if (working) return;
     if (!composerRef.current?.flushPendingChange()) return;
     const serializedText = draftRef.current;
     const text = serializedText.trim();
@@ -406,25 +349,25 @@ export function NoteChatPanel({
         className="note-chat-resize-handle"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize Ask Clovy panel"
+        aria-label={t("notes.chat.resize")}
         onPointerDown={startResize}
       />
       <aside
         ref={panelRef}
         className="note-chat-panel"
-        aria-label="Ask Clovy about this note"
+        aria-label={t("notes.chat.panelLabel")}
         data-entered={entered || undefined}
         onAnimationEnd={(event) => {
           if (event.animationName === "note-chat-panel-in") setEntered(true);
         }}
       >
         <header className="note-chat-bar">
-          <h2 className="note-chat-bar-title">Ask Clovy</h2>
+          <h2 className="note-chat-bar-title">{t("notes.header.ask")}</h2>
           <button
             type="button"
             className="icon-button"
-            aria-label="Open in agent view"
-            title={escalationPending ? "Finishing up…" : "Open in agent view"}
+            aria-label={t("notes.chat.openInAgent")}
+            title={escalationPending ? t("notes.chat.finishingUp") : t("notes.chat.openInAgent")}
             disabled={escalationPending}
             onClick={() => onOpenInAgent(storedSessionId)}
           >
@@ -433,8 +376,8 @@ export function NoteChatPanel({
           <button
             type="button"
             className="icon-button"
-            aria-label="Close Ask Clovy"
-            title="Close"
+            aria-label={t("notes.chat.close")}
+            title={t("common.close")}
             onClick={onClose}
           >
             <IconCrossMedium size={15} />
@@ -443,9 +386,7 @@ export function NoteChatPanel({
         <div ref={scrollerRef} className="note-chat-scroll scroll-fade-mask" {...fade.props}>
           {turns.length === 0 && !loading ? (
             <div className="note-chat-empty">
-              <p className="note-chat-empty-lead">
-                Ask about this note: what was said, what it means, or how to reshape it.
-              </p>
+              <p className="note-chat-empty-lead">{t("notes.chat.emptyLead")}</p>
               <div className="note-chat-suggestions">
                 {NOTE_PRESETS.map((preset) => (
                   <button
@@ -476,9 +417,7 @@ export function NoteChatPanel({
                       assistantPartNode(
                         part,
                         index,
-                        working || chat.submissionPending || textActionsDisabledReason
-                          ? undefined
-                          : () => void retry(turn.id),
+                        working || chat.submissionPending ? undefined : () => void retry(turn.id),
                       ),
                     )}
                   </div>
@@ -486,7 +425,9 @@ export function NoteChatPanel({
               )}
               {working && !streamingVisibly ? (
                 <div className="note-chat-working">
-                  {runningTool && "name" in runningTool ? runningTool.name : "Thinking…"}
+                  {runningTool && "name" in runningTool
+                    ? runningTool.name
+                    : t("notes.chat.thinking")}
                 </div>
               ) : null}
             </div>
@@ -497,21 +438,7 @@ export function NoteChatPanel({
             </div>
           ) : null}
         </div>
-        <footer className="note-chat-composer">
-          {textActionsDisabledReason
-            ? (renderFundingNotice?.({
-                ...textFundingContext,
-                onSelectVeniceModel: () => {
-                  setModelFlyout(null);
-                  setModelSearch("");
-                  setModelOpen(true);
-                },
-              }) ?? (
-                <p className="agent-composer-notice" role="status">
-                  {textActionsDisabledReason}
-                </p>
-              ))
-            : null}
+        <footer ref={footerRef} className="note-chat-composer">
           {/* The actual chatbox: the agent composer's box/attach/toolbar/model/
            * send classes, wired to the panel's session. */}
           <div className="agent-composer-box">
@@ -532,7 +459,7 @@ export function NoteChatPanel({
             ) : null}
             <ComposerEditor
               ref={composerRef}
-              placeholder="Ask about this note"
+              placeholder={t("notes.chat.placeholder")}
               onChange={(text) => {
                 draftRef.current = text;
                 setDraftEmpty(!text.trim());
@@ -544,34 +471,28 @@ export function NoteChatPanel({
               <button
                 type="button"
                 className="agent-composer-attach"
-                aria-label="Attach files"
-                title="Attach files"
+                aria-label={t("notes.chat.attachFiles")}
+                title={t("notes.chat.attachFiles")}
                 onClick={() => void pickAttachments()}
               >
                 <IconPlusMedium size={18} />
               </button>
               <div className="agent-composer-actions">
-                <ComposerModelPicker
-                  open={modelOpen}
-                  model={model}
-                  triggerRef={modelTriggerRef}
-                  onToggleOpen={() => {
-                    setModelFlyout(null);
-                    setModelSearch("");
-                    setModelOpen((open) => !open);
-                  }}
+                <ChatEnginePicker
+                  model={activeModelId}
+                  setModel={selectModel}
+                  catalog={engineCatalog}
+                  anchorRef={footerRef}
                 />
                 <button
                   type="button"
                   className="agent-composer-mic"
-                  aria-label="Dictate"
+                  aria-label={t("notes.chat.dictate")}
                   title={
-                    creditActionsDisabledReason ??
-                    (recordingActive
-                      ? "Dictate a question (kept out of the recording)"
-                      : "Start dictation")
+                    recordingActive
+                      ? t("notes.chat.dictateDuringRecording")
+                      : t("notes.chat.startDictation")
                   }
-                  disabled={Boolean(creditActionsDisabledReason)}
                   onClick={() => void startDictation()}
                 >
                   <IconMicrophone size={18} />
@@ -580,8 +501,8 @@ export function NoteChatPanel({
                   <button
                     type="button"
                     className="agent-composer-stop"
-                    aria-label="Stop Clovy"
-                    title="Stop Clovy"
+                    aria-label={t("notes.chat.stop")}
+                    title={t("notes.chat.stop")}
                     onClick={stop}
                   >
                     <IconStop size={16} />
@@ -590,10 +511,8 @@ export function NoteChatPanel({
                   <button
                     type="button"
                     className="agent-composer-send"
-                    aria-label="Send message"
-                    disabled={
-                      Boolean(textActionsDisabledReason) || (draftEmpty && !attachments.length)
-                    }
+                    aria-label={t("notes.chat.send")}
+                    disabled={draftEmpty && !attachments.length}
                     onClick={() => void handleSend()}
                   >
                     <IconArrowUp size={18} />
@@ -602,19 +521,6 @@ export function NoteChatPanel({
               </div>
             </div>
           </div>
-          {modelOpen ? (
-            <ComposerModelPopover
-              flyout={modelFlyout}
-              model={model}
-              options={modelOptions(models, model?.id ?? "")}
-              search={modelSearch}
-              popoverRef={modelPopoverRef}
-              searchRef={modelSearchRef}
-              onFlyoutChange={setModelFlyout}
-              onSearchChange={setModelSearch}
-              onSelect={selectModel}
-            />
-          ) : null}
         </footer>
       </aside>
     </>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useT } from "../../i18n";
 import { Dialog, DialogField } from "../ui/Dialog";
 
 type CreateFolderDialogProps = {
@@ -15,6 +16,7 @@ export function CreateFolderDialog({
   defaultName,
   onCreate,
 }: CreateFolderDialogProps) {
+  const t = useT();
   const [name, setName] = useState(defaultName ?? "");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -46,13 +48,13 @@ export function CreateFolderDialog({
         if (submitting) return;
         onClose();
       }}
-      title="Create project"
-      description="Group meeting notes and agent sessions by project, client, or topic."
+      title={t("notes.folders.create.title")}
+      description={t("notes.folders.create.description")}
       initialFocusSelector='input[name="folder-name"]'
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
@@ -60,30 +62,30 @@ export function CreateFolderDialog({
             className="primary-action primary-solid"
             disabled={submitting || name.trim().length === 0}
           >
-            {submitting ? "Creating…" : "Create project"}
+            {submitting ? t("notes.folders.create.creating") : t("notes.folders.create.title")}
           </button>
         </>
       }
     >
       <form id="create-folder-form" className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Name" htmlFor="folder-name">
+        <DialogField label={t("notes.folders.field.name")} htmlFor="folder-name">
           <input
             id="folder-name"
             name="folder-name"
             className="dialog-input"
-            placeholder="e.g. Customer interviews"
+            placeholder={t("notes.folders.field.namePlaceholder")}
             autoComplete="off"
             value={name}
             onChange={(event) => setName(event.currentTarget.value)}
             maxLength={120}
           />
         </DialogField>
-        <DialogField label="Description" htmlFor="folder-description">
+        <DialogField label={t("notes.folders.field.description")} htmlFor="folder-description">
           <textarea
             id="folder-description"
             name="folder-description"
             className="dialog-textarea"
-            placeholder="What belongs in this project?"
+            placeholder={t("notes.folders.field.descriptionPlaceholder")}
             value={description}
             onChange={(event) => setDescription(event.currentTarget.value)}
             rows={3}

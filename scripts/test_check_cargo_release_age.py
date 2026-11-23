@@ -56,6 +56,15 @@ class CheckCargoReleaseAgeTests(unittest.TestCase):
 
         self.assertIn(("retired/Cargo.lock", "retired/Cargo.lock"), lockfiles)
 
+    def test_a_deleted_lockfile_is_retired_only_with_its_manifest(self):
+        manifests = ["src-tauri/Cargo.toml", "kept/Cargo.toml"]
+        # The whole Rust tree is gone: nothing can resolve crates from it.
+        self.assertTrue(MODULE.lockfile_tree_retired("clovy-api/Cargo.lock", manifests))
+        # The manifest is still tracked: losing its lock stays fail-closed.
+        self.assertFalse(MODULE.lockfile_tree_retired("kept/Cargo.lock", manifests))
+        self.assertTrue(MODULE.lockfile_tree_retired("Cargo.lock", manifests))
+        self.assertFalse(MODULE.lockfile_tree_retired("Cargo.lock", ["Cargo.toml"]))
+
     def test_checks_every_manifest_with_locked_metadata(self):
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
         with patch.object(MODULE.subprocess, "run", return_value=completed) as run:

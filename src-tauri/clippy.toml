@@ -1,10 +1,5 @@
-# Mirrors clovy-api/clippy.toml, adapted for the Tauri shell:
-#   - msrv tracks src-tauri's rust-version (1.80.0), not clovy-api's 1.95.
-#   - too-many-arguments is relaxed to 8: Tauri command handlers legitimately
-#     take several parameters plus injected State/AppHandle.
-#   - the std::env disallowed-methods ban is intentionally omitted: unlike
-#     clovy-api (typed config only), the desktop shell reads and sets process
-#     env at startup (CLOVY_API_URL, OS_ACCOUNTS_*, spawning native helpers).
+# MSRV matches Cargo.toml. Tauri commands may take State/AppHandle arguments.
+# Native helpers and the dev launcher resolve process environment at startup.
 msrv = "1.80.0"
 cognitive-complexity-threshold = 30
 too-many-arguments-threshold = 8

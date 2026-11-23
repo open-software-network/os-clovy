@@ -26,7 +26,7 @@ $safeBranch = $Branch -replace '[^A-Za-z0-9._-]', '-'
 $repoParent = Split-Path -Parent $repo
 $caller = Join-Path $repoParent "Clovy Windows Qualification"
 if ($caller -eq $repo) { $caller = Join-Path $repoParent "Clovy Windows Qualification Runner" }
-$outputDirectory = Join-Path $repo "artifacts\windows-unsigned"
+$outputDirectory = Join-Path $repo "artifacts\windows-signed"
 if (-not $EvidenceDirectory) {
   $EvidenceDirectory = Join-Path $repo ".tmp\windows-qualification\$safeBranch\$shortSha"
 } elseif (-not [System.IO.Path]::IsPathRooted($EvidenceDirectory)) {
@@ -77,10 +77,6 @@ foreach ($tool in @("git", "but", "node", "pnpm", "rustc", "cargo")) {
 New-Item -ItemType Directory -Force -Path $caller, $EvidenceDirectory | Out-Null
 
 $originalPath = $env:PATH
-$hadPrebuilt = Test-Path Env:CLOVY_AGENT_RUNTIME_PREBUILT
-$originalPrebuilt = if ($hadPrebuilt) { (Get-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT).Value } else { $null }
-$hadTarget = Test-Path Env:CLOVY_AGENT_RUNTIME_TARGET
-$originalTarget = if ($hadTarget) { (Get-Item Env:CLOVY_AGENT_RUNTIME_TARGET).Value } else { $null }
 $hadCertificatePassword = Test-Path Env:WINDOWS_CERTIFICATE_PASSWORD
 $originalCertificatePassword = if ($hadCertificatePassword) {
   (Get-Item Env:WINDOWS_CERTIFICATE_PASSWORD).Value
@@ -97,16 +93,13 @@ $result = [ordered]@{
   firstInBuilderVerifier = $false
   firstExplicitVerifier = $false
   firstPathRestored = $false
-  firstClovyEnvironmentRestored = $false
   firstArtifact = $null
   secondBuild = $false
   secondInBuilderVerifier = $false
   secondExplicitVerifier = $false
   secondPathRestored = $false
-  secondClovyEnvironmentRestored = $false
   secondArtifact = $null
   finalPathRestored = $false
-  finalClovyEnvironmentRestored = $false
   finalCertificateEnvironmentRestored = $false
   finalContentClean = $false
   finalStatusClean = $false
@@ -182,10 +175,6 @@ function Assert-WorkspaceMatchesExpectedCommit {
 
 function Restore-Environment {
   $env:PATH = $originalPath
-  if ($hadPrebuilt) { $env:CLOVY_AGENT_RUNTIME_PREBUILT = $originalPrebuilt }
-  else { Remove-Item Env:CLOVY_AGENT_RUNTIME_PREBUILT -ErrorAction SilentlyContinue }
-  if ($hadTarget) { $env:CLOVY_AGENT_RUNTIME_TARGET = $originalTarget }
-  else { Remove-Item Env:CLOVY_AGENT_RUNTIME_TARGET -ErrorAction SilentlyContinue }
   if ($hadCertificatePassword) { $env:WINDOWS_CERTIFICATE_PASSWORD = $originalCertificatePassword }
   else { Remove-Item Env:WINDOWS_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue }
 }
@@ -224,7 +213,6 @@ try {
 
   Invoke-Checked { & git check-ref-format "refs/heads/$Branch" } "branch name validation"
   Invoke-Checked { & git fetch origin --prune } "origin fetch"
-  Invoke-Checked { & git fetch upstream --prune } "upstream fetch"
   $dryRunOutput = & but branch update $Branch --strategy pick-remote --dry-run --verbose --format agent 2>&1
   $dryRunExit = $LASTEXITCODE
   $dryRunOutput | Write-Host
@@ -278,8 +266,6 @@ try {
   & $sevenZip | Select-String "^7-Zip " | Select-Object -First 1
 
   Remove-Item Env:WINDOWS_CERTIFICATE_PASSWORD -ErrorAction SilentlyContinue
-  $env:CLOVY_AGENT_RUNTIME_PREBUILT = "qualification-sentinel-prebuilt"
-  $env:CLOVY_AGENT_RUNTIME_TARGET = "qualification-sentinel-target"
   Set-Location -LiteralPath $caller
 
   Write-Host "=== First full builder run ==="
@@ -287,11 +273,7 @@ try {
   $result.firstBuild = $true
   $result.firstInBuilderVerifier = $true
   $result.firstPathRestored = $env:PATH -ceq $originalPath
-  $result.firstClovyEnvironmentRestored =
-    $env:CLOVY_AGENT_RUNTIME_PREBUILT -ceq "qualification-sentinel-prebuilt" -and
-    $env:CLOVY_AGENT_RUNTIME_TARGET -ceq "qualification-sentinel-target"
   if (-not $result.firstPathRestored) { throw "First builder did not restore PATH exactly." }
-  if (-not $result.firstClovyEnvironmentRestored) { throw "First builder did not restore Clovy environment exactly." }
 
   $firstInstaller = Get-OneStagedInstaller
   $result.firstArtifact = Get-ArtifactInfo $firstInstaller
@@ -306,11 +288,7 @@ try {
   $result.secondBuild = $true
   $result.secondInBuilderVerifier = $true
   $result.secondPathRestored = $env:PATH -ceq $originalPath
-  $result.secondClovyEnvironmentRestored =
-    $env:CLOVY_AGENT_RUNTIME_PREBUILT -ceq "qualification-sentinel-prebuilt" -and
-    $env:CLOVY_AGENT_RUNTIME_TARGET -ceq "qualification-sentinel-target"
   if (-not $result.secondPathRestored) { throw "Second builder did not restore PATH exactly." }
-  if (-not $result.secondClovyEnvironmentRestored) { throw "Second builder did not restore Clovy environment exactly." }
 
   $secondInstaller = Get-OneStagedInstaller
   $result.secondArtifact = Get-ArtifactInfo $secondInstaller
@@ -328,11 +306,6 @@ finally {
   try {
     Restore-Environment
     $result.finalPathRestored = $env:PATH -ceq $originalPath
-    $result.finalClovyEnvironmentRestored =
-      ((Test-Path Env:CLOVY_AGENT_RUNTIME_PREBUILT) -eq $hadPrebuilt) -and
-      ((-not $hadPrebuilt) -or ($env:CLOVY_AGENT_RUNTIME_PREBUILT -ceq $originalPrebuilt)) -and
-      ((Test-Path Env:CLOVY_AGENT_RUNTIME_TARGET) -eq $hadTarget) -and
-      ((-not $hadTarget) -or ($env:CLOVY_AGENT_RUNTIME_TARGET -ceq $originalTarget))
     $result.finalCertificateEnvironmentRestored =
       ((Test-Path Env:WINDOWS_CERTIFICATE_PASSWORD) -eq $hadCertificatePassword) -and
       ((-not $hadCertificatePassword) -or ($env:WINDOWS_CERTIFICATE_PASSWORD -ceq $originalCertificatePassword))
@@ -362,8 +335,7 @@ finally {
       $result.firstBuild -and $result.firstInBuilderVerifier -and $result.firstExplicitVerifier -and
       $result.secondBuild -and $result.secondInBuilderVerifier -and $result.secondExplicitVerifier -and
       $result.firstPathRestored -and $result.secondPathRestored -and $result.finalPathRestored -and
-      $result.firstClovyEnvironmentRestored -and $result.secondClovyEnvironmentRestored -and
-      $result.finalClovyEnvironmentRestored -and $result.finalCertificateEnvironmentRestored -and
+      $result.finalCertificateEnvironmentRestored -and
       $result.finalContentClean
     $result.status = if ($allPassed) { "PASS" } else { "FAIL" }
 
@@ -378,9 +350,9 @@ finally {
 - Exact SHA: $($result.exactSha)
 - First build/in-builder verifier/explicit verifier: $($result.firstBuild) / $($result.firstInBuilderVerifier) / $($result.firstExplicitVerifier)
 - Second build/in-builder verifier/explicit verifier: $($result.secondBuild) / $($result.secondInBuilderVerifier) / $($result.secondExplicitVerifier)
-- First PATH/Clovy restoration: $($result.firstPathRestored) / $($result.firstClovyEnvironmentRestored)
-- Second PATH/Clovy restoration: $($result.secondPathRestored) / $($result.secondClovyEnvironmentRestored)
-- Final PATH/Clovy/certificate restoration: $($result.finalPathRestored) / $($result.finalClovyEnvironmentRestored) / $($result.finalCertificateEnvironmentRestored)
+- First PATH restoration: $($result.firstPathRestored)
+- Second PATH restoration: $($result.secondPathRestored)
+- Final PATH/certificate restoration: $($result.finalPathRestored) / $($result.finalCertificateEnvironmentRestored)
 - Final content clean: $($result.finalContentClean)
 - Final porcelain status clean: $($result.finalStatusClean)
 - First artifact: $firstJson

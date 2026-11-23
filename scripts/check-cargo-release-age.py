@@ -27,7 +27,7 @@ import urllib.request
 
 EXCLUDE_FILE = "scripts/cargo-release-age-exclude.txt"
 CRATES_IO_REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
-USER_AGENT = "clovy-release-age-check (https://github.com/open-software-network/os-clovy)"
+USER_AGENT = "clovy-release-age-check (https://github.com/guilhermexp/os-clovy)"
 API = "https://crates.io/api/v1/crates/{name}/versions"
 
 
@@ -100,6 +100,18 @@ def discover_lockfiles(base):
     if not lockfiles:
         raise RuntimeError("no Cargo.lock files found in the repo or at base")
     return sorted(lockfiles)
+
+
+def lockfile_tree_retired(lockfile, manifests):
+    """Whether a deleted lockfile's whole Rust tree is gone.
+
+    A lockfile only guards the manifest beside it. When that Cargo.toml is no
+    longer tracked, no build can resolve crates from the tree, so the deletion
+    needs no check; while the manifest remains, losing its lock fails closed.
+    """
+    parent = lockfile.rsplit("/", 1)[0] if "/" in lockfile else ""
+    manifest = f"{parent}/Cargo.toml" if parent else "Cargo.toml"
+    return manifest not in manifests
 
 
 def discover_manifests():
@@ -189,7 +201,8 @@ def main():
         return 1
 
     try:
-        manifest_count = verify_manifests_locked()
+        manifests = discover_manifests()
+        manifest_count = verify_manifests_locked(manifests)
         lockfiles = discover_lockfiles(args.base)
     except RuntimeError as err:
         print(f"error: {err}", file=sys.stderr)
@@ -204,7 +217,10 @@ def main():
             current = parse_lock(open(path).read())
         except FileNotFoundError:
             # Fail closed: a deleted lockfile would let later builds resolve
-            # fresh crates that never saw this check.
+            # fresh crates that never saw this check, unless its tree is gone.
+            if lockfile_tree_retired(path, manifests):
+                print(f"retired: {path} (its Cargo.toml was removed)")
+                continue
             print(f"error: {path} missing", file=sys.stderr)
             return 1
         new_packages |= current - parse_lock(base_lock(args.base, base_path))

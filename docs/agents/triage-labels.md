@@ -1,17 +1,12 @@
-# Triage Labels
+# Triage labels
 
-The skills speak in terms of five canonical triage roles. os-platform Issues
-have both **statuses** and **labels**; this repo maps roles across both axes.
+The skills speak in terms of five canonical triage roles. Harness tickets map
+them onto ticket states:
 
-| Role in mattpocock/skills | In our tracker | Meaning |
+| Role | In our tracker | Meaning |
 | --- | --- | --- |
-| `needs-triage` | label `needs-triage` | Maintainer needs to evaluate |
-| `needs-info` | label `needs-info` | Waiting on reporter |
-| `ready-for-agent` | status `todo` + description enriched by `os-task-prep` (diagnosis, files, acceptance, verify) | Fully specified, AFK-ready |
-| `ready-for-human` | label `ready-for-human` (status `todo`) | Requires human implementation |
-| `wontfix` | status `cancelled` | Will not be actioned |
-
-When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use
-this table. Status changes go through the documented status endpoint (or
-`issues take` for todo → in_progress); label writes are undocumented — follow
-the probe-then-verify rule in `issue-tracker.md`.
+| `needs-triage` | ticket without an OpenSpec change | Owner needs to evaluate |
+| `needs-info` | ticket waiting on the owner | Blocked on a decision |
+| `ready-for-agent` | ticket with an OpenSpec change and tasks | Fully specified, AFK-ready |
+| `ready-for-human` | ticket marked for the owner | Requires the owner (for example a proof on the Mac) |
+| `wontfix` | ticket closed without a change | Will not be actioned |

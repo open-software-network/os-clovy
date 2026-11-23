@@ -113,3 +113,40 @@ charges after the stream ends.
   (audio calls are chunk-bounded, image budgets fit); if one starts timing
   out, extend it with the same opt-in SSE envelope rather than a timeout
   bump.
+
+## Addendum - 2026-10-08 (upstream is OpenRouter)
+
+Venice is retired as the text upstream (OpenSpec change
+`replace-venice-with-groq-openrouter-fal-tavily`); `/v1/chat/completions` and
+`/v1/notes/generate` stream from OpenRouter's `/api/v1/chat/completions`. The
+client contract of this ADR is unchanged: opt-in `stream: true`, SSE
+passthrough for chat, the `event: result` / `event: error` envelope for notes,
+and settlement from the usage frame.
+
+
+## Addendum - protocol failures and response evidence (2026-10-11)
+
+HTTP 200 and a clean transport EOF do not establish a successful completion.
+OpenRouter can send an error as its first and only SSE event after committing
+headers. The stream pump reads complete SSE events (including multiline data,
+comments and CRLF/CR framing) and recognizes a non-null top-level `error` or
+`choices[].finish_reason: "error"` as failure. Like a transport fault, this
+releases the authorization with a zero-credit settlement, including when
+partial output preceded the error or the error carries usage. A wholly failed
+response never falls through to the flat estimate.
+
+A successful stream with valid usage retains normal usage settlement. Without
+usage, the flat fallback requires delivered response content (text, refusal,
+reasoning, audio or tool-call output), not just role/empty choices, comments or
+`[DONE]`. The deliberate client-timeout exception likewise requires response
+content and no protocol failure. Heartbeat framing, service-funded disconnect
+draining and BYOK cancellation/no-metering remain unchanged.
+
+
+## Addendum - 2026-10-28: direct providers only
+
+The server inference-streaming decision is superseded for this fork by
+[ADR-0073](0073-desktop-calls-user-providers-without-a-clovy-server.md). The desktop calls the user's providers directly; chat stays
+on CLI engines and Clovy tools remain local through MCP. The server is removed,
+not replaced or deployed with a breaking contract. Earlier decisions above
+remain as historical records; current behavior follows ADR-0073 and ADR-0072.

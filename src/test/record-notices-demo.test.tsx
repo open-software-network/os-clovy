@@ -37,7 +37,6 @@ const editorProps = {
   onResumeRecording: vi.fn(),
   onFinishRecording: vi.fn(),
   onRetry: vi.fn(),
-  onTopUp: vi.fn(),
   onRecoverRecording: vi.fn(),
   onDiscardRecording: vi.fn(),
   onAssignFolder: vi.fn(),
@@ -92,8 +91,6 @@ describe("registerRecordNoticesDemo", () => {
     const { api, invoke } = setup();
     expect(invoke()).toContain("Recorder notices demo");
     expect(invoke("bogus")).toContain('__recordNoticesDemo("consent")');
-    // The help points at the separate driver for the out-of-credits notice.
-    expect(invoke()).toContain('__fundingDemo("free")');
     api.dispose();
   });
 

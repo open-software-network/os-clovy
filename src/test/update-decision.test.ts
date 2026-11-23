@@ -2,11 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   INITIAL_UPDATE_STATUS_DISPLAY,
   UP_TO_DATE_STATUS,
-  UPDATE_CHECK_INTERVAL_MS,
   checkForClovyUpdate,
-  installClovyUpdate,
+  nextUpdateStep,
   prepareClovyUpdate,
-  startPeriodicClovyUpdateChecks,
   updateCheckShowsStatus,
   updateStatusDisplayReducer,
   type UpdaterUpdate,
@@ -16,7 +14,6 @@ describe("update status display", () => {
   it("only exposes manual checks as visible busy statuses", () => {
     expect(updateCheckShowsStatus("manual")).toBe(true);
     expect(updateCheckShowsStatus("launch")).toBe(false);
-    expect(updateCheckShowsStatus("periodic")).toBe(false);
   });
 
   it("does not let stale success timers fade or clear a newer status", () => {
@@ -63,20 +60,20 @@ function update(body?: string): UpdaterUpdate {
 }
 
 describe("checkForClovyUpdate", () => {
-  it("prompts with version and release notes when an update is available", async () => {
-    const prompt = vi.fn();
+  it("offers the version and release notes when an update is available", async () => {
+    const offer = vi.fn();
 
     await checkForClovyUpdate(
       {
         check: async () => update(" Fixes transcription. "),
-        prompt,
+        offer,
         reportNoUpdate: vi.fn(),
         reportFailure: vi.fn(),
       },
       "launch",
     );
 
-    expect(prompt).toHaveBeenCalledWith(
+    expect(offer).toHaveBeenCalledWith(
       expect.objectContaining({
         version: "0.2.0",
         notes: "Fixes transcription.",
@@ -84,39 +81,21 @@ describe("checkForClovyUpdate", () => {
     );
   });
 
-  it("does not prompt when no update is available", async () => {
-    const prompt = vi.fn();
+  it("stays silent at launch when there is no update", async () => {
+    const offer = vi.fn();
     const reportNoUpdate = vi.fn();
 
     await checkForClovyUpdate(
       {
         check: async () => null,
-        prompt,
+        offer,
         reportNoUpdate,
         reportFailure: vi.fn(),
       },
       "launch",
     );
 
-    expect(prompt).not.toHaveBeenCalled();
-    expect(reportNoUpdate).not.toHaveBeenCalled();
-  });
-
-  it("keeps periodic no-update checks silent", async () => {
-    const prompt = vi.fn();
-    const reportNoUpdate = vi.fn();
-
-    await checkForClovyUpdate(
-      {
-        check: async () => null,
-        prompt,
-        reportNoUpdate,
-        reportFailure: vi.fn(),
-      },
-      "periodic",
-    );
-
-    expect(prompt).not.toHaveBeenCalled();
+    expect(offer).not.toHaveBeenCalled();
     expect(reportNoUpdate).not.toHaveBeenCalled();
   });
 
@@ -126,7 +105,7 @@ describe("checkForClovyUpdate", () => {
     await checkForClovyUpdate(
       {
         check: async () => null,
-        prompt: vi.fn(),
+        offer: vi.fn(),
         reportNoUpdate,
         reportFailure: vi.fn(),
       },
@@ -136,8 +115,26 @@ describe("checkForClovyUpdate", () => {
     expect(reportNoUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it("reports failures without claiming success", async () => {
-    const prompt = vi.fn();
+  it("keeps a failed launch check silent", async () => {
+    const reportFailure = vi.fn();
+
+    await checkForClovyUpdate(
+      {
+        check: async () => {
+          throw new Error("error sending request");
+        },
+        offer: vi.fn(),
+        reportNoUpdate: vi.fn(),
+        reportFailure,
+      },
+      "launch",
+    );
+
+    expect(reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed manual check without offering anything", async () => {
+    const offer = vi.fn();
     const reportFailure = vi.fn();
 
     await checkForClovyUpdate(
@@ -145,15 +142,38 @@ describe("checkForClovyUpdate", () => {
         check: async () => {
           throw new Error("signature mismatch");
         },
-        prompt,
+        offer,
         reportNoUpdate: vi.fn(),
         reportFailure,
       },
       "manual",
     );
 
-    expect(prompt).not.toHaveBeenCalled();
+    expect(offer).not.toHaveBeenCalled();
     expect(reportFailure).toHaveBeenCalledWith("signature mismatch");
+  });
+
+  it("reports the message of a native update error", async () => {
+    const reportFailure = vi.fn();
+
+    await checkForClovyUpdate(
+      {
+        check: async () => {
+          throw {
+            code: "update_check_failed",
+            message: "Could not fetch a valid release JSON from the remote",
+          };
+        },
+        offer: vi.fn(),
+        reportNoUpdate: vi.fn(),
+        reportFailure,
+      },
+      "manual",
+    );
+
+    expect(reportFailure).toHaveBeenCalledWith(
+      "Could not fetch a valid release JSON from the remote",
+    );
   });
 
   it("uses neutral detail for an unstructured failure", async () => {
@@ -164,7 +184,7 @@ describe("checkForClovyUpdate", () => {
         check: async () => {
           throw {};
         },
-        prompt: vi.fn(),
+        offer: vi.fn(),
         reportNoUpdate: vi.fn(),
         reportFailure,
       },
@@ -172,58 +192,6 @@ describe("checkForClovyUpdate", () => {
     );
 
     expect(reportFailure).toHaveBeenCalledWith("An unknown error occurred.");
-  });
-});
-
-describe("startPeriodicClovyUpdateChecks", () => {
-  it("runs periodic checks until stopped", () => {
-    vi.useFakeTimers();
-    const runUpdateCheck = vi.fn();
-
-    try {
-      const stop = startPeriodicClovyUpdateChecks(runUpdateCheck);
-
-      vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS - 1);
-      expect(runUpdateCheck).not.toHaveBeenCalled();
-
-      vi.advanceTimersByTime(1);
-      expect(runUpdateCheck).toHaveBeenCalledWith("periodic");
-      expect(runUpdateCheck).toHaveBeenCalledTimes(1);
-
-      stop();
-      vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS);
-      expect(runUpdateCheck).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("installClovyUpdate", () => {
-  it("reports download progress, installs, and relaunches", async () => {
-    const candidate = update("notes");
-    const relaunch = vi.fn(async () => undefined);
-    const reportProgress = vi.fn();
-
-    await installClovyUpdate({
-      update: candidate,
-      relaunch,
-      reportProgress,
-      reportFailure: vi.fn(),
-    });
-
-    expect(candidate.downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(reportProgress).toHaveBeenCalledWith({
-      state: "downloading",
-      downloadedBytes: 40,
-      contentLength: 100,
-    });
-    expect(reportProgress).toHaveBeenCalledWith({
-      state: "installing",
-      downloadedBytes: 40,
-      contentLength: 100,
-    });
-    expect(relaunch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -274,5 +242,45 @@ describe("prepareClovyUpdate", () => {
     });
 
     expect(reportFailure).toHaveBeenCalledWith("An unknown error occurred.");
+  });
+});
+
+describe("nextUpdateStep", () => {
+  const idle = {
+    offered: true,
+    accepted: false,
+    preparing: false,
+    ready: false,
+    relaunching: false,
+    captureActive: false,
+  };
+
+  it("downloads nothing until the owner accepts", () => {
+    expect(nextUpdateStep(idle)).toBe("none");
+  });
+
+  it("downloads and installs once accepted with nothing recording", () => {
+    expect(nextUpdateStep({ ...idle, accepted: true })).toBe("install");
+  });
+
+  it("waits for a recording or dictation to end before installing", () => {
+    expect(nextUpdateStep({ ...idle, accepted: true, captureActive: true })).toBe("wait");
+  });
+
+  it("relaunches an installed update only when nothing is recording", () => {
+    const installed = { ...idle, accepted: true, ready: true };
+    expect(nextUpdateStep(installed)).toBe("relaunch");
+    expect(nextUpdateStep({ ...installed, captureActive: true })).toBe("wait");
+  });
+
+  it("leaves an installed update for later when the owner postpones the restart", () => {
+    expect(nextUpdateStep({ ...idle, ready: true })).toBe("none");
+  });
+
+  it("never starts a second step while one is running", () => {
+    expect(nextUpdateStep({ ...idle, accepted: true, preparing: true })).toBe("none");
+    expect(nextUpdateStep({ ...idle, accepted: true, ready: true, relaunching: true })).toBe(
+      "none",
+    );
   });
 });

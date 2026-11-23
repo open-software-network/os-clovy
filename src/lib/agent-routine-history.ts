@@ -60,3 +60,25 @@ export async function listRoutineRunSessions(options: { includeActive?: boolean 
     }))
     .sort((left, right) => sessionTimestamp(right).localeCompare(sessionTimestamp(left)));
 }
+
+export const ROUTINE_OPEN_EVENT = "clovy:routine:open";
+const ROUTINE_OPEN_REQUEST = "clovy:routine:open-request";
+let pendingRoutineOpen: string | null = null;
+
+export function requestRoutineRunOpen(sessionId: string) {
+  pendingRoutineOpen = sessionId;
+  window.dispatchEvent(new Event(ROUTINE_OPEN_REQUEST));
+}
+
+/** A native notification may arrive before the lazy-loaded Routines view. */
+export function onRoutineRunOpen(callback: (sessionId: string) => void) {
+  function consume() {
+    if (!pendingRoutineOpen) return;
+    const sessionId = pendingRoutineOpen;
+    pendingRoutineOpen = null;
+    callback(sessionId);
+  }
+  window.addEventListener(ROUTINE_OPEN_REQUEST, consume);
+  consume();
+  return () => window.removeEventListener(ROUTINE_OPEN_REQUEST, consume);
+}

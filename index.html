@@ -7,25 +7,24 @@
     <script>
       // Pre-paint theme bootstrap. Keep in sync with src/lib/theme.ts; the
       // storage key is duplicated here so the attribute is set before the
-      // module bundle runs, avoiding a light-mode flash on dark systems.
+      // module bundle runs, avoiding a light-mode flash before the saved preference loads.
       (function () {
+        document.documentElement.setAttribute("data-theme", "dark");
         try {
           var stored =
-            localStorage.getItem("os-clovy:theme") ||
-            localStorage.getItem("os-june:theme");
+            localStorage.getItem("os-clovy:theme");
           var resolved =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : stored === "system" && !window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "light"
+                : "dark";
           document.documentElement.setAttribute("data-theme", resolved);
           // Pre-paint brand accent + surface wash. Keep the id->[accent, wash]
           // map in sync with src/lib/brand.ts so a non-default accent doesn't
           // flash sage first.
           var brand =
-            localStorage.getItem("os-clovy:brand") ||
-            localStorage.getItem("os-june:brand");
+            localStorage.getItem("os-clovy:brand");
           var brands = {
             clay: ["#b5551f", "#976851"],
             rose: ["#a5655c", "#9e6961"],
@@ -49,13 +48,18 @@
           // with src/lib/font-scale.ts so a non-default size doesn't flash the
           // base scale before the bundle runs.
           var scale =
-            localStorage.getItem("os-clovy:font-scale") ||
-            localStorage.getItem("os-june:font-scale");
+            localStorage.getItem("os-clovy:font-scale");
           var scales = { default: 1, large: 1.1, larger: 1.2 };
           document.documentElement.style.setProperty(
             "--font-scale",
             String(scales[scale] || 1),
           );
+          // Pre-paint interface language for assistive tech. Keep the key in
+          // sync with src/i18n/locale.ts, which owns the full resolution.
+          var locale = localStorage.getItem("os-clovy:interface-locale");
+          if (locale === "pt-BR" || locale === "en") {
+            document.documentElement.lang = locale;
+          }
         } catch (e) {}
       })();
     </script>

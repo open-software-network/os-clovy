@@ -1,8 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Telegram community
-    url: https://t.me/+B4Z8KUqEsRc4ZGVh
-    about: Questions, ideas, and help from the team and other Clovy users.
   - name: Report a security vulnerability
-    url: https://github.com/open-software-network/os-clovy/security/policy
+    url: https://github.com/guilhermexp/os-clovy/security/policy
     about: Please report vulnerabilities privately, never through a public issue.

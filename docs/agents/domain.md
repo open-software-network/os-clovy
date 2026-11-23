@@ -10,9 +10,9 @@ This is a **single-context** repo: one glossary covers the React frontend
 
 - **`CONTEXT.md`** at the repo root — the canonical glossary / ubiquitous
   language. Glossary sections: Platform, Notes, Audio & recording, Agent
-  runtime, AI work & billing, Desktop shell & updates, Clovy companion. The `_Avoid_`
+  sessions, AI work & billing, Clovy companion (removed), Desktop shell. The `_Avoid_`
   lines are **binding**. Its **Flagged ambiguities** section is the quick
-  disambiguation table for the six overloaded terms: proxy, transcribe,
+  disambiguation table for the overloaded terms: proxy, transcribe,
   credits, session id, "the model", channel — check it before naming anything.
 - **`docs/adr/`** — read the ADRs touching the area you're about to work in.
   ADRs are **append-only**: supersede with a new ADR or dated addendum, never
@@ -22,13 +22,13 @@ This is a **single-context** repo: one glossary covers the React frontend
 
 | Working on | Read first |
 | --- | --- |
-| Updater, releases, channels | 0001 (public releases repo), 0003 (rc channel + promotion) |
+| Releases (the in-app updater and channels were removed in this fork) | 0001 (public releases repo), 0003 (rc channel + promotion); both carry a supersession note |
 | Live transcript preview | 0002 (ephemeral, never source of truth) |
 | Audio capture, sources, turns | 0004 (out-of-process system audio helper), 0005 (one WAV per source) |
-| Agent harness, runtime protocol, sandboxing, sessions | 0038 (Clovy-owned OpenAI Agents SDK harness), 0039 (Routines and MCP) |
-| Model picker, capabilities, pricing | 0007 (capabilities from live Venice catalog, never `traits`) |
+| CLI chat, sandboxing, sessions, tools | 0072 (CLI-only chat and neutral session persistence), 0063 (approval broker), 0058 (MCP relay); 0038/0039 are historical runtime decisions |
+| Model picker, capabilities, pricing | 0007 (provider catalog, never `traits`; read the 2026-10-08 OpenRouter addendum) |
 | Image generation / editing | 0008 (`/image` fast path + LLM tools) |
-| Clovy companion trust, native UI, pairing, relay, and mutation recovery | 0041-0048 (read the supersession chain through 0048) |
+| Clovy companion relay and crates (the desktop companion was removed in this fork) | 0041-0048, 0051-0053 (each carries a supersession note) |
 
 ## Don't conflate the three doc families
 
@@ -55,5 +55,5 @@ them.
 If your output contradicts an existing ADR, surface it explicitly rather
 than silently overriding:
 
-> _Contradicts ADR-0038 (Clovy-owned OpenAI Agents SDK harness), but worth
+> _Contradicts ADR-0072 (CLI-only chat), but worth
 > reopening because..._

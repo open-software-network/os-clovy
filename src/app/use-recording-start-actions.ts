@@ -1,4 +1,5 @@
 import { useCallback, useRef } from "react";
+import { t } from "../i18n";
 import {
   checkRecordingSourceReadiness,
   createNote,
@@ -7,21 +8,19 @@ import {
   listNotes,
   startMeetingRecording,
   startRecording,
+  validateAgentRecorderRequest,
 } from "../lib/tauri";
 import { playRecordingSound } from "../lib/recording-sounds";
 import { mergeSourceReadiness } from "../lib/source-readiness";
 import { errorCode, messageFromError } from "../lib/errors";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
-import type { RecordingSourceMode } from "../lib/tauri";
+import type { MeetingVideoRequest, RecordingSourceMode } from "../lib/tauri";
 import {
   recordingToStatus,
   revealMainWindowForMeetingStartError,
   startingRecordingStatus,
 } from "./app-helpers";
-import {
-  MEETING_START_REQUEST_EXPIRED_MESSAGE,
-  RECORDING_FUNDING_DISABLED_REASON,
-} from "./app-shell";
+import { meetingStartRequestExpiredMessage } from "./app-shell";
 import type { UseRecordingStartActionsDependencies } from "./use-recording-start-actions-types";
 
 export function useRecordingStartActions(dependencies: UseRecordingStartActionsDependencies) {
@@ -31,8 +30,8 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
     bootstrapped,
     calendarContextNotePartitionsRef,
     calendarContextNoteUpdatesRef,
+    crossPartitionRecordingNoteIdRef,
     dispatch,
-    fundingRequired,
     handleEmptyNotesAfterDelete,
     pendingCalendarContextAdoptionsRef,
     recordingNoteIdRef,
@@ -54,12 +53,14 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
   const handleStartRecordingForNote = useCallback(
     async (
       noteId: string,
-      options: { startAlreadyClaimed?: boolean; sourceMode?: RecordingSourceMode } = {},
+      options: {
+        startAlreadyClaimed?: boolean;
+        sourceMode?: RecordingSourceMode;
+        expectedProfile?: string;
+        agentRequestId?: string;
+        video?: MeetingVideoRequest;
+      } = {},
     ): Promise<boolean> => {
-      if (fundingRequired) {
-        setError(RECORDING_FUNDING_DISABLED_REASON);
-        return false;
-      }
       const startAlreadyClaimed = options.startAlreadyClaimed ?? false;
       const requestedSourceMode = options.sourceMode ?? sourceMode;
       if (
@@ -74,7 +75,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
       if (!startAlreadyClaimed) {
         recordingStartInFlightRef.current = true;
       }
-      const recordingPartition = getCurrentDataPartitionName();
+      const recordingPartition = options.expectedProfile ?? getCurrentDataPartitionName();
       setRecordingNote(noteId);
       const startingStatus = startingRecordingStatus(noteId, requestedSourceMode);
       recordingStatusRef.current = startingStatus;
@@ -92,7 +93,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
           setRecordingNote(undefined);
           recordingStatusRef.current = undefined;
           dispatch({ type: "recordingStatusCleared" });
-          setError(micSource?.message ?? "Microphone is not ready.");
+          setError(micSource?.message ?? t("app.recording.micNotReady"));
           return false;
         }
 
@@ -107,7 +108,26 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
             : requestedSourceMode;
 
         calendarContextNotePartitionsRef.current.set(noteId, recordingPartition);
-        const recording = await startRecording(noteId, effectiveMode);
+        if (options.expectedProfile && effectiveMode !== requestedSourceMode) {
+          throw new Error("The requested recording sources are unavailable.");
+        }
+        if (options.agentRequestId) await validateAgentRecorderRequest(options.agentRequestId);
+        const recording = options.video
+          ? await startRecording(
+              noteId,
+              effectiveMode,
+              options.expectedProfile,
+              options.agentRequestId,
+              options.video,
+            )
+          : options.expectedProfile
+            ? await startRecording(
+                noteId,
+                effectiveMode,
+                options.expectedProfile,
+                options.agentRequestId,
+              )
+            : await startRecording(noteId, effectiveMode);
         setRecordingNote(noteId);
         const status = recordingToStatus(recording);
         recordingStatusRef.current = status;
@@ -142,13 +162,16 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         setCheckingSourceReadiness(false);
       }
     },
-    [fundingRequired, setRecordingNote, sourceMode],
+    [setRecordingNote, sourceMode],
   );
 
-  const handleStartRecording = useCallback(async () => {
-    if (!selectedNoteId) return;
-    await handleStartRecordingForNote(selectedNoteId);
-  }, [handleStartRecordingForNote, selectedNoteId]);
+  const handleStartRecording = useCallback(
+    async (video?: MeetingVideoRequest) => {
+      if (!selectedNoteId) return;
+      await handleStartRecordingForNote(selectedNoteId, { video });
+    },
+    [handleStartRecordingForNote, selectedNoteId],
+  );
 
   const meetingStartReadyRef = useRef(false);
   const meetingStartListenerRegisteredRef = useRef(false);
@@ -157,11 +180,6 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
 
   const handleStartMeetingDetectedRecording = useCallback(
     async (requestId: string, noteId: string) => {
-      if (fundingRequired) {
-        revealMainWindowForMeetingStartError();
-        setError(RECORDING_FUNDING_DISABLED_REASON);
-        return true;
-      }
       const competingRecording = recordingStatusRef.current;
       if (recordingStartInFlightRef.current || competingRecording?.state === "starting") {
         return false;
@@ -182,7 +200,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
           calendarContextNoteUpdatesRef.current.delete(noteId);
           revealMainWindowForMeetingStartError();
           if (outcome.error.code === "meeting_start_expired") {
-            setError(MEETING_START_REQUEST_EXPIRED_MESSAGE);
+            setError(meetingStartRequestExpiredMessage());
           } else {
             setError(messageFromError(outcome.error));
           }
@@ -250,14 +268,14 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         setCheckingSourceReadiness(false);
       }
     },
-    [fundingRequired, setRecordingNote, sourceMode],
+    [setRecordingNote, sourceMode],
   );
 
   const handleStartAgentRecording = useCallback(
-    async (requestedSourceMode: RecordingSourceMode) => {
-      if (fundingRequired) {
-        throw new Error(RECORDING_FUNDING_DISABLED_REASON);
-      }
+    async (
+      requestedSourceMode: RecordingSourceMode,
+      target?: { noteId: string; profile: string; requestId?: string },
+    ) => {
       if (recordingStartInFlightRef.current || recordingStatusRef.current) {
         throw new Error(
           `A recording is already running for note ${recordingNoteIdRef.current ?? "unknown"}.`,
@@ -268,8 +286,12 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
       let handedStartClaimToRecorder = false;
       let createdNoteId: string | undefined;
       try {
-        const note = await createNote(undefined);
-        createdNoteId = note.id;
+        const note = target ? await getNote(target.noteId) : await createNote(undefined);
+        if (target && note.id !== target.noteId)
+          throw new Error("The recording note differs from its authorized target.");
+        if (target && getCurrentDataPartitionName() !== target.profile)
+          crossPartitionRecordingNoteIdRef.current = note.id;
+        if (!target) createdNoteId = note.id;
         dispatch({ type: "noteLoaded", note });
         setOriginFolderId(undefined);
         setOriginAllNotes(false);
@@ -278,11 +300,19 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         const started = await handleStartRecordingForNote(note.id, {
           startAlreadyClaimed: true,
           sourceMode: requestedSourceMode,
+          expectedProfile: target?.profile,
+          agentRequestId: target?.requestId,
         });
-        if (started) return note;
+        if (started) {
+          if (target && getCurrentDataPartitionName() !== target.profile)
+            crossPartitionRecordingNoteIdRef.current = note.id;
+          return note;
+        }
+        if (crossPartitionRecordingNoteIdRef.current === note.id)
+          crossPartitionRecordingNoteIdRef.current = undefined;
 
         try {
-          await deleteNote(note.id);
+          if (!target) await deleteNote(note.id);
         } catch (deleteErr) {
           console.warn("Failed to delete note after recording start failed", deleteErr);
         }
@@ -296,7 +326,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         } else {
           handleEmptyNotesAfterDelete();
         }
-        throw new Error("Recording did not start.");
+        throw new Error(t("app.recording.didNotStart"));
       } catch (err) {
         if (createdNoteId && !handedStartClaimToRecorder) {
           try {
@@ -312,7 +342,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         }
       }
     },
-    [fundingRequired, handleStartRecordingForNote, selectedNoteId],
+    [crossPartitionRecordingNoteIdRef, handleStartRecordingForNote, selectedNoteId],
   );
 
   // Click the floating global recorder pill to jump back to the note the

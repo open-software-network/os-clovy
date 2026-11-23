@@ -12,7 +12,20 @@ const TRANSCRIPTION_SAMPLE_RATE: u32 = 16_000;
 const TRANSCRIPTION_CHANNELS: u16 = 1;
 /// Raw interleaved input held per normalization pass: 32 KiB of PCM16.
 const NORMALIZATION_CHUNK_SAMPLE_BUDGET: usize = 16 * 1024;
-pub const MAX_TRANSCRIPTION_CHUNK_MS: i64 = 30 * 1000;
+/// The longest audio one final-transcription request carries: the cap on
+/// same-source turn coalescing, on a pack of speech turns, and on fixed
+/// splitting. 600 s of normalized PCM16 mono at 16 kHz is 19.2 MB, under
+/// Groq's 25 MB upload cap; it is the chunk Groq's own long-audio example
+/// uses, and an hour of one Source's speech is six requests instead of 120.
+pub const FINAL_TRANSCRIPTION_SPAN_MS: i64 = 600 * 1000;
+/// Audio a fixed split repeats at the start of the next chunk, as in Groq's
+/// long-audio example, so a word cut at the boundary is heard whole once;
+/// the repeated text is dropped when the chunks are joined.
+pub const SPLIT_OVERLAP_MS: i64 = 10 * 1000;
+/// The span cap before Groq rate limits shaped it. A session whose turns were
+/// already transcribed in this layout keeps it, so no finished turn is sent
+/// again (durable job ids come from the turn's bounds).
+pub const LEGACY_TRANSCRIPTION_SPAN_MS: i64 = 30 * 1000;
 /// Pre-roll backfilled ahead of a detected turn onset when extracting its WAV,
 /// so the first phonemes that fall below the VAD activity threshold (or before
 /// the sustained-activity run) are still transcribed. See JUN-110.
@@ -166,6 +179,8 @@ pub struct EchoRejectionReport {
     /// these, or the contiguous segment extraction re-includes the trimmed
     /// audio.
     pub microphone_echo_spans: Vec<(i64, i64)>,
+    /// Exact detected-turn intervals removed by trimming, including discarded short remainders.
+    pub discarded_microphone_spans: Vec<(i64, i64)>,
     /// Artifacts that lost audio to trimming. Full-source transcription
     /// fallbacks (missing-source resurrection, all-remainders-failed lane
     /// retry) must never run for these: the raw file contains the trimmed
@@ -274,8 +289,22 @@ pub fn coalesce_turns_for_transcription(turns: Vec<AudioTurn>) -> Vec<AudioTurn>
 /// audio right back into the transcribed segment, silently undoing echo
 /// rejection for every interior bleed shorter than the coherence gap.
 pub fn coalesce_turns_for_transcription_avoiding_echo(
+    turns: Vec<AudioTurn>,
+    microphone_echo_spans: &[(i64, i64)],
+) -> Vec<AudioTurn> {
+    coalesce_turns_for_transcription_with_max_span(
+        turns,
+        microphone_echo_spans,
+        FINAL_TRANSCRIPTION_SPAN_MS,
+    )
+}
+
+/// [`coalesce_turns_for_transcription_avoiding_echo`] with an explicit span
+/// cap, for a session that keeps the legacy layout.
+pub fn coalesce_turns_for_transcription_with_max_span(
     mut turns: Vec<AudioTurn>,
     microphone_echo_spans: &[(i64, i64)],
+    max_span_ms: i64,
 ) -> Vec<AudioTurn> {
     turns.sort_by(|left, right| {
         left.start_ms
@@ -295,7 +324,7 @@ pub fn coalesce_turns_for_transcription_avoiding_echo(
                 });
             if last.source == turn.source
                 && gap_ms <= TRANSCRIPTION_COHERENCE_GAP_MS
-                && merged_duration_ms <= MAX_TRANSCRIPTION_CHUNK_MS
+                && merged_duration_ms <= max_span_ms
                 && !bridges_trimmed_bleed
             {
                 last.end_ms = merged_end_ms;
@@ -622,11 +651,12 @@ pub fn split_wav_for_transcription(
     output_dir: &Path,
     stem: &str,
 ) -> Result<Vec<PathBuf>, AppError> {
-    split_wav_for_transcription_with_max_duration(
+    split_wav_for_transcription_with_overlap(
         input_path,
         output_dir,
         stem,
-        MAX_TRANSCRIPTION_CHUNK_MS,
+        FINAL_TRANSCRIPTION_SPAN_MS,
+        SPLIT_OVERLAP_MS,
     )
 }
 
@@ -636,14 +666,27 @@ pub fn split_wav_for_transcription_with_max_duration(
     stem: &str,
     max_chunk_ms: i64,
 ) -> Result<Vec<PathBuf>, AppError> {
+    split_wav_for_transcription_with_overlap(input_path, output_dir, stem, max_chunk_ms, 0)
+}
+
+/// Splits into chunks of at most `max_chunk_ms`, each starting `overlap_ms`
+/// before the previous one ends. Streams the input once, writing an
+/// overlapped span to both chunks.
+pub fn split_wav_for_transcription_with_overlap(
+    input_path: &Path,
+    output_dir: &Path,
+    stem: &str,
+    max_chunk_ms: i64,
+    overlap_ms: i64,
+) -> Result<Vec<PathBuf>, AppError> {
     let mut reader = WavReader::open(input_path)
         .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
     let spec = reader.spec();
     ensure_normalizable_spec(spec)?;
     let channels = spec.channels.max(1) as usize;
     let sample_rate = spec.sample_rate.max(1) as i64;
-    let total_frames = reader.duration() as i64;
-    let duration_ms = (total_frames * 1000) / sample_rate;
+    let total_frames = reader.duration() as usize;
+    let duration_ms = (total_frames as i64 * 1000) / sample_rate;
     let max_chunk_ms = max_chunk_ms.max(1);
     if duration_ms <= max_chunk_ms {
         return Ok(vec![input_path.to_path_buf()]);
@@ -652,42 +695,64 @@ pub fn split_wav_for_transcription_with_max_duration(
     std::fs::create_dir_all(output_dir)
         .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
     let frames_per_chunk = ((sample_rate * max_chunk_ms) / 1000).max(1) as usize;
-    let mut chunks = Vec::new();
-    let mut writer: Option<WavWriter<std::io::BufWriter<std::fs::File>>> = None;
-    let mut chunk_index = 0_usize;
-    let mut frames_in_chunk = 0_usize;
+    let overlap_frames = ((sample_rate * overlap_ms.max(0)) / 1000) as usize;
+    let step_frames = frames_per_chunk
+        .saturating_sub(overlap_frames)
+        .max(frames_per_chunk / 2)
+        .max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0_usize;
+    loop {
+        let end = (start + frames_per_chunk).min(total_frames);
+        ranges.push((start, end));
+        if end == total_frames {
+            break;
+        }
+        start += step_frames;
+    }
+
+    let chunks = (0..ranges.len())
+        .map(|index| output_dir.join(format!("{stem}-chunk-{index:03}.wav")))
+        .collect::<Vec<_>>();
+    let mut open: Vec<(usize, WavWriter<std::io::BufWriter<std::fs::File>>)> = Vec::new();
+    let mut next_range = 0_usize;
+    let mut frame = 0_usize;
     let mut channel_index = 0_usize;
 
     for sample in reader.samples::<i16>() {
-        if writer.is_none() || frames_in_chunk == frames_per_chunk {
-            if let Some(writer) = writer.take() {
-                writer
-                    .finalize()
+        if channel_index == 0 {
+            while next_range < ranges.len() && ranges[next_range].0 == frame {
+                let writer = WavWriter::create(&chunks[next_range], spec)
                     .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
+                open.push((ranges[next_range].1, writer));
+                next_range += 1;
             }
-            let path = output_dir.join(format!("{stem}-chunk-{chunk_index:03}.wav"));
-            writer = Some(
-                WavWriter::create(&path, spec)
-                    .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?,
-            );
-            chunks.push(path);
-            chunk_index += 1;
-            frames_in_chunk = 0;
-            channel_index = 0;
         }
-        if let Some(writer) = writer.as_mut() {
+        let sample = sample.unwrap_or(0);
+        for (_, writer) in open.iter_mut() {
             writer
-                .write_sample(sample.unwrap_or(0))
+                .write_sample(sample)
                 .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
         }
         channel_index += 1;
         if channel_index == channels {
             channel_index = 0;
-            frames_in_chunk += 1;
+            frame += 1;
+            let mut index = 0;
+            while index < open.len() {
+                if open[index].0 == frame {
+                    let (_, writer) = open.remove(index);
+                    writer
+                        .finalize()
+                        .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
+                } else {
+                    index += 1;
+                }
+            }
         }
     }
 
-    if let Some(writer) = writer.take() {
+    for (_, writer) in open {
         writer
             .finalize()
             .map_err(|error| AppError::new("audio_chunk_failed", error.to_string()))?;
@@ -983,6 +1048,9 @@ fn reject_speaker_echo_turns(
                     if kept.is_empty() {
                         report.dropped_turn_count += 1;
                     }
+                    report
+                        .discarded_microphone_spans
+                        .extend(discarded_turn_spans(turn, &kept));
                     report.microphone_echo_spans.extend(
                         echo_spans
                             .iter()
@@ -1371,6 +1439,21 @@ fn echo_runs_to_spans(
     spans
 }
 
+fn discarded_turn_spans(turn: &AudioTurn, kept: &[AudioTurn]) -> Vec<(i64, i64)> {
+    let mut cursor = turn.start_ms;
+    let mut removed = Vec::new();
+    for remainder in kept {
+        if remainder.start_ms > cursor {
+            removed.push((cursor, remainder.start_ms));
+        }
+        cursor = cursor.max(remainder.end_ms);
+    }
+    if cursor < turn.end_ms {
+        removed.push((cursor, turn.end_ms));
+    }
+    removed
+}
+
 /// Cut the echo spans out of `mic_turn` and return the remaining genuine
 /// stretches that are still long enough to stand as their own turns. An empty
 /// span list returns the turn unchanged; spans covering the whole turn return
@@ -1502,6 +1585,18 @@ fn source_order(source: &str) -> i32 {
 mod tests {
     use super::*;
     use hound::WavSpec;
+
+    #[test]
+    fn discarded_spans_include_short_remainders_but_never_kept_speech() {
+        let turn = make_turn("microphone", 0, 3000);
+        let kept = vec![make_turn("microphone", 1000, 2000)];
+        assert_eq!(
+            discarded_turn_spans(&turn, &kept),
+            vec![(0, 1000), (2000, 3000)]
+        );
+        assert_eq!(discarded_turn_spans(&turn, &[]), vec![(0, 3000)]);
+        assert!(discarded_turn_spans(&turn, std::slice::from_ref(&turn)).is_empty());
+    }
 
     #[test]
     fn normalization_boosts_quiet_wav_without_touching_original() {
@@ -2597,6 +2692,121 @@ mod tests {
             sample_format: SampleFormat::Int,
         };
         write_wav_samples(path, spec, samples);
+    }
+
+    /// Groq's upload cap on the free tier.
+    const GROQ_MAX_UPLOAD_BYTES: i64 = 26_214_400;
+
+    #[test]
+    fn a_final_transcription_span_stays_under_groqs_upload_cap() {
+        assert_eq!(FINAL_TRANSCRIPTION_SPAN_MS, 600_000);
+        assert_eq!(SPLIT_OVERLAP_MS, 10_000);
+        // A normalized span is PCM16 mono at 16 kHz plus a 44-byte header.
+        let span_bytes =
+            FINAL_TRANSCRIPTION_SPAN_MS * i64::from(TRANSCRIPTION_SAMPLE_RATE) / 1000 * 2 + 44;
+        assert_eq!(span_bytes, 19_200_044);
+        assert!(span_bytes < GROQ_MAX_UPLOAD_BYTES);
+    }
+
+    fn normalized_spec() -> WavSpec {
+        WavSpec {
+            channels: TRANSCRIPTION_CHANNELS,
+            sample_rate: TRANSCRIPTION_SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        }
+    }
+
+    fn chunk_durations_ms(chunks: &[PathBuf]) -> Vec<i64> {
+        chunks
+            .iter()
+            .map(|chunk| {
+                let reader = WavReader::open(chunk).unwrap();
+                i64::from(reader.duration()) * 1000 / i64::from(TRANSCRIPTION_SAMPLE_RATE)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overlapped_split_repeats_the_overlap_at_the_start_of_the_next_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.wav");
+        // 130 s whose samples count the second, so each chunk's first sample
+        // says where in the source it starts.
+        let samples = (0..16_000 * 130)
+            .map(|index| (index / 16_000) as i16)
+            .collect::<Vec<_>>();
+        write_wav_samples(&input, normalized_spec(), &samples);
+
+        let chunks = split_wav_for_transcription_with_overlap(
+            &input,
+            &dir.path().join("chunks"),
+            "source",
+            60_000,
+            10_000,
+        )
+        .unwrap();
+
+        // Starts at 0, 50 and 100 s; the last one ends with the source.
+        assert_eq!(chunk_durations_ms(&chunks), vec![60_000, 60_000, 30_000]);
+        let first_seconds = chunks
+            .iter()
+            .map(|chunk| read_samples(chunk)[0])
+            .collect::<Vec<_>>();
+        assert_eq!(first_seconds, vec![0, 50, 100]);
+    }
+
+    #[test]
+    fn a_split_without_overlap_keeps_back_to_back_chunks_under_the_upload_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.wav");
+        write_wav_samples(&input, normalized_spec(), &vec![1_000_i16; 16_000 * 70]);
+
+        let chunks = split_wav_for_transcription_with_max_duration(
+            &input,
+            &dir.path().join("chunks"),
+            "source",
+            30_000,
+        )
+        .unwrap();
+
+        assert_eq!(chunk_durations_ms(&chunks), vec![30_000, 30_000, 10_000]);
+        for chunk in &chunks {
+            let bytes = std::fs::metadata(chunk).unwrap().len() as i64;
+            assert!(bytes < GROQ_MAX_UPLOAD_BYTES, "{bytes}");
+        }
+    }
+
+    #[test]
+    fn same_source_turns_group_up_to_the_final_span_without_crossing_the_other_source() {
+        let turn = |source: &str, start_ms: i64, end_ms: i64| AudioTurn {
+            artifact_id: format!("artifact-{source}"),
+            source: source.to_string(),
+            source_path: PathBuf::from(source),
+            extraction_start_ms: start_ms,
+            start_ms,
+            end_ms,
+            turn_index: 0,
+        };
+        let mut turns = (0..12)
+            .map(|index| turn("microphone", index * 10_000, index * 10_000 + 9_000))
+            .collect::<Vec<_>>();
+        turns.push(turn("system", 125_000, 130_000));
+        turns.push(turn("microphone", 131_000, 140_000));
+
+        let grouped = coalesce_turns_for_transcription(turns);
+
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|turn| (turn.source.as_str(), turn.start_ms, turn.end_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("microphone", 0, 119_000),
+                ("system", 125_000, 130_000),
+                ("microphone", 131_000, 140_000),
+            ]
+        );
     }
 
     fn write_wav_samples(path: &Path, spec: WavSpec, samples: &[i16]) {

@@ -1,29 +1,28 @@
 [package]
 name = "clovy"
-version = "0.0.40"
+version = "0.1.6"
 description = "Clovy"
-authors = ["Open Software Network"]
+authors = ["guilhermexp"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.80.0"
-# Two binaries below; `cargo run` (tauri dev via scripts/cargo-clovy-runner.sh)
+# Several binaries below; `cargo run` (tauri dev via scripts/cargo-clovy-runner.sh)
 # must keep launching the app.
-default-run = "os-june"
+default-run = "clovy"
 
 [lib]
 name = "clovy_lib"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "os-june"
+name = "clovy"
 path = "src/main.rs"
 
-# The native messaging shim Chrome spawns for the Clovy extension (JUN-287).
-# Not auto-bundled: scripts/bundle-nm-shim.sh copies and signs it into
-# .tauri-helper/ before bundling (see tauri.macos.conf.json).
+# The Clovy MCP server's stdio relay (`mcp_server::stdio`).
+# bundle-clovy-mcp.sh copies and signs it into .tauri-helper/.
 [[bin]]
-name = "clovy-nm-shim"
-path = "src/bin/clovy_nm_shim.rs"
+name = "clovy-mcp"
+path = "src/bin/clovy_mcp.rs"
 required-features = ["helper-binaries"]
 
 [[bin]]
@@ -50,26 +49,23 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cpal = "0.15"
+dirs = "6"
 dotenvy = "0.15"
-futures-core = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 hound = "3.5"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 imagesize = "0.13"
 # fd plumbing (pipe/dup2) for the managed browser's CDP pipe transport.
 libc = "0.2"
 # Strips the Windows `\\?\` verbatim path prefix canonicalize() adds so it
 # never leaks into config.yaml or the UI. No-op on non-Windows.
 dunce = "1.0"
-clovy-companion-crypto = { path = "../crates/clovy-companion-crypto" }
-clovy-companion-protocol = { path = "../crates/clovy-companion-protocol" }
 rand = "0.8"
-qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+# Day intelligence distiller: segment, junk, and entity patterns.
+regex = "1"
 # Pure-Rust FFT for the echo-rejection similarity gate (GCC-PHAT lag estimation).
 rustfft = "6.2"
-# Matches the version tauri-plugin-updater resolves, so the version_comparator
-# closure can name the same `semver::Version` the updater hands it.
-semver = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -85,13 +81,11 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-process = "2.3.1"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2.10.1"
 thiserror = "2.0"
 tempfile = "3.14"
-tokio = { version = "1.42", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio = { version = "1.42", features = ["fs", "io-util", "io-std", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 # Untrusted URL parsing for the managed browser's public-web policy.
 url = "2"
@@ -100,6 +94,10 @@ uuid = { version = "1.11", features = ["serde", "v4"] }
 zeroize = { version = "1", features = ["derive"] }
 zip = { version = "=4.2.0", default-features = false }
 tauri-plugin-autostart = "2.5.1"
+
+[dev-dependencies]
+# Paused-clock tests for transcription pacing; the same tokio as above.
+tokio = { version = "1.42", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -111,17 +109,21 @@ apple-metal = { version = "=0.6.0", default-features = false }
 core-foundation = "0.10"
 keyring = { version = "3", features = ["apple-native"] }
 block2 = "0.6"
-cua-driver-core = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "NSAlert",
     "NSApplication",
+    "NSBitmapImageRep",
     "NSDragging",
     "NSDraggingItem",
     "NSDraggingSession",
     "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
     "NSImage",
+    "NSImageRep",
     "NSMenu",
     "NSMenuItem",
     "NSPasteboard",
@@ -131,6 +133,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
     "NSWorkspace",
     "libc",
+    "objc2-core-foundation",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
@@ -142,24 +145,87 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSGeometry",
     "objc2-core-foundation",
+    "NSDictionary",
 ] }
 window-vibrancy = "0.6"
-platform-macos = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 security-framework = "3.7"
+# SQLCipher for the encrypted activity database (activity.sqlite3). Cargo
+# unifies features into the single libsqlite3-sys that sqlx-sqlite links, so
+# this swaps the SQLite library for the whole macOS binary: the main
+# notes.sqlite3 keeps opening without `PRAGMA key` (SQLCipher without a key
+# behaves like plain SQLite). Windows enables the same feature below and
+# requires Strawberry Perl and NASM for the vendored OpenSSL build.
+libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Day intelligence: on-device sentence embeddings (BGE small, BERT) for the
+# distiller's semantic dedup, in pure Rust with Accelerate for the matmuls.
+# Weights are downloaded once into the app data dir (`day_intelligence::embedder`).
+# Windows enables the CPU-only build below; `fancy-regex` avoids onig's C dependency.
+candle-core = { version = "0.10", features = ["accelerate"] }
+candle-nn = { version = "0.10", features = ["accelerate"] }
+candle-transformers = { version = "0.10", features = ["accelerate"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# BGE CPU backend; Apple acceleration stays confined to the macOS target.
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 keyring = { version = "3", features = ["windows-native"] }
+libsqlite3-sys = { version = "0.30.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+windows-future = "0.2"
 windows = { version = "0.61", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Environment",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Variant",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

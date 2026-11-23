@@ -5,7 +5,6 @@ import Carbon
 import CoreMedia
 import CoreGraphics
 import Darwin
-import SoundAnalysis
 
 struct HelperEvent: Encodable {
     let type: String
@@ -185,8 +184,7 @@ final class ParentProcessMonitor {
 
     private let ownerPID: pid_t = {
         guard
-            let raw = ProcessInfo.processInfo.environment["CLOVY_OWNER_PID"]
-                ?? ProcessInfo.processInfo.environment["JUNE_OWNER_PID"],
+            let raw = ProcessInfo.processInfo.environment["CLOVY_OWNER_PID"],
             let parsed = Int32(raw),
             parsed > 1
         else {
@@ -257,14 +255,23 @@ enum RecordingCuePlayer {
     private static var sounds: [RecordingCueSound: NSSound] = [:]
     private static var completions: [RecordingCueSound: RecordingCueCompletion] = [:]
 
-    static func play(_ cue: RecordingCueSound) {
+    /// Loads every cue up front so the first press does not decode an mp3.
+    static func preload() {
+        for cue in [RecordingCueSound.start, .stop] where sounds[cue] == nil {
+            _ = load(cue)
+        }
+    }
+
+    /// Plays `cue` and returns its length in seconds, or nil if it did not play.
+    @discardableResult
+    static func play(_ cue: RecordingCueSound) -> TimeInterval? {
         let sound = sounds[cue] ?? load(cue)
         guard let sound else {
-            return
+            return nil
         }
         sound.stop()
         sound.currentTime = 0
-        sound.play()
+        return sound.play() ? sound.duration : nil
     }
 
     static func play(_ cue: RecordingCueSound, completion: @escaping () -> Void) {
@@ -324,91 +331,6 @@ enum RecordingCuePlayer {
     }
 }
 
-private final class SpeechActivityObserver: NSObject, SNResultsObserving {
-    private(set) var resultCount = 0
-    private(set) var maxSpeechConfidence = 0.0
-    private(set) var failed = false
-
-    func request(_ request: SNRequest, didProduce result: SNResult) {
-        guard let classification = result as? SNClassificationResult else {
-            return
-        }
-        resultCount += 1
-        // The request's knownClassifications is validated during setup, so a
-        // valid window that omits speech from its candidates is zero evidence
-        // for speech, not an analyzer failure.
-        let confidence = classification.classification(forIdentifier: "speech")?.confidence ?? 0
-        maxSpeechConfidence = max(maxSpeechConfidence, confidence)
-    }
-
-    func request(_ request: SNRequest, didFailWithError error: Error) {
-        failed = true
-    }
-
-    func requestDidComplete(_ request: SNRequest) {}
-}
-
-let speechAnalysisWindowDurationSeconds: Double = 0.5
-
-private enum SpeechConfidenceAnalysisError: Error {
-    case missingSpeechClassification
-}
-
-private final class SpeechConfidenceAnalysis {
-    private static let timeout: TimeInterval = 5
-
-    private let analyzer: SNAudioFileAnalyzer
-    private let observer = SpeechActivityObserver()
-    private var completion: ((Double?) -> Void)?
-
-    init(url: URL, completion: @escaping (Double?) -> Void) throws {
-        self.completion = completion
-        let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
-        guard request.knownClassifications.contains("speech") else {
-            throw SpeechConfidenceAnalysisError.missingSpeechClassification
-        }
-        request.windowDuration = CMTime(
-            seconds: speechAnalysisWindowDurationSeconds,
-            preferredTimescale: 16_000
-        )
-        request.overlapFactor = 0.5
-        analyzer = try SNAudioFileAnalyzer(url: url)
-        try analyzer.add(request, withObserver: observer)
-    }
-
-    func start() {
-        analyzer.analyze { success in
-            let confidence = success && !self.observer.failed && self.observer.resultCount > 0
-                ? self.observer.maxSpeechConfidence
-                : nil
-            runOnMain {
-                self.finish(confidence)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) {
-            self.finish(nil)
-        }
-    }
-
-    private func finish(_ confidence: Double?) {
-        guard let completion else {
-            return
-        }
-        self.completion = nil
-        analyzer.cancelAnalysis()
-        completion(confidence)
-    }
-}
-
-func analyzeSpeechConfidence(at url: URL, completion: @escaping (Double?) -> Void) {
-    do {
-        let analysis = try SpeechConfidenceAnalysis(url: url, completion: completion)
-        analysis.start()
-    } catch {
-        completion(nil)
-    }
-}
-
 func audioDurationSeconds(at url: URL) -> Double? {
     guard
         let file = try? AVAudioFile(forReading: url),
@@ -417,6 +339,52 @@ func audioDurationSeconds(at url: URL) -> Double? {
         return nil
     }
     return Double(file.length) / file.fileFormat.sampleRate
+}
+
+/// AAC 44.1 kHz mono, the default-input dictation format.
+let dictationRecorderSettings: [String: Any] = [
+    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+    AVSampleRateKey: 44_100,
+    AVNumberOfChannelsKey: 1,
+    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+]
+
+/// Covers the gap between `record()` returning and the cue reaching the
+/// microphone, so the cue's tail is cut too.
+let startCueTrimMarginSeconds: TimeInterval = 0.03
+
+/// Writes `url` without its first `seconds` to a sibling file and calls back
+/// on main with that file, or nil when nothing should be cut (the take is
+/// barely longer than the cut) or the cut failed. Passthrough keeps the AAC
+/// packets as they are, so the release path pays no re-encoding.
+func trimLeadingAudio(at url: URL, seconds: TimeInterval, completion: @escaping (URL?) -> Void) {
+    let asset = AVURLAsset(url: url)
+    let duration = asset.duration
+    let cut = CMTime(seconds: seconds, preferredTimescale: 44_100)
+    guard
+        duration.isNumeric,
+        CMTimeGetSeconds(duration) > seconds + 0.1,
+        let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough)
+    else {
+        completion(nil)
+        return
+    }
+    let outputURL = url.deletingPathExtension()
+        .appendingPathExtension("trimmed")
+        .appendingPathExtension("m4a")
+    try? FileManager.default.removeItem(at: outputURL)
+    export.outputURL = outputURL
+    export.outputFileType = .m4a
+    export.timeRange = CMTimeRange(start: cut, end: duration)
+    export.exportAsynchronously {
+        let completed = export.status == .completed
+        if !completed {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        runOnMain {
+            completion(completed ? outputURL : nil)
+        }
+    }
 }
 
 func microphoneDevices() -> [[String: String]] {
@@ -670,6 +638,7 @@ final class ShortcutKeyMonitor {
     /// which both summon the Input Monitoring ("keylogger") dialog.
     private var carbonHotKeys: [UInt32: (identity: ShortcutIdentity, ref: EventHotKeyRef)] = [:]
     private var nextCarbonHotKeyId: UInt32 = 1
+    private var repeatHotKey: (id: UInt32, ref: EventHotKeyRef)?
     private var shortcuts: [ShortcutKind: MonitoredShortcut] = [
         .pushToTalk: .defaultPushToTalk,
         .toggle: MonitoredShortcut(
@@ -713,6 +682,7 @@ final class ShortcutKeyMonitor {
 
         if globalMonitor == nil {
             emit("fn_monitor_unavailable", [
+                "code": "shortcut_monitor_unavailable",
                 "message": "Could not monitor global shortcut key events.",
             ])
         }
@@ -862,6 +832,9 @@ final class ShortcutKeyMonitor {
     }
 
     private func unregisterCarbonHotKeys() {
+        LastDictationInserter.shared.invalidate()
+        if let repeatHotKey { UnregisterEventHotKey(repeatHotKey.ref) }
+        repeatHotKey = nil
         for entry in carbonHotKeys.values {
             UnregisterEventHotKey(entry.ref)
         }
@@ -879,6 +852,8 @@ final class ShortcutKeyMonitor {
                 // Carbon has no fn modifier bit, and nothing permission-free
                 // can watch fn+key chords. Say so instead of silently dying.
                 emit("fn_monitor_unavailable", [
+                    "code": "shortcut_fn_chord_unsupported",
+                    "shortcut": shortcut.label,
                     "message": "The shortcut \(shortcut.label) combines Fn with another key, which is no longer supported. Pick a different shortcut in Settings.",
                 ])
                 continue
@@ -903,15 +878,46 @@ final class ShortcutKeyMonitor {
                 carbonHotKeys[nextCarbonHotKeyId] = (ShortcutIdentity(shortcut), ref)
             } else {
                 emit("fn_monitor_unavailable", [
+                    "code": "shortcut_register_failed",
+                    "shortcut": shortcut.label,
                     "message": "Could not register the shortcut \(shortcut.label).",
                 ])
             }
             nextCarbonHotKeyId += 1
         }
+        // Recording owns conflicts, even when its own registration failed.
+        guard !RepeatShortcutState.conflicts(with: Array(shortcuts.values)) else {
+            emitRepeatRegistrationFailure()
+            return
+        }
+        var ref: EventHotKeyRef?
+        let id = nextCarbonHotKeyId
+        nextCarbonHotKeyId += 1
+        let status = RegisterEventHotKey(9, UInt32(controlKey),
+            EventHotKeyID(signature: shortcutHotKeySignature, id: id),
+            GetEventDispatcherTarget(), 0, &ref)
+        if status == noErr, let ref {
+            repeatHotKey = (id, ref)
+        } else {
+            emitRepeatRegistrationFailure()
+        }
+    }
+
+    private func emitRepeatRegistrationFailure() {
+        emit("fn_monitor_unavailable", [
+            "code": "shortcut_register_failed",
+            "shortcut": "Ctrl+V",
+            "message": "Could not register Ctrl+V to reinsert the last dictation. Recording shortcuts take priority.",
+        ])
     }
 
     fileprivate func handleCarbonHotKey(id: UInt32, pressed: Bool) {
-        guard !isCapturingShortcut, let entry = carbonHotKeys[id] else {
+        guard !isCapturingShortcut else { return }
+        if id == repeatHotKey?.id {
+            LastDictationInserter.shared.handleKey(pressed: pressed)
+            return
+        }
+        guard let entry = carbonHotKeys[id] else {
             return
         }
         if pressed {
@@ -1180,14 +1186,286 @@ private let carbonHotKeyCallback: EventHandlerUPP = { _, eventRef, userInfo in
     return noErr
 }
 
+/// Main-thread state: a physical press owns at most one expiring request.
+struct RepeatShortcutState {
+    private(set) var held = false
+    private(set) var requestID: String?
+    private var deadline: TimeInterval = 0
+    private var insertionStarted = false
+
+    mutating func press(id: String, now: TimeInterval, busy: Bool) -> Bool {
+        guard !held else { return false }
+        held = true
+        invalidatePending()
+        guard !busy else { return false }
+        requestID = id
+        deadline = now + 1
+        return true
+    }
+
+    mutating func release() { held = false }
+    mutating func invalidatePending() { requestID = nil; insertionStarted = false }
+    mutating func reset() { held = false; invalidatePending() }
+
+    func matches(_ id: String?, now: TimeInterval) -> Bool {
+        guard let id, let requestID else { return false }
+        return id == requestID && (insertionStarted || now < deadline)
+    }
+
+    mutating func beginDelivery(responseID: String?, deliveryID: String, now: TimeInterval) -> Bool {
+        guard matches(responseID, now: now) else { return false }
+        requestID = deliveryID
+        return true
+    }
+
+    mutating func didStartInsertion() { insertionStarted = true }
+
+    static func conflicts(with shortcuts: [MonitoredShortcut]) -> Bool {
+        shortcuts.contains { !$0.isModifierOnly && $0.keyCode == 9
+            && $0.modifiers == ShortcutModifiers(control: true) }
+    }
+
+    static func canInsert(trusted: Bool, sameTarget: Bool, busy: Bool, modifiers: Bool) -> Bool {
+        trusted && sameTarget && !busy && !modifiers
+    }
+}
+
+/// Quartz keyboard Unicode payloads are bounded; never split a surrogate pair.
+func repeatUnicodeChunks(_ text: String) -> [ArraySlice<UniChar>] {
+    let units = Array(text.utf16)
+    var chunks: [ArraySlice<UniChar>] = []
+    var start = 0
+    while start < units.count {
+        var end = min(start + 20, units.count)
+        if end < units.count && (0xD800...0xDBFF).contains(units[end - 1]) { end -= 1 }
+        chunks.append(units[start..<end])
+        start = end
+    }
+    return chunks
+}
+
+final class LastDictationInserter {
+    static let shared = LastDictationInserter()
+    private var state = RepeatShortcutState()
+    private var target: NSRunningApplication?
+    private var element: AXUIElement?
+    private var activationObserver: NSObjectProtocol?
+
+    private init() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.invalidatePending() }
+    }
+
+    func invalidatePending() {
+        state.invalidatePending()
+        target = nil
+        element = nil
+    }
+
+    func invalidate() { invalidatePending(); state.reset() }
+
+    private func checkAccessibility() -> Bool {
+        guard AXIsProcessTrusted() else {
+            emit("permission_status", permissionPayload())
+            emit("error", ["code": "accessibility_permission_missing",
+                "message": "Accessibility permission is required to reinsert dictation."])
+            return false
+        }
+        return true
+    }
+
+    private func focusedElement(_ app: NSRunningApplication) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
+            kAXFocusedUIElementAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private func sameTarget(id: String) -> Bool {
+        // AX is synchronous and may block while focus, authority or the deadline changes.
+        // Query first; sample native readiness and the frontmost app only after it returns.
+        guard let target, let element, let current = focusedElement(target) else { return false }
+        let same = CFEqual(element, current)
+        let trusted = checkAccessibility()
+        let modifiers = !CGEventSource.flagsState(.combinedSessionState)
+            .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]).isEmpty
+        return RepeatShortcutState.canInsert(trusted: trusted, sameTarget: same, busy: dictation.listening, modifiers: modifiers)
+            && self.target === target
+            && self.element.map { CFEqual($0, element) } == true
+            && !target.isTerminated
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier
+            && state.matches(id, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func handleKey(pressed: Bool) {
+        if !pressed { state.release(); return }
+        let id = UUID().uuidString
+        guard state.press(id: id, now: ProcessInfo.processInfo.systemUptime, busy: dictation.listening) else { return }
+        guard checkAccessibility(), let app = NSWorkspace.shared.frontmostApplication,
+            let focused = focusedElement(app) else { invalidatePending(); return }
+        target = app
+        element = focused
+        emit("repeat_last_dictation_requested", ["requestId": id])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.state.requestID == id else { return }
+            self.invalidatePending()
+        }
+    }
+
+    func receive(requestID: String?, text: String?) {
+        guard state.matches(requestID, now: ProcessInfo.processInfo.systemUptime) else { return }
+        guard let text, !text.isEmpty else { invalidatePending(); return }
+        // Retire response authority before waiting. Duplicate IPC replies cannot type twice.
+        let deliveryID = UUID().uuidString
+        guard state.beginDelivery(responseID: requestID, deliveryID: deliveryID,
+            now: ProcessInfo.processInfo.systemUptime) else { return }
+        insert(repeatUnicodeChunks(text), index: 0, id: deliveryID)
+    }
+
+    private func insert(_ chunks: [ArraySlice<UniChar>], index: Int, id: String) {
+        guard state.matches(id, now: ProcessInfo.processInfo.systemUptime) else {
+            if state.requestID == id { invalidatePending() }
+            return
+        }
+        guard checkAccessibility() else { invalidatePending(); return }
+        guard !dictation.listening else { invalidatePending(); return }
+        let modifiers = !CGEventSource.flagsState(.combinedSessionState)
+            .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]).isEmpty
+        guard !modifiers else {
+            // Wait only before the first chunk; a new chord during delivery interrupts it.
+            guard index == 0 else { invalidatePending(); return }
+            // The original request deadline bounds modifier release.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.insert(chunks, index: index, id: id)
+            }
+            return
+        }
+        guard index < chunks.count else { invalidatePending(); return }
+        let source = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+            invalidatePending(); return
+        }
+        down.flags = []
+        up.flags = []
+        chunks[index].withUnsafeBufferPointer { buffer in
+            if let pointer = buffer.baseAddress {
+                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: pointer)
+            }
+        }
+        // All event preparation precedes the final AX/readiness/target/authority check.
+        // The remaining check-to-post interval is not an atomic WindowServer guarantee.
+        guard sameTarget(id: id) else {
+            if state.requestID == id { invalidatePending() }
+            return
+        }
+        state.didStartInsertion()
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        // Yield between chunks so focus/capture/start invalidation can run on the main queue.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.001) { [weak self] in
+            self?.insert(chunks, index: index + 1, id: id)
+        }
+    }
+}
+
+/// One take's native destination. Optional AX references never become a late lookup target.
+struct DictationPasteTarget {
+    let takeID: String
+    let app: NSRunningApplication?
+    let window: AXUIElement?
+    let field: AXUIElement?
+
+    private static let messageTimeout: Float = 0.02
+    private static let captureBudget: TimeInterval = 0.05
+
+    private static func boundMessaging(_ element: AXUIElement, until deadline: DispatchTime) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline.uptimeNanoseconds else { return false }
+        let remaining = Float(Double(deadline.uptimeNanoseconds - now) / 1_000_000_000)
+        return AXUIElementSetMessagingTimeout(element, min(messageTimeout, remaining)) == .success
+    }
+
+    private static func readElement(_ element: AXUIElement, attribute: String, until deadline: DispatchTime) -> AXUIElement? {
+        guard boundMessaging(element, until: deadline) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    static func capture(takeID: String, app: NSRunningApplication?) -> DictationPasteTarget {
+        guard let app, !app.isTerminated, AXIsProcessTrusted() else {
+            return DictationPasteTarget(takeID: takeID, app: app, window: nil, field: nil)
+        }
+        // One budget shared by all queries; slow AX cannot add one full timeout per attribute.
+        let deadline = DispatchTime.now() + captureBudget
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let window = readElement(appElement, attribute: kAXFocusedWindowAttribute, until: deadline)
+        // A timeout on the system-wide AX object changes the helper's global default,
+        // including Control+V. Query the captured app instead, keeping this budget local.
+        var field = readElement(appElement, attribute: kAXFocusedUIElementAttribute, until: deadline)
+        if let candidate = field {
+            var owner: pid_t = 0
+            if !boundMessaging(candidate, until: deadline)
+                || AXUIElementGetPid(candidate, &owner) != .success || owner != app.processIdentifier {
+                field = nil
+            } else if let window {
+                // A same-app window switch during capture must not attach the new field to the old window.
+                let fieldWindow = readElement(candidate, attribute: kAXWindowAttribute, until: deadline)
+                if fieldWindow.map({ CFEqual($0, window) }) != true { field = nil }
+            }
+        }
+        return DictationPasteTarget(takeID: takeID, app: app, window: window, field: field)
+    }
+
+    func restoreFocus(until deadline: DispatchTime) -> Bool {
+        guard let app, !app.isTerminated else { return false }
+        if let window {
+            guard AXIsProcessTrusted(), Self.boundMessaging(window, until: deadline) else { return false }
+            let raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            guard Self.boundMessaging(window, until: deadline) else { return false }
+            let madeMain = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            guard raised == .success || madeMain == .success else { return false }
+        }
+        if let field {
+            let restored = Self.boundMessaging(field, until: deadline)
+                && AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+            if !restored {
+                emit("dictation_focus_restore", takePayload([
+                    "message": "The original dictation field did not accept focus; keeping the original window.",
+                ], takeID: takeID))
+            }
+        }
+        return true
+    }
+
+    func isFrontmost(until deadline: DispatchTime) -> Bool {
+        guard let app else { return false }
+        if let window {
+            guard AXIsProcessTrusted(), let current = Self.readElement(
+                AXUIElementCreateApplication(app.processIdentifier), attribute: kAXFocusedWindowAttribute, until: deadline
+            ), CFEqual(window, current) else { return false }
+        }
+        // Read app identity and time after potentially blocking AX, immediately before authorization.
+        return !app.isTerminated && app.isActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            && DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds
+    }
+}
+
 final class FocusTargetController {
     static let shared = FocusTargetController()
 
     private var lastExternalApp: NSRunningApplication?
-    private var pinnedTarget: NSRunningApplication?
-    private let ignoredBundleIdentifiers: Set<String> = [
-        "co.opensoftware.june.dictation-helper",
-    ]
+    private var pinnedTarget: DictationPasteTarget?
+    // Debug builds carry `<published>.dev.w<worktree>` (src-tauri/build.rs), so
+    // ignore this helper by its own bundle identifier as well as the release one.
+    private let ignoredBundleIdentifiers: Set<String> = Set(
+        ["dev.guilhermexp.clovy.dictation-helper", Bundle.main.bundleIdentifier].compactMap { $0 }
+    )
 
     private init() {}
 
@@ -1204,8 +1482,25 @@ final class FocusTargetController {
         }
     }
 
-    func pinCurrentTarget() {
-        pinnedTarget = lastExternalApp
+    func refreshCandidate() {
+        if let app = NSWorkspace.shared.frontmostApplication {
+            rememberIfExternal(app)
+        }
+    }
+
+    func pinCurrentTarget(takeID: String) {
+        refreshCandidate()
+        // Freeze the app before any synchronous AX query can observe a later activation.
+        pinnedTarget = DictationPasteTarget.capture(takeID: takeID, app: lastExternalApp)
+    }
+
+    func targetForTake(_ takeID: String?) -> DictationPasteTarget? {
+        guard let pinnedTarget, takeID == nil || pinnedTarget.takeID == takeID else { return nil }
+        return pinnedTarget
+    }
+
+    func restorePinnedTarget(_ target: DictationPasteTarget?) {
+        pinnedTarget = target
     }
 
     func clearPinnedTarget() {
@@ -1213,17 +1508,25 @@ final class FocusTargetController {
     }
 
     func pasteTarget() -> NSRunningApplication? {
-        guard let app = pinnedTarget, !app.isTerminated else {
+        guard let app = pinnedTarget?.app, !app.isTerminated else {
             return nil
         }
         return app
     }
 
-    func targetDescription() -> String {
-        guard let app = lastExternalApp, !app.isTerminated else {
-            return "unknown"
+    /// Presentation only. Paste retains the exact NSRunningApplication, not
+    /// a lookup by these metadata. Keep the pinned identity even if it quits.
+    func targetMetadata(pinned: Bool = false) -> Any {
+        let usePinned = pinned || pinnedTarget != nil
+        guard let app = usePinned ? pinnedTarget?.app : lastExternalApp,
+              usePinned || !app.isTerminated else {
+            return NSNull()
         }
-        return app.localizedName ?? app.bundleIdentifier ?? "\(app.processIdentifier)"
+        return [
+            "app": app.localizedName ?? app.bundleIdentifier ?? "\(app.processIdentifier)",
+            "bundleIdentifier": app.bundleIdentifier ?? "",
+            "processIdentifier": Int(app.processIdentifier),
+        ] as [String: Any]
     }
 
     func pasteTargetDescription() -> String {
@@ -1236,11 +1539,9 @@ final class FocusTargetController {
     /// Rust cleanup needs the same target that paste will use, so a pinned
     /// dictation target must win over later activation drift.
     func targetBundleIdentifier() -> String? {
-        if let app = pinnedTarget {
-            guard !app.isTerminated else {
-                return nil
-            }
-            return app.bundleIdentifier
+        if let pinnedTarget {
+            // Identity remains pinned even if the app quits; cleanup must not sample another app.
+            return pinnedTarget.app?.bundleIdentifier
         }
         guard let app = lastExternalApp, !app.isTerminated else {
             return nil
@@ -1267,7 +1568,7 @@ final class FocusTargetController {
             return
         }
         lastExternalApp = app
-        emit("focus_target", ["app": targetDescription()])
+        dictation.emitCandidateTarget()
     }
 }
 
@@ -1297,10 +1598,12 @@ enum SelectedDeviceRecorderError: LocalizedError {
 final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
-    private let queue = DispatchQueue(label: "co.opensoftware.clovy.dictation-recorder")
+    private let queue = DispatchQueue(label: "dev.guilhermexp.clovy.dictation-recorder")
     private let writer: AVAssetWriter
     private let writerInput: AVAssetWriterInput
     private var didStartWriting = false
+    /// The first written sample's time: the file's time zero. Set on `queue`.
+    private var firstSamplePresentationTime: CMTime?
     private var isStopping = false
     private var finishHandler: ((Error?) -> Void)?
     private let failureHandler: (Error) -> Void
@@ -1361,6 +1664,16 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         session.startRunning()
     }
 
+    /// Now, on the clock that stamps this session's samples.
+    func clockTime() -> CMTime {
+        CMClockGetTime(session.synchronizationClock ?? CMClockGetHostTimeClock())
+    }
+
+    /// When the file starts, on `clockTime()`'s clock; nil before any sample.
+    var firstSampleTime: CMTime? {
+        queue.sync { firstSamplePresentationTime }
+    }
+
     func stop(_ completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else {
@@ -1418,7 +1731,9 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
                 fail(writer.error ?? SelectedDeviceRecorderError.cannotStartWriter)
                 return
             }
-            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            let firstSample = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: firstSample)
+            firstSamplePresentationTime = firstSample
             didStartWriting = true
         }
 
@@ -1556,7 +1871,7 @@ enum AutoDetectInputMeterError: LocalizedError {
 final class AutoDetectInputMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
-    private let queue = DispatchQueue(label: "co.opensoftware.clovy.dictation-auto-meter")
+    private let queue = DispatchQueue(label: "dev.guilhermexp.clovy.dictation-auto-meter")
     private let levelHandler: (Float) -> Void
     private var pendingLevel: Float = 0
     private var lastLevelEmit: TimeInterval = 0
@@ -1628,8 +1943,7 @@ final class AutoDetectInputMeter: NSObject, AVCaptureAudioDataOutputSampleBuffer
 }
 
 func autoDetectRawMeteringEnabled() -> Bool {
-    guard let rawValue = ProcessInfo.processInfo.environment["OS_CLOVY_DICTATION_RAW_METER"]
-        ?? ProcessInfo.processInfo.environment["OS_JUNE_DICTATION_RAW_METER"] else {
+    guard let rawValue = ProcessInfo.processInfo.environment["OS_CLOVY_DICTATION_RAW_METER"] else {
         return true
     }
     switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
@@ -1669,12 +1983,6 @@ enum RecordingPurpose {
 }
 
 let micTestCapturePaddingSeconds: Double = 0.35
-// Keep in sync with DICTATION_AUDIO_ACTIVITY_THRESHOLD in dictation.rs. The
-// trained classifier only affects complete-window captures below this
-// independent meter gate, so louder dictation should not pay for file analysis
-// during finalization. Sub-window captures are quarantined before this gate.
-let dictationAudioActivityThreshold: Float = 0.04
-
 private let escapeCancelHotKeySignature = OSType(0x4A_44_45_43) // "JDEC"
 
 final class DictationEscapeCancelMonitor {
@@ -1707,6 +2015,7 @@ final class DictationEscapeCancelMonitor {
             return true
         } else {
             emit("escape_cancel_unavailable", [
+                "code": "escape_cancel_unavailable",
                 "message": "Could not register Escape to cancel dictation.",
             ])
             return false
@@ -1783,6 +2092,10 @@ private let escapeCancelHotKeyCallback: EventHandlerUPP = { _, eventRef, userInf
 
 final class DictationController {
     private var audioRecorder: AVAudioRecorder?
+    /// The next take's default-input recorder: file created and audio path
+    /// prepared, nothing recorded (ditado-rapido D4).
+    private var preparedRecorder: (recorder: AVAudioRecorder, url: URL)?
+    private var deviceObservers: [NSObjectProtocol] = []
     private var selectedDeviceRecorder: SelectedDeviceRecorder?
     private var autoDetectInputMeter: AutoDetectInputMeter?
     private var recordingURL: URL?
@@ -1797,6 +2110,11 @@ final class DictationController {
     private var isFinalizing = false
     private var startPending = false
     private var maxObservedAudioLevel: Float = 0
+    /// Seconds at the start of the current take's file covered by the start
+    /// cue; cut before `recording_ready`. Zero when no cue played.
+    private var startCueTrimSeconds: TimeInterval = 0
+    /// When the start cue ends, on a pinned microphone's sample clock.
+    private var startCueEndClockTime: CMTime?
     private var activeTakeID: String?
     private var cancelledTakeIDs = Set<String>()
     /// Identifies the recorder whose asynchronous callbacks may mutate the
@@ -1807,6 +2125,14 @@ final class DictationController {
 
     var listening: Bool {
         isListening || isFinalizing || startPending
+    }
+
+    func emitCandidateTarget() {
+        guard isListening, recordingPurpose == .dictation, let activeTakeID else { return }
+        emitJSON("focus_target", [
+            "takeId": activeTakeID,
+            "target": FocusTargetController.shared.targetMetadata(),
+        ])
     }
 
     func emitDiagnostics() {
@@ -1825,6 +2151,8 @@ final class DictationController {
     func setMicrophone(id: String?, name: String?) {
         preferredMicrophoneID = id?.isEmpty == true ? nil : id
         preferredMicrophoneName = name?.isEmpty == true ? nil : name
+        discardPreparedRecorder()
+        prepareNextRecording()
         emit("microphone_selected", [
             "id": preferredMicrophoneID ?? "",
             "name": preferredMicrophoneName ?? "Auto-detect",
@@ -1841,6 +2169,7 @@ final class DictationController {
     private var dictationStartGeneration = 0
 
     func start(takeID: String? = nil) {
+        LastDictationInserter.shared.invalidatePending()
         if startPending {
             if takeID != activeTakeID {
                 emit("error", takePayload([
@@ -1860,23 +2189,36 @@ final class DictationController {
 
         startPending = true
         let requestedTakeID = takeID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        activeTakeID = requestedTakeID
+        let startedTakeID = requestedTakeID
             .flatMap { !$0.isEmpty && $0.utf8.count <= 128 ? $0 : nil }
             ?? UUID().uuidString.lowercased()
+        activeTakeID = startedTakeID
+        FocusTargetController.shared.pinCurrentTarget(takeID: startedTakeID)
         dictationStartGeneration += 1
         let generation = dictationStartGeneration
+        // The common case: access was granted before, so capture starts on
+        // this main-thread turn with no permission callback (ditado-rapido D3).
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            beginDictationCapture()
+            return
+        }
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] microphoneAllowed in
             // Hop to main: commands (including the discard that may have
             // cancelled this start) are handled there, so the generation
             // comparison is ordered against them.
             DispatchQueue.main.async {
-                guard let self, self.dictationStartGeneration == generation else {
+                guard
+                    let self,
+                    self.startPending,
+                    self.dictationStartGeneration == generation
+                else {
                     return
                 }
                 guard microphoneAllowed else {
                     let rejectedTakeID = self.activeTakeID
                     self.startPending = false
                     self.activeTakeID = nil
+                    FocusTargetController.shared.clearPinnedTarget()
                     emit("error", takePayload([
                         "code": "microphone_permission_missing",
                         "message": "Microphone permission is required.",
@@ -1884,23 +2226,55 @@ final class DictationController {
                     emit("permission_status", permissionPayload())
                     return
                 }
-                let beginRecording = { [weak self] in
-                    guard
-                        let self,
-                        self.startPending,
-                        self.dictationStartGeneration == generation
-                    else {
-                        return
-                    }
-                    self.startPending = false
-                    self.startRecording(purpose: .dictation, durationSeconds: nil)
-                }
-                // The cue defines the start-speaking boundary and finishes
-                // before capture begins, keeping Clovy's own sound out of the
-                // recording while providing feedback for every start mode.
-                RecordingCuePlayer.play(.start, completion: beginRecording)
+                self.beginDictationCapture()
             }
         }
+    }
+
+    /// Starts capture at once and plays the start cue alongside it. Capture
+    /// no longer waits for the cue (it cost the cue's whole length on every
+    /// press); instead the cue's span is cut from the file when the take
+    /// stops (`finishDictationRecording`), so Clovy's own sound never
+    /// reaches the transcript.
+    private func beginDictationCapture() {
+        startPending = false
+        startRecording(purpose: .dictation, durationSeconds: nil)
+        guard isListening, recordingPurpose == .dictation else {
+            return
+        }
+        // Measured on the file's own clock, read just before the cue plays.
+        let fileTime = audioRecorder?.currentTime
+        let clockTime = selectedDeviceRecorder?.clockTime()
+        guard let cueLength = RecordingCuePlayer.play(.start) else {
+            return
+        }
+        if let fileTime {
+            // AVAudioRecorder's file starts at record(): currentTime is how
+            // far into the file the cue begins.
+            startCueTrimSeconds = fileTime + cueLength + startCueTrimMarginSeconds
+        } else if let clockTime {
+            // A pinned microphone's file starts at its first sample, which
+            // may come after the cue started; settled when the take stops.
+            startCueEndClockTime = CMTimeAdd(
+                clockTime,
+                CMTime(seconds: cueLength, preferredTimescale: 44_100)
+            )
+        }
+    }
+
+    /// The pinned-microphone file starts at its first sample: cut only what
+    /// is left of the cue after it, nothing when the cue ended first.
+    private func settleSelectedDeviceCueTrim(firstSampleTime: CMTime?) {
+        guard
+            let cueEnd = startCueEndClockTime,
+            let firstSampleTime,
+            firstSampleTime.isNumeric
+        else {
+            startCueTrimSeconds = 0
+            return
+        }
+        let remaining = CMTimeGetSeconds(CMTimeSubtract(cueEnd, firstSampleTime))
+        startCueTrimSeconds = remaining > 0 ? remaining + startCueTrimMarginSeconds : 0
     }
 
     func stop(takeID: String? = nil) {
@@ -1933,16 +2307,25 @@ final class DictationController {
     }
 
     func toggle(shortcut: String, takeID: String? = nil) {
+        LastDictationInserter.shared.invalidatePending()
         if isListening || startPending {
             emit("hotkey_trigger", ["action": "stop", "shortcut": shortcut])
             stop(takeID: takeID)
         } else if !isFinalizing {
             emit("hotkey_trigger", ["action": "start", "shortcut": shortcut])
             start(takeID: takeID)
+        } else if let takeID {
+            // Rust sent this toggle as a start and holds its take id until a
+            // terminal event (the update gate): refuse it out loud.
+            emit("error", takePayload([
+                "code": "recording_start_busy",
+                "message": "Dictation is still finishing the previous take.",
+            ], takeID: takeID))
         }
     }
 
     func startMicTest(durationSeconds: Double) {
+        LastDictationInserter.shared.invalidatePending()
         guard !listening else {
             emit("mic_test_error", ["code": "already_listening", "message": "Audio capture is already running."])
             return
@@ -2044,13 +2427,73 @@ final class DictationController {
 
     func shutdown() {
         resetRecordingState()
+        discardPreparedRecorder()
         emit("shutdown_ack")
         exit(0)
     }
 
+    /// Readies the next take's default-input recorder so a press only calls
+    /// `record()`. Never records, and does nothing without microphone access,
+    /// while capture runs, or when a pinned microphone uses the capture path.
+    func prepareNextRecording() {
+        observeInputDevicesOnce()
+        guard
+            preparedRecorder == nil,
+            !listening,
+            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            microphoneDevice(for: preferredMicrophoneID) == nil
+        else {
+            return
+        }
+        let url = temporaryRecordingURL()
+        guard let recorder = try? AVAudioRecorder(url: url, settings: dictationRecorderSettings) else {
+            return
+        }
+        recorder.isMeteringEnabled = true
+        guard recorder.prepareToRecord() else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        preparedRecorder = (recorder, url)
+    }
+
+    private func takePreparedRecorder() -> (recorder: AVAudioRecorder, url: URL)? {
+        let prepared = preparedRecorder
+        preparedRecorder = nil
+        return prepared
+    }
+
+    private func discardPreparedRecorder() {
+        guard let prepared = takePreparedRecorder() else {
+            return
+        }
+        prepared.recorder.deleteRecording()
+        try? FileManager.default.removeItem(at: prepared.url)
+    }
+
+    /// A recorder prepared for one input must not capture from another: a
+    /// device that comes or goes drops it, and the next one is prepared.
+    private func observeInputDevicesOnce() {
+        guard deviceObservers.isEmpty else {
+            return
+        }
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            deviceObservers.append(NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.discardPreparedRecorder()
+                self?.prepareNextRecording()
+            })
+        }
+    }
+
     private func startRecording(purpose: RecordingPurpose, durationSeconds: Double?) {
         let pendingDictationTakeID = purpose == .dictation ? activeTakeID : nil
-        resetRecordingState()
+        let pendingTarget = purpose == .dictation
+            ? FocusTargetController.shared.targetForTake(pendingDictationTakeID) : nil
+        resetRecordingState(preservingPasteTarget: pendingTarget)
         activeTakeID = pendingDictationTakeID
         cleanupMicTestSample()
         recordingPurpose = purpose
@@ -2075,17 +2518,18 @@ final class DictationController {
             return
         }
 
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-
         do {
-            let recorder = try AVAudioRecorder(url: nextRecordingURL, settings: settings)
-            recorder.isMeteringEnabled = true
-            recorder.prepareToRecord()
+            let recorder: AVAudioRecorder
+            let recorderURL: URL
+            if purpose == .dictation, let prepared = takePreparedRecorder() {
+                recorder = prepared.recorder
+                recorderURL = prepared.url
+            } else {
+                recorder = try AVAudioRecorder(url: nextRecordingURL, settings: dictationRecorderSettings)
+                recorderURL = nextRecordingURL
+                recorder.isMeteringEnabled = true
+                recorder.prepareToRecord()
+            }
 
             guard recorder.record() else {
                 emit("error", takePayload([
@@ -2097,7 +2541,7 @@ final class DictationController {
             }
 
             audioRecorder = recorder
-            recordingURL = nextRecordingURL
+            recordingURL = recorderURL
             startAutoDetectMetering(recordingInstanceID: recordingInstanceID)
             markRecordingStarted(
                 microphone: preferredMicrophoneName ?? "Auto-detect",
@@ -2208,35 +2652,14 @@ final class DictationController {
         if let activeTakeID {
             basePayload["takeId"] = activeTakeID
         }
-        if let duration = audioDurationSeconds(at: recordingURL),
-           duration < speechAnalysisWindowDurationSeconds {
-            var payload = basePayload
-            payload["speechAnalysisStatus"] = "no_complete_window"
-            emit("recording_ready", payload)
-            return
+        // Rust ends a take under half a second as no speech without an
+        // upload: Whisper invents text for near-empty audio (design D5).
+        if let duration = audioDurationSeconds(at: recordingURL) {
+            basePayload["audioDurationSeconds"] = String(format: "%.3f", duration)
         }
-        guard observedAudioLevel < dictationAudioActivityThreshold else {
-            emit("recording_ready", basePayload)
-            return
-        }
-        analyzeSpeechConfidence(at: recordingURL) { [weak self] speechConfidence in
-            guard
-                let self,
-                self.recordingInstanceID == recordingInstanceID,
-                self.isFinalizing,
-                self.recordingURL == recordingURL
-            else {
-                return
-            }
-            var payload = basePayload
-            if let speechConfidence {
-                payload["speechConfidence"] = String(format: "%.4f", speechConfidence)
-                payload["speechAnalysisStatus"] = "ok"
-            } else {
-                payload["speechAnalysisStatus"] = "unavailable"
-            }
-            emit("recording_ready", payload)
-        }
+        // No speech classifier before the upload (ditado-rapido D5). The peak
+        // level travels along for diagnosis only.
+        emit("recording_ready", basePayload)
     }
 
     private func emitMicTestReady(url: URL) {
@@ -2267,11 +2690,12 @@ final class DictationController {
         } else {
             let takeID = activeTakeID ?? UUID().uuidString.lowercased()
             activeTakeID = takeID
+            FocusTargetController.shared.refreshCandidate()
             let escapeCancelAvailable = DictationEscapeCancelMonitor.shared.start()
             emitJSON("listening_started", [
-                "recognitionMode": "venice_recording",
                 "microphone": microphone,
                 "escapeCancelAvailable": escapeCancelAvailable,
+                "target": FocusTargetController.shared.targetMetadata(),
                 "takeId": takeID,
             ])
         }
@@ -2283,11 +2707,6 @@ final class DictationController {
             return
         }
         let purpose = recordingPurpose
-        if purpose == .dictation {
-            // Selected-device recorder teardown is asynchronous, so the paste
-            // target must be pinned before focus can drift during finalization.
-            FocusTargetController.shared.pinCurrentTarget()
-        }
         isListening = false
         isFinalizing = true
         DictationEscapeCancelMonitor.shared.stop()
@@ -2295,11 +2714,11 @@ final class DictationController {
         micTestStopWorkItem = nil
         stopMetering()
         if purpose == .dictation {
-            if let activeTakeID {
-                emit("finalizing_transcript", ["takeId": activeTakeID])
-            } else {
-                emit("finalizing_transcript")
-            }
+            var payload: [String: Any] = [
+                "target": FocusTargetController.shared.targetMetadata(pinned: true),
+            ]
+            if let activeTakeID { payload["takeId"] = activeTakeID }
+            emitJSON("finalizing_transcript", payload)
         }
 
         if let selectedDeviceRecorder {
@@ -2311,13 +2730,16 @@ final class DictationController {
                     else {
                         return
                     }
+                    self.settleSelectedDeviceCueTrim(
+                        firstSampleTime: selectedDeviceRecorder.firstSampleTime
+                    )
                     self.selectedDeviceRecorder = nil
                     RecordingCuePlayer.play(.stop)
                     if let error {
                         self.fail(error)
                         return
                     }
-                    self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
+                    self.finishDictationRecording(recordingInstanceID: recordingInstanceID)
                 }
             }
             return
@@ -2325,7 +2747,42 @@ final class DictationController {
 
         audioRecorder?.stop()
         RecordingCuePlayer.play(.stop)
-        emitRecordingReady(recordingInstanceID: recordingInstanceID)
+        finishDictationRecording(recordingInstanceID: recordingInstanceID)
+    }
+
+    /// Cuts the start cue's span from a dictation take, then hands the file
+    /// to Rust. A failed cut keeps the whole file: a cue in the audio beats
+    /// losing the take. Mic tests keep their cue (they are played back, not
+    /// transcribed).
+    private func finishDictationRecording(recordingInstanceID: UUID) {
+        let trimSeconds = startCueTrimSeconds
+        guard
+            recordingPurpose == .dictation,
+            trimSeconds > 0,
+            let recordingURL
+        else {
+            emitRecordingReady(recordingInstanceID: recordingInstanceID)
+            return
+        }
+        trimLeadingAudio(at: recordingURL, seconds: trimSeconds) { [weak self] trimmedURL in
+            guard
+                let self,
+                self.recordingInstanceID == recordingInstanceID,
+                self.isFinalizing,
+                self.recordingURL == recordingURL
+            else {
+                // Discarded while cutting: the original went with the take.
+                if let trimmedURL {
+                    try? FileManager.default.removeItem(at: trimmedURL)
+                }
+                return
+            }
+            if let trimmedURL {
+                try? FileManager.default.removeItem(at: recordingURL)
+                self.recordingURL = trimmedURL
+            }
+            self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
+        }
     }
 
     private func scheduleMicTestStop(after seconds: Double) {
@@ -2491,9 +2948,12 @@ final class DictationController {
         return wasListening
     }
 
-    private func resetRecordingState(keepRecordingFile: Bool = false) {
+    private func resetRecordingState(
+        keepRecordingFile: Bool = false,
+        preservingPasteTarget: DictationPasteTarget? = nil
+    ) {
         RecordingCuePlayer.cancel(.start)
-        FocusTargetController.shared.clearPinnedTarget()
+        FocusTargetController.shared.restorePinnedTarget(preservingPasteTarget)
         isListening = false
         isFinalizing = false
         startPending = false
@@ -2501,6 +2961,8 @@ final class DictationController {
         recordingInstanceID = nil
         DictationEscapeCancelMonitor.shared.stop()
         maxObservedAudioLevel = 0
+        startCueTrimSeconds = 0
+        startCueEndClockTime = nil
         recordingStartedAt = 0
         micTestStopWorkItem?.cancel()
         micTestStopWorkItem = nil
@@ -2514,6 +2976,11 @@ final class DictationController {
         }
         recordingURL = nil
         recordingPurpose = .dictation
+        // Ready the next take once this turn of the run loop is done (a
+        // reset that starts a take records first, then this finds it busy).
+        DispatchQueue.main.async { [weak self] in
+            self?.prepareNextRecording()
+        }
     }
 }
 
@@ -2538,7 +3005,9 @@ enum PasteboardInserter {
     /// whichever app is frontmost instead.
     private static let activationTimeout: TimeInterval = 1.0
     /// Frontmost app activation and key-window focus do not land at the same
-    /// instant, so a short settle delay protects the synthetic Cmd+V target.
+    /// instant, so a short settle delay protects the synthetic Cmd+V target
+    /// after the helper had to activate it. A target already frontmost when
+    /// the paste begins needs none (ditado-rapido D6).
     private static let activationSettleDelay: TimeInterval = 0.18
     /// Restore is measured from the keystroke so the target gets a full window
     /// to read the transcript from the pasteboard.
@@ -2583,37 +3052,49 @@ enum PasteboardInserter {
             return
         }
 
-        guard let target = FocusTargetController.shared.pasteTarget() else {
+        guard let destination = FocusTargetController.shared.targetForTake(takeID),
+              let target = destination.app, !target.isTerminated else {
             emitPasteTargetUnavailable(takeID: takeID)
             return
         }
 
-        let targetActivated = target.isActive ? true : target.activate(options: [])
-        emit("paste_target", takePayload([
+        let activationDeadline = DispatchTime.now() + activationTimeout
+        let targetWasActive = target.isActive
+        let targetActivated = targetWasActive ? true : target.activate(options: [])
+        var targetPayload: [String: Any] = [
             "app": FocusTargetController.shared.pasteTargetDescription(),
             "activated": boolStatus(targetActivated),
-        ], takeID: takeID))
+            "target": FocusTargetController.shared.targetMetadata(pinned: true),
+        ]
+        if let takeID { targetPayload["takeId"] = takeID }
+        emitJSON("paste_target", targetPayload)
 
         waitForActivation(
             of: target,
-            deadline: DispatchTime.now() + activationTimeout
+            deadline: activationDeadline,
+            settleAfterActivation: !targetWasActive
         ) { targetIsFrontmost in
             // Cmd+V goes wherever the window server thinks focus is, so posting
             // it while the pinned app is not frontmost types the transcript
             // into somebody else's window. If the activation never landed,
             // abandon the paste rather than guess: the transcript is already on
             // the clipboard, and a manual Cmd+V beats text in the wrong app.
-            guard targetIsFrontmost else {
+            guard targetIsFrontmost, destination.restoreFocus(until: activationDeadline) else {
                 emitPasteTargetUnavailable(takeID: takeID)
                 return
             }
 
-            postPasteShortcut()
-            emit("paste_completed", takePayload(takeID: takeID))
+            waitForWindow(destination, deadline: activationDeadline) { ready in
+                guard ready, postPasteShortcut(to: destination, until: activationDeadline) else {
+                    emitPasteTargetUnavailable(takeID: takeID)
+                    return
+                }
+                emit("paste_completed", takePayload(takeID: takeID))
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + pasteboardRestoreDelay) {
-                if pasteboard.string(forType: .string) == text {
-                    restore(snapshot, to: pasteboard)
+                DispatchQueue.global().asyncAfter(deadline: .now() + pasteboardRestoreDelay) {
+                    if pasteboard.string(forType: .string) == text {
+                        restore(snapshot, to: pasteboard)
+                    }
                 }
             }
         }
@@ -2630,7 +3111,7 @@ enum PasteboardInserter {
         guard pasteboard.setString(text, forType: .string) else {
             restore(snapshot, to: pasteboard)
             emit("error", takePayload([
-                "code": "pasteboard_write_failed",
+                "code": "dictation_recovery_copy_failed",
                 "message": "Could not save or copy this dictation. The recording was kept for recovery.",
             ], takeID: takeID))
             return false
@@ -2651,6 +3132,7 @@ enum PasteboardInserter {
     private static func waitForActivation(
         of target: NSRunningApplication,
         deadline: DispatchTime,
+        settleAfterActivation: Bool,
         completion: @escaping (_ targetIsFrontmost: Bool) -> Void
     ) {
         guard !target.isTerminated else {
@@ -2659,6 +3141,11 @@ enum PasteboardInserter {
         }
 
         if target.isActive {
+            // Frontmost before the paste began: its focus is settled already.
+            guard settleAfterActivation else {
+                completion(true)
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + activationSettleDelay) {
                 completion(!target.isTerminated && target.isActive)
             }
@@ -2674,7 +3161,31 @@ enum PasteboardInserter {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + activationPollInterval) {
-            waitForActivation(of: target, deadline: deadline, completion: completion)
+            waitForActivation(
+                of: target,
+                deadline: deadline,
+                settleAfterActivation: true,
+                completion: completion
+            )
+        }
+    }
+
+    private static func waitForWindow(
+        _ destination: DictationPasteTarget,
+        deadline: DispatchTime,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if destination.isFrontmost(until: deadline) {
+            completion(true)
+            return
+        }
+        guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds,
+              destination.app?.isTerminated == false else {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + activationPollInterval) {
+            waitForWindow(destination, deadline: deadline, completion: completion)
         }
     }
 
@@ -2702,15 +3213,18 @@ enum PasteboardInserter {
         pasteboard.writeObjects(restoredItems)
     }
 
-    private static func postPasteShortcut() {
+    private static func postPasteShortcut(to destination: DictationPasteTarget, until deadline: DispatchTime) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return false }
 
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        // Event construction precedes the last potentially blocking window query.
+        guard destination.isFrontmost(until: deadline) else { return false }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
     }
 }
 
@@ -2742,6 +3256,12 @@ func handleCommandLine(_ line: String) {
     case "list_microphones":
         runOnMain {
             dictation.emitMicrophones()
+        }
+    case "repeat_last_dictation":
+        let requestID = command?["requestId"] as? String
+        let text = command?["text"] as? String
+        runOnMain {
+            LastDictationInserter.shared.receive(requestID: requestID, text: text)
         }
     case "start_listening":
         let takeID = command?["takeId"] as? String
@@ -2829,10 +3349,63 @@ func handleCommandLine(_ line: String) {
     }
 }
 
+func runLastDictationSelfTests() {
+    var count = 0
+    func check(_ value: @autoclosure () -> Bool, _ name: String) {
+        guard value() else { fatalError("Last dictation self-test failed: \(name)") }
+        count += 1
+    }
+    var state = RepeatShortcutState()
+    check(!state.matches("empty", now: 0), "initial state")
+    check(state.press(id: "one", now: 0, busy: false), "first physical down")
+    check(!state.press(id: "repeat", now: 0.1, busy: false), "held key repeat suppressed")
+    state.release()
+    check(state.press(id: "two", now: 0.2, busy: false), "second deliberate press")
+    check(!state.matches("one", now: 0.3), "old response rejected")
+    check(!state.matches("two", now: 1.2), "modifier or IPC timeout")
+    state.reset()
+    check(!state.matches("two", now: 0.4), "capture invalidation")
+    check(!state.press(id: "busy", now: 0, busy: true), "recording suppression")
+    state.release()
+    check(state.press(id: "request", now: 0, busy: false), "request")
+    check(state.beginDelivery(responseID: "request", deliveryID: "delivery", now: 0.1), "response consumed")
+    check(!state.beginDelivery(responseID: "request", deliveryID: "duplicate", now: 0.2), "duplicate response")
+    state.didStartInsertion()
+    check(state.matches("delivery", now: 50), "long text does not expire mid-stream")
+    state.invalidatePending()
+    check(!state.matches("delivery", now: 50), "focus change interrupts stream")
+    check(RepeatShortcutState.conflicts(with: [MonitoredShortcut(keyCode: 9, code: "KeyV", label: "Ctrl+V",
+        modifiers: ShortcutModifiers(control: true))]), "recording chord owns conflict")
+    check(!RepeatShortcutState.conflicts(with: [MonitoredShortcut(keyCode: 9, code: "KeyV", label: "Cmd+V",
+        modifiers: ShortcutModifiers(command: true))]), "command paste is independent")
+    check(!RepeatShortcutState.canInsert(trusted: false, sameTarget: true, busy: false, modifiers: false), "accessibility")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: false, busy: false, modifiers: false), "target changed")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: true, modifiers: false), "capture or recording")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: false, modifiers: true), "held modifiers")
+    check(RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: false, modifiers: false), "ready")
+    for text in ["", "ação\ne\u{301} 🧑🏽‍💻", String(repeating: "a", count: 19) + "😀",
+        String(repeating: "ação\n🧑🏽‍💻", count: 5000)] {
+        let chunks = repeatUnicodeChunks(text)
+        check(chunks.flatMap { $0 } == Array(text.utf16), "all UTF-16 units preserved")
+        check(chunks.allSatisfy { !$0.isEmpty && $0.count <= 20
+            && !(0xD800...0xDBFF).contains($0.last!)
+            && !(0xDC00...0xDFFF).contains($0.first!) }, "surrogate boundaries")
+    }
+    print("Last dictation self-tests: \(count) passed")
+}
+
+if CommandLine.arguments.contains("--self-test-last-dictation") {
+    runLastDictationSelfTests()
+    exit(0)
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 emit("ready")
+// Cues decoded and the first recorder prepared before the first press.
+RecordingCuePlayer.preload()
+dictation.prepareNextRecording()
 ShortcutKeyMonitor.shared.start()
 FocusTargetController.shared.start()
 AccessibilityTrustMonitor.shared.start()

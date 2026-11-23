@@ -38,14 +38,12 @@ function labelFor(banner: string): string {
 }
 
 let cachedLight: TokenGroup[] | undefined;
-let cachedDark: Token[] | undefined;
 
-function parse(): { light: TokenGroup[]; dark: Token[] } {
+function parse(): TokenGroup[] {
   const lines = tokensRaw.split("\n");
 
   const order: string[] = [];
   const byGroup = new Map<string, Token[]>();
-  const darkTokens: Token[] = [];
 
   let currentGroup = "Other";
   let pending = ""; // accumulates a multi-line declaration
@@ -56,20 +54,12 @@ function parse(): { light: TokenGroup[]; dark: Token[] } {
   // block whose declarations we ignore (@property, @media, transition selectors,
   // the light block). Only depth 1 inside "root"/"dark" yields catalog tokens.
   let topContext: "root" | "dark" | "other" = "other";
-  // First declaration of a name wins, tracked separately per context: dark
-  // overrides deliberately re-use the light token names, so a shared `seen`
-  // would swallow the entire dark block.
+  // First declaration of a name wins. Dark overrides re-use the light token
+  // names and are not part of the catalog.
   const seenLight = new Set<string>();
-  const seenDark = new Set<string>();
 
   const pushToken = (name: string, rawValue: string) => {
-    if (topContext === "dark") {
-      // A name can be re-declared (multi-value blocks); keep the first.
-      if (seenDark.has(name)) return;
-      seenDark.add(name);
-      darkTokens.push({ name, rawValue });
-      return;
-    }
+    if (topContext === "dark") return;
     // Light catalog: dedupe responsive @media re-declarations of the same name.
     if (seenLight.has(name)) return;
     seenLight.add(name);
@@ -186,17 +176,12 @@ function parse(): { light: TokenGroup[]; dark: Token[] } {
     .map((group) => ({ group, tokens: byGroup.get(group) ?? [] }))
     .filter((g) => g.tokens.length > 0);
 
-  return { light, dark: darkTokens };
+  return light;
 }
 
 export function getTokenGroups(): TokenGroup[] {
-  if (!cachedLight) cachedLight = parse().light;
+  if (!cachedLight) cachedLight = parse();
   return cachedLight;
-}
-
-export function getDarkOverrides(): Token[] {
-  if (!cachedDark) cachedDark = parse().dark;
-  return cachedDark;
 }
 
 // Live value off :root so swatches track theme + brand switches.

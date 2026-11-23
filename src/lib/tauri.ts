@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AgentArtifactDto,
@@ -13,34 +14,11 @@ import type {
 } from "./agent-runtime-contract";
 import { parseDictationHelperEvent } from "./dictation-events";
 import { clovyHomeProfileRemovalPlan, reconcileClovyHomeProfileRemoval } from "./clovy-home";
+import { publishRecordingMark } from "./recording-marks";
 
 // Re-exported so modules that build their own command calls route through the
 // same `invoke` as the rest of the app's bindings.
 export { invoke };
-
-export type ClovyHomeChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-};
-
-export type ClovyHomeChatResponse = {
-  content?: string;
-  task?: {
-    title: string;
-    prompt: string;
-    summary?: string;
-    requiresCurrentResearch?: boolean;
-  };
-};
-
-export type ClovyHomeChatOptions = {
-  /** Data partition captured at the send boundary for memory isolation. */
-  profile?: string;
-  /** Bounded excerpts from older turns outside the verbatim recent window. */
-  historyContext?: string;
-  /** Receives upstream model text as it arrives. */
-  onDelta?: (content: string) => void;
-};
 
 export type ClovyPersonaArea = "work" | "personal" | "thinking" | "play";
 
@@ -61,23 +39,17 @@ export async function setClovyPersona(request: Omit<ClovyPersonaSettings, "schem
   return invoke<ClovyPersonaSettings>("set_clovy_persona", { request });
 }
 
-/** Lightweight private conversation path for Home. Concrete work is returned
- * as a structured handoff and continues in a normal Clovy agent session. */
-export async function clovyHomeChat(
-  messages: ClovyHomeChatMessage[],
-  options: ClovyHomeChatOptions = {},
-) {
-  const onEvent = new Channel<{ event: "delta"; data: { content: string } }>();
-  onEvent.onmessage = (event) => {
-    if (event.event === "delta") options.onDelta?.(event.data.content);
-  };
-  return invoke<ClovyHomeChatResponse>("clovy_home_chat", {
-    request: {
-      profile: options.profile,
-      ...(options.historyContext ? { historyContext: options.historyContext } : {}),
-      messages,
-    },
-    onEvent,
+export type LegacyHomeImport = {
+  imported: number;
+  skipped: number;
+  alreadyImported: boolean;
+};
+
+/** Imports, once, the Home turns older builds kept only in local storage
+ * into the Home session (ADR-0064). The local copy is left as it is. */
+export async function importLegacyHomeTurns(sessionId: string, turns: unknown[]) {
+  return invoke<LegacyHomeImport>("import_legacy_home_turns", {
+    request: { sessionId, turns },
   });
 }
 
@@ -87,25 +59,15 @@ export const agentRuntimeBindings: AgentRuntimeBindings = {
   listSessions: () => invoke<AgentSessionDto[]>("list_agent_sessions"),
   getSession: (sessionId) => invoke<AgentSessionDto>("get_agent_session", { sessionId }),
   getLatestRun: (sessionId) => invoke<AgentRunDto | null>("get_latest_agent_run", { sessionId }),
-  compactSession: (sessionId) =>
-    invoke<{ compacted: boolean; removedItems: number; estimatedTokens?: number }>(
-      "compact_agent_session",
-      { sessionId },
-    ),
   createSession: (input) => invoke<AgentSessionDto>("create_agent_session", { request: input }),
   renameSession: (sessionId, title) =>
     invoke<AgentSessionDto>("rename_agent_session", { request: { sessionId, title } }),
+
   branchSession: (sessionId, itemId) =>
     invoke<AgentSessionDto>("branch_agent_session", { sessionId, itemId }),
   deleteSession: (sessionId) => invoke<void>("delete_agent_session", { sessionId }),
   listItems: (sessionId) => invoke<AgentItemDto[]>("list_agent_items", { sessionId }),
   startRun: (request) => invoke<AgentRunDto>("start_agent_run", { request }),
-  steerRun: (runId, messageId, text) =>
-    invoke<{ accepted: boolean; reason?: string }>("steer_agent_run", {
-      runId,
-      messageId,
-      text,
-    }),
   cancelRun: (runId) => invoke<void>("cancel_agent_run", { runId }),
   retryRun: (runId) => invoke<AgentRunDto>("retry_agent_run", { runId }),
   resolveInterruption: (request) => invoke<AgentRunDto>("resolve_agent_interruption", { request }),
@@ -123,7 +85,6 @@ export const deleteAgentSession = agentRuntimeBindings.deleteSession;
 export const listAgentItems = agentRuntimeBindings.listItems;
 export const startAgentRun = (request: StartAgentRunRequest) =>
   agentRuntimeBindings.startRun(request);
-export const steerAgentRun = agentRuntimeBindings.steerRun;
 export const cancelAgentRun = agentRuntimeBindings.cancelRun;
 export const retryAgentRun = agentRuntimeBindings.retryRun;
 export const resolveAgentInterruption = (request: ResolveAgentInterruptionRequest) =>
@@ -334,6 +295,7 @@ export type DictationMicrophoneSetting = {
 };
 
 export type DictationStyle = "standard" | "casualLowercase" | "formal";
+export type DictationHudPlacement = "bottom" | "top";
 
 export type DictationSettingsDto = {
   pushToTalkShortcut: DictationShortcutSetting;
@@ -341,6 +303,11 @@ export type DictationSettingsDto = {
   microphone: DictationMicrophoneSetting;
   style: DictationStyle;
   language?: string;
+  /** Off by default: the transcript is pasted with no LLM call. */
+  cleanupEnabled: boolean;
+  /** OpenRouter model id used when cleanup is on. */
+  cleanupModel: string;
+  hudPlacement: DictationHudPlacement;
 };
 
 export type DictationCapabilitiesDto = {
@@ -362,6 +329,7 @@ export type DictationSettingsResponse = {
 };
 
 export type DictationHistoryItemDto = {
+  appBundleId?: string | null;
   id: string;
   text: string;
   language?: string;
@@ -379,9 +347,17 @@ export type DictationMicrophoneDeviceDto = {
   name: string;
 };
 
+/** Presentation metadata only; the native helper owns the exact paste instance. */
+export type DictationTarget = {
+  app: string;
+  bundleIdentifier: string;
+  processIdentifier: number;
+};
+
 export type DictationHelperEvent = {
   type: string;
   payload?: {
+    target?: DictationTarget | null;
     devices?: DictationMicrophoneDeviceDto[];
     defaultDevice?: DictationMicrophoneDeviceDto;
     selectedID?: string;
@@ -398,26 +374,33 @@ export type DictationHelperEvent = {
 };
 
 export type ProviderModelMode = "transcription" | "generation" | "image" | "video";
+export type BuiltinProvider = "groq" | "openrouter" | "fal" | "tavily";
+
+export type ProviderApiKeysConfigured = {
+  groq: boolean;
+  openrouter: boolean;
+  fal: boolean;
+  tavily: boolean;
+};
 
 export type ProviderModelSettingsDto = {
+  localTranscriptionSupported?: boolean;
   transcriptionProvider: string;
   generationProvider: string;
   transcriptionModel: string;
   generationModel: string;
-  costQuality: number;
   remoteGenerationModel: string;
   imageModel: string;
   videoModel: string;
-  veniceApiKeyConfigured: boolean;
+  providerApiKeysConfigured: ProviderApiKeysConfigured;
   localGeneration: LocalGenerationSettingsDto;
-  /** Venice safe mode for image generation/editing (blurs adult content). On
-   * by default; the user opts out via Settings or the consent dialog. */
+  /** Safe mode for image generation/editing: asks the image provider to filter
+   * adult content. On by default; the user opts out via Settings or the consent
+   * dialog. Turning it off is a request the provider may not honor. */
   imageSafeMode: boolean;
   /** Whether the user chose "don't ask again" on the safe-mode consent dialog. */
   imageSafeModePromptDismissed: boolean;
-  /** Live transcript preview while recording. On by default; billed as extra
-   * usage and disclosed in Settings, so previews from this build are sent as
-   * consented (JUN-375). Off stops the preview lanes entirely. */
+  /** Live transcript preview using the selected transcription engine. */
   liveTranscription: boolean;
 };
 
@@ -431,7 +414,6 @@ export type ProfileModelOverridesDto = {
 export type LocalGenerationSettingsDto = {
   baseUrl: string;
   modelId: string;
-  apiKey: string;
 };
 
 export type GeneratedImageDto = {
@@ -472,28 +454,8 @@ export type ProviderModelSettingsResponse = {
   effectiveSettings: ProviderModelSettingsDto;
 };
 
-export type P3aSettingsDto = {
-  enabled: boolean;
-  consentVersion: number;
-  consentedAtWeek?: string | null;
-};
-
-export type P3aSettingsResponse = {
-  settings: P3aSettingsDto;
-};
-
-export type P3aQuestionDto = {
-  id: string;
-  prompt: string;
-  buckets: string[];
-  decision: string;
-};
-
-export type P3aQuestionCatalogResponse = {
-  questions: P3aQuestionDto[];
-};
-
-export type VeniceModelDto = {
+export type ProviderModelDto = {
+  available?: boolean;
   provider: string;
   id: string;
   name: string;
@@ -506,16 +468,13 @@ export type VeniceModelDto = {
   capabilities: string[];
   priceUnit?: string;
   priceDescription?: string;
-  creditsPerMillionSeconds?: number;
-  inputCreditsPerMillionTokens?: number;
-  outputCreditsPerMillionTokens?: number;
 };
 
-export type VeniceModelsResponse = {
+export type ProviderModelsResponse = {
   mode: ProviderModelMode;
   modelType: string;
   selectedModel: string;
-  models: VeniceModelDto[];
+  models: ProviderModelDto[];
 };
 
 export type SourceState =
@@ -562,6 +521,15 @@ export type RecordingStatusDto = {
   livePreviewEnabled?: boolean;
   sources?: SourceStatusDto[];
   warnings?: SourceWarningDto[];
+};
+
+export type RecordingMarkDto = {
+  id: string;
+  noteId: string;
+  sessionId: string;
+  elapsedMs: number;
+  label: string;
+  createdAt: string;
 };
 
 export type RecordingSourceTelemetryDto = Pick<
@@ -614,7 +582,33 @@ export type DownloadNoteAudioResponse = {
   sourceCount: number;
 };
 
+export type NoteVideoAnalysis =
+  | "analyzed"
+  | "engine_unsupported"
+  | "cli_unsupported"
+  | "skill_missing"
+  | "tools_missing"
+  | "permission_denied"
+  | "capture_failed"
+  | "analysis_failed"
+  | "analysis_timeout"
+  | "video_missing";
+
+export type MeetingVideoRequest = { windowId: number };
+
+export type MeetingWindowDto = {
+  windowId: number;
+  appName: string;
+  bundleId: string;
+  title: string;
+};
+
+export async function detectMeetingWindow() {
+  return invoke<MeetingWindowDto | null>("detect_meeting_window");
+}
+
 export type NoteDto = NoteListItemDto & {
+  videoAnalysis?: NoteVideoAnalysis | null;
   calendarEvent?: NoteCalendarEventDto;
   generatedContent?: string;
   editedContent?: string;
@@ -632,12 +626,20 @@ export type NoteDto = NoteListItemDto & {
   queuedRecordings?: number;
 };
 
+export type DiscardedTranscriptSpanDto = {
+  sessionId: string;
+  source: "microphone" | "system";
+  startMs: number;
+  endMs: number;
+};
+
 export type NoteProcessingProgressDto = {
   noteId: string;
   recordingSessionId: string;
   stage: "transcribing" | "generating" | "done";
   processingStatus: ProcessingStatus;
   revision: string;
+  discardedSpans?: DiscardedTranscriptSpanDto[];
 };
 
 export type NotePatchDto = Pick<
@@ -715,7 +717,6 @@ export type BootstrapResponse = {
   notes: NoteListItemDto[];
   activeRecoveries: RecoverableRecordingDto[];
   activeRecording?: RecordingStatusDto;
-  providerConfigured: boolean;
 };
 
 export type AudioValidationDto = {
@@ -786,21 +787,6 @@ export type RecordingSourceReadinessDto = {
 
 export async function bootstrapApp() {
   return invoke<BootstrapResponse>("bootstrap_app");
-}
-
-export const CLOVY_COMMUNITY_URL = "https://t.me/+B4Z8KUqEsRc4ZGVh";
-
-/** Opens the clovy-api /verify page (attestation, routing, retention) in
- * the default browser. Routed through Rust because the webview drops
- * target="_blank" anchors. */
-export async function clovyOpenVerifyPage() {
-  return invoke<void>("clovy_open_verify_page");
-}
-
-/** Opens the Clovy community in the default browser. Routed through Rust for
- * the same target="_blank" reliability reason as the verify page. */
-export async function clovyOpenCommunityPage() {
-  return invoke<void>("clovy_open_community_page");
 }
 
 export async function createNote(folderId?: string) {
@@ -1000,6 +986,7 @@ export async function sendAppNotification(input: {
   sound?: string;
   group?: string;
   sessionId?: string;
+  routineSessionId?: string;
 }) {
   return invoke<void>("send_app_notification", { request: input });
 }
@@ -1011,6 +998,10 @@ export async function sendAppNotification(input: {
  */
 export async function agentOpenReady() {
   return invoke<string | null>("agent_open_ready");
+}
+
+export async function routineOpenReady() {
+  return invoke<string | null>("routine_open_ready");
 }
 
 export type PendingMeetingStartRequest = {
@@ -1059,45 +1050,6 @@ export async function acknowledgeMeetingEndFinishRequest(requestId: string) {
   return invoke<boolean>("acknowledge_meeting_end_finish_request", { requestId });
 }
 
-export type SubmitIssueReportRequest = {
-  /** Which kind of report this is: "bug" | "feedback" | "feature". Drives the
-   * team's triage. Direct dialog reports run no model turn, so there is
-   * nothing to charge; Clovy API creates the team-facing diagnosis. */
-  category?: string;
-  /** The user's report as they typed it, before the investigation wrapper. */
-  description: string;
-  /** Clovy's diagnostic assessment from the report session, when available. */
-  agentDiagnosis?: string;
-  attachmentNames: string[];
-  /** Original local paths from the report picker or workspace paths created
-   * for DOM-dropped files; their bytes are sent with the report. */
-  attachmentPaths: string[];
-  storedSessionId?: string;
-};
-
-export type SubmitIssueReportResponse = {
-  received: boolean;
-  /** Names of files that could not be attached to the report, either because
-   * the local file was unreadable or empty or Open Software rejected it. */
-  skippedAttachmentNames?: string[];
-};
-
-export async function submitIssueReport(request: SubmitIssueReportRequest) {
-  return invoke<SubmitIssueReportResponse>("submit_issue_report", { request });
-}
-
-export type ExplainAgentApprovalResponse = {
-  explanation: string;
-};
-
-/** One-shot generation call that explains a pending approval request in
- * plain language — the agent runtime stays parked on the approval. */
-export async function explainAgentApproval(input: { description: string; command?: string }) {
-  return invoke<ExplainAgentApprovalResponse>("explain_agent_approval", {
-    request: input,
-  });
-}
-
 export async function agentFilePreview(path: string) {
   return invoke<string | null>("read_agent_artifact_preview", { request: { path } });
 }
@@ -1112,10 +1064,6 @@ export async function downloadAgentArtifact(path: string) {
 
 export async function revealPath(path: string) {
   return invoke<void>("reveal_path", { path });
-}
-
-export async function unpackBundledExtension() {
-  return invoke<string>("unpack_bundled_extension");
 }
 
 export async function listNotes(folderId?: string, limit?: number) {
@@ -1168,7 +1116,7 @@ export async function checkRecordingSourceReadiness(sourceMode: RecordingSourceM
 }
 
 export async function openPrivacySettings(
-  pane: "microphone" | "accessibility" | "screenRecording" | "systemAudio",
+  pane: "microphone" | "accessibility" | "screenRecording" | "systemAudio" | "inputMonitoring",
 ) {
   return invoke<void>("open_privacy_settings", { request: { pane } });
 }
@@ -1176,9 +1124,18 @@ export async function openPrivacySettings(
 export async function startRecording(
   noteId: string,
   sourceMode: RecordingSourceMode = "microphoneOnly",
+  expectedProfile?: string,
+  agentRequestId?: string,
+  video?: MeetingVideoRequest,
 ) {
   return invoke<RecordingSessionDto>("start_recording", {
-    request: { noteId, sourceMode },
+    request: {
+      noteId,
+      sourceMode,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+      ...(video ? { video } : {}),
+    },
   });
 }
 
@@ -1196,21 +1153,65 @@ export type MeetingStartRecordingOutcome =
 export async function startMeetingRecording(
   requestId: string,
   sourceMode: RecordingSourceMode = "microphoneOnly",
+  video?: MeetingVideoRequest,
 ) {
   return invoke<MeetingStartRecordingOutcome>("start_meeting_recording", {
-    request: { requestId, sourceMode },
+    request: { requestId, sourceMode, ...(video ? { video } : {}) },
   });
 }
 
-export async function pauseRecording(sessionId: string) {
+export async function addRecordingMark(noteId: string, sessionId: string, label?: string) {
+  const mark = await invoke<RecordingMarkDto>("add_recording_mark", { noteId, sessionId, label });
+  if (mark.noteId === noteId && mark.sessionId === sessionId) publishRecordingMark(mark);
+  return mark;
+}
+
+export function listRecordingMarks(noteId: string) {
+  return invoke<RecordingMarkDto[]>("list_recording_marks", { noteId });
+}
+
+export type RecordingAssistanceStatusDto = {
+  epoch: number;
+  enabled: boolean;
+  hasRecentContext: boolean;
+};
+
+export function getRecordingAssistanceStatus(noteId: string, sessionId: string) {
+  return invoke<RecordingAssistanceStatusDto>("get_recording_assistance_status", {
+    noteId,
+    sessionId,
+  });
+}
+
+export function suggestRecordingQuestion(noteId: string, sessionId: string) {
+  return invoke<string>("suggest_recording_question", { noteId, sessionId });
+}
+
+export async function pauseRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<RecordingStatusDto>("pause_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
-export async function resumeRecording(sessionId: string) {
+export async function resumeRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<RecordingStatusDto>("resume_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
@@ -1229,14 +1230,25 @@ export async function setRecordingPresenceBounds(
   });
 }
 
-export async function finishRecording(sessionId: string) {
+export async function finishRecording(
+  sessionId: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<FinishRecordingResponse>("finish_recording", {
-    request: { sessionId },
+    request: {
+      sessionId,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
 export type ResolveAgentRecorderRequestInput = {
+  errorDetails?: unknown;
   requestId: string;
+  sessionId?: string;
+  status?: RecordingStatusDto;
   ok: boolean;
   noteId?: string;
   noteTitle?: string;
@@ -1244,153 +1256,45 @@ export type ResolveAgentRecorderRequestInput = {
   errorMessage?: string;
 };
 
+export async function validateAgentRecorderRequest(requestId: string) {
+  return invoke<void>("validate_agent_recorder_request", { requestId });
+}
+
 export async function resolveAgentRecorderRequest(request: ResolveAgentRecorderRequestInput) {
   return invoke<void>("resolve_agent_recorder_request", { request });
 }
 
-export async function retryProcessing(noteId: string, recordingSessionId?: string) {
+export async function retryProcessing(
+  noteId: string,
+  recordingSessionId?: string,
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<NoteDto>("retry_processing", {
-    request: recordingSessionId
-      ? { noteId, step: "all", recordingSessionId }
-      : { noteId, step: "all" },
+    request: {
+      noteId,
+      step: "all",
+      ...(recordingSessionId ? { recordingSessionId } : {}),
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
 }
 
-export async function recoverRecording(sessionId: string, action: "validate" | "discard") {
+export async function recoverRecording(
+  sessionId: string,
+  action: "validate" | "discard",
+  expectedProfile?: string,
+  agentRequestId?: string,
+) {
   return invoke<NoteDto>("recover_recording", {
-    request: { sessionId, action },
+    request: {
+      sessionId,
+      action,
+      ...(expectedProfile ? { expectedProfile } : {}),
+      ...(agentRequestId ? { agentRequestId } : {}),
+    },
   });
-}
-
-export type AccountUser = {
-  id: string;
-  handle: string;
-  email?: string;
-  displayName?: string;
-  avatarUrl?: string;
-  avatarSeed?: string;
-};
-
-export type AccountBalance = {
-  /** Present whenever the backend snapshot succeeds; optional so older
-   * payload shapes (and test fixtures) without it don't lock the app. */
-  credits?: number;
-  /** Normalized usage remaining for the current plan or free allowance.
-   * Optional while the app can still receive older accounts API payloads. */
-  usageRemainingPercent?: number;
-  usdMillis: number;
-};
-
-export type SubscriptionPlan = "pro" | "max";
-
-export type AccountSubscription = {
-  subscribed: boolean;
-  status?: "trialing" | "active" | "past_due" | "canceled" | (string & {});
-  /** Plan slug from OS Accounts. Absent on accounts APIs that predate plan
-   * tiers and on legacy subscription rows, which are all Pro. */
-  plan?: SubscriptionPlan | (string & {});
-  /** Monthly plan credits returned by OS Accounts. Used as a fallback for
-   * deployments whose balance endpoint does not expose usageRemainingPercent. */
-  planCredits?: number;
-  trialEnd?: string;
-  currentPeriodEnd?: string;
-  /** Trial length from the Stripe price config, available pre-subscription.
-   * Absent on accounts APIs that don't expose it yet. */
-  trialPeriodDays?: number;
-  /** Plan a scheduled downgrade switches to at the period end. Additive on
-   * the plan-change endpoint; absent everywhere else. */
-  scheduledPlan?: SubscriptionPlan | (string & {});
-  scheduledPlanCredits?: number;
-};
-
-export type AccountStatus = {
-  signedIn: boolean;
-  configured: boolean;
-  localDev?: boolean;
-  user?: AccountUser;
-  balance?: AccountBalance;
-  /** Absent when the subscription state couldn't be determined — distinct
-   * from `{ subscribed: false }`. */
-  subscription?: AccountSubscription;
-  /** The accounts portal origin, where funding and billing live. */
-  portalUrl?: string;
-};
-
-export type ReferralSummary = {
-  code: string;
-  url: string;
-  referredCount: number;
-  pendingCount: number;
-  qualifiedCount: number;
-  earnedMonths: number;
-  appliedMonths: number;
-  availableMonths: number;
-};
-
-export async function osAccountsStatus() {
-  return invoke<AccountStatus>("os_accounts_status");
-}
-
-/** Keychain-only status with no network I/O — the launch fast-path so first
- * paint doesn't block on the account snapshot. User/balance stay unknown until
- * the full `osAccountsStatus` lands. */
-export async function osAccountsStatusLocal() {
-  return invoke<AccountStatus>("os_accounts_status_local");
-}
-
-export async function osAccountsLogin() {
-  return invoke<AccountStatus>("os_accounts_login");
-}
-
-export async function osAccountsCancelLogin() {
-  return invoke<void>("os_accounts_cancel_login");
-}
-
-export type AccountsLogoutOptions = {
-  clearBrowserSession?: boolean;
-};
-
-export async function osAccountsLogout(options: AccountsLogoutOptions = {}) {
-  return invoke<void>("os_accounts_logout", {
-    request: { clearBrowserSession: options.clearBrowserSession ?? false },
-  });
-}
-
-/** Persist an explicit Avatar v1 selection on the signed-in OS Accounts User. */
-export async function osAccountsSetAvatarSeed(seed: string) {
-  return invoke<AccountUser>("os_accounts_set_avatar_seed", { seed });
-}
-
-/** Opens subscription checkout in the browser. Omitting `plan` keeps the
- * accounts-API default (Pro). */
-export async function osAccountsUpgrade(plan?: SubscriptionPlan) {
-  return invoke<void>("os_accounts_upgrade", { plan });
-}
-
-/** Opens a hosted billing-portal session for an existing subscriber to review
- * and confirm a full-price plan upgrade that restarts the billing cycle. */
-export async function osAccountsUpgradeSession(plan: SubscriptionPlan) {
-  return invoke<void>("os_accounts_upgrade_session", { plan });
-}
-
-/** Changes the plan on the caller's existing subscription in place (Pro to
- * Max), charging the saved card immediately with no browser review. This is
- * the compatibility fallback for deployments without hosted upgrade
- * sessions, and callers must only dispatch it behind the charge-now consent
- * copy. Credits still arrive only through the invoice webhook, so callers
- * poll account status until the grant lands. */
-export async function osAccountsChangePlan(plan: SubscriptionPlan) {
-  return invoke<AccountSubscription>("os_accounts_change_plan", { plan });
-}
-
-/** Opens the accounts portal in the default browser — the webview swallows
- * target="_blank" anchors, so portal navigation must go through Rust. */
-export async function osAccountsOpenPortal() {
-  return invoke<void>("os_accounts_open_portal");
-}
-
-export async function osAccountsReferralSummary() {
-  return invoke<ReferralSummary>("os_accounts_referral_summary");
 }
 
 export async function dictationCapabilities() {
@@ -1428,56 +1332,32 @@ export async function deleteProfileModelOverrides(profile: string) {
   return invoke<void>("delete_profile_model_overrides", { profile });
 }
 
-export async function p3aSettings() {
-  return invoke<P3aSettingsResponse>("p3a_settings");
-}
-
-export async function p3aQuestionCatalog() {
-  return invoke<P3aQuestionCatalogResponse>("p3a_question_catalog");
-}
-
-export async function setP3aEnabled(enabled: boolean) {
-  return invoke<P3aSettingsResponse>("set_p3a_enabled", {
-    request: { enabled },
-  });
-}
-
-export async function p3aRecord(questionId: string) {
-  return invoke<void>("p3a_record", {
-    request: { questionId },
-  });
-}
-
-export async function listVeniceModels(mode: ProviderModelMode) {
-  return invoke<VeniceModelsResponse>("list_venice_models", {
+export async function listProviderModels(mode: ProviderModelMode) {
+  return invoke<ProviderModelsResponse>("list_provider_models", {
     request: { mode },
   });
 }
 
-export async function setVeniceModel(mode: ProviderModelMode, modelId: string) {
-  return invoke<ProviderModelSettingsDto>("set_venice_model", {
+export async function setProviderModel(mode: ProviderModelMode, modelId: string) {
+  return invoke<ProviderModelSettingsDto>("set_provider_model", {
     request: { mode, modelId },
   });
 }
 
-export async function setCostQuality(value: number) {
-  return invoke<ProviderModelSettingsDto>("set_cost_quality", {
-    request: { value },
+export async function setProviderApiKey(provider: BuiltinProvider, apiKey: string) {
+  return invoke<ProviderModelSettingsDto>("set_provider_api_key", {
+    request: { provider, apiKey },
   });
 }
 
-export async function setVeniceApiKey(apiKey: string) {
-  return invoke<ProviderModelSettingsDto>("set_venice_api_key", {
-    request: { apiKey },
+export async function clearProviderApiKey(provider: BuiltinProvider) {
+  return invoke<ProviderModelSettingsDto>("clear_provider_api_key", {
+    request: { provider },
   });
 }
 
-export async function clearVeniceApiKey() {
-  return invoke<ProviderModelSettingsDto>("clear_venice_api_key");
-}
-
-// Toggles Venice safe mode for image generation/editing. On by default; when
-// on, Venice blurs adult content.
+// Toggles safe mode for image generation/editing. On by default; when
+// on, the provider blurs adult content.
 export async function setImageSafeMode(enabled: boolean) {
   return invoke<ProviderModelSettingsDto>("set_image_safe_mode", {
     request: { enabled },
@@ -1506,7 +1386,7 @@ export async function imagePromptMayBeExplicit(prompt: string): Promise<boolean>
   return response.mayBeExplicit;
 }
 
-// Generates an image from a prompt via the Clovy API. `model` is optional; the
+// Generates an image from a prompt directly through fal. `model` is optional; the
 // backend falls back to the saved default image model when it is omitted.
 // `safeMode` pins the safe-mode value a retry must replay; omitted uses the
 // live saved setting.
@@ -1559,31 +1439,14 @@ export async function videoStatus(jobId: string) {
   });
 }
 
-/** Persists the local endpoint, model id, and optional API key. Strictly
- * validated backend-side (any http/https URL with a host is accepted) and it
- * never changes the active provider — enabling is a separate step. */
-export async function saveLocalGenerationSettings(input: {
+/** GETs {baseUrl}/models (~10s timeout) and returns the advertised model ids.
+ * The bearer token is the typed `apiKey`, or, when blank, the Keychain key
+ * saved for `endpointId`; the key never comes back to the webview. */
+export async function probeLocalGenerationEndpoint(input: {
   baseUrl: string;
-  modelId: string;
   apiKey: string;
+  endpointId?: string;
 }) {
-  return invoke<ProviderModelSettingsDto>("save_local_generation_settings", {
-    request: input,
-  });
-}
-
-/** Flips generation between the saved local endpoint and the remote model.
- * Enabling requires saved settings (the backend errors otherwise); disabling
- * restores the remote provider without touching the stored local fields. */
-export async function setLocalGenerationEnabled(enabled: boolean) {
-  return invoke<ProviderModelSettingsDto>("set_local_generation_enabled", {
-    request: { enabled },
-  });
-}
-
-/** GETs {baseUrl}/models with an optional bearer token (~10s timeout) and
- * returns the advertised model ids, for the settings "Test connection" flow. */
-export async function probeLocalGenerationEndpoint(input: { baseUrl: string; apiKey: string }) {
   return invoke<{ models: string[] }>("probe_local_generation_endpoint", {
     request: input,
   });
@@ -1610,10 +1473,26 @@ export async function setDictationStyle(style: DictationStyle) {
   return invoke<DictationSettingsDto>("set_dictation_style", { style });
 }
 
+export async function setDictationCleanup(enabled: boolean, model?: string) {
+  return invoke<DictationSettingsDto>(
+    "set_dictation_cleanup",
+    model === undefined ? { enabled } : { enabled, model },
+  );
+}
+export async function setDictationHudPlacement(placement: DictationHudPlacement) {
+  return invoke<DictationSettingsDto>("set_dictation_hud_placement", {
+    placement,
+  });
+}
+
 export async function setDictationLanguage(language?: string) {
   return invoke<DictationSettingsDto>("set_dictation_language", {
     language: language || undefined,
   });
+}
+
+export async function claimAgentDictationDelivery(takeId: string, composerRequestId: string) {
+  return invoke<void>("claim_agent_dictation_delivery", { takeId, composerRequestId });
 }
 
 export async function dictationHelperCommand(command: Record<string, unknown>) {
@@ -1661,31 +1540,38 @@ export async function latestDictationEvent() {
   return parseDictationHelperEvent(payload);
 }
 
-// --- Browser extension pairing (JUN-287) ---
+// --- Clovy-owned browser sessions ---
 
-export type ExtensionPairingStatus = {
-  paired: boolean;
-  listenerRunning: boolean;
-  extensionVersion?: string;
-  protocolVersion?: number;
+export type BrowserSession = {
+  sessionId: string;
+  mode: "background" | "visible";
+  suspended: boolean;
 };
 
-/** Emitted by the extension host whenever pairing state changes. */
-export const EXTENSION_PAIRING_CHANGED_EVENT = "clovy://extension-pairing-changed";
-
-export async function extensionPairingStatus() {
-  return invoke<ExtensionPairingStatus>("extension_pairing_status");
+export async function browserAccessGet() {
+  return invoke<boolean>("browser_access_get");
 }
 
-export type RegisterBrowserExtensionHostResult = {
-  manifestPath: string;
-  shimPath: string;
-};
+export async function browserAccessSet(enabled: boolean) {
+  return invoke<boolean>("browser_access_set", { enabled });
+}
 
-/** Writes native messaging host manifests for the supported Chromium-family
- * browsers, pinning the Clovy extension id to the bundled shim. */
-export async function registerBrowserExtensionHost() {
-  return invoke<RegisterBrowserExtensionHostResult>("register_browser_extension_host");
+export async function browserStopSession(sessionId: string) {
+  return invoke<void>("browser_stop_session", { sessionId });
+}
+
+export async function browserSessions() {
+  return invoke<BrowserSession[]>("browser_sessions");
+}
+
+/** Suspend every agent capture and action before exposing the login window. */
+export async function browserHumanTakeover(sessionId: string) {
+  return invoke<void>("browser_human_takeover", { sessionId });
+}
+
+/** Only an explicit user gesture returns control after human takeover. */
+export async function browserResumeControl(sessionId: string) {
+  return invoke<void>("browser_resume_control", { sessionId });
 }
 
 export type RoutineBrowserAccess = {
@@ -1792,6 +1678,9 @@ export type ConnectorAccount = {
    * rows, and for a fresh Linear connect before the user finishes team
    * selection. */
   selectedTeams: LinearTeam[];
+  /** A GitHub account on the GitHub CLI's login: the token comes from `gh`
+   * on every call and Clovy never stores it. */
+  viaGh?: boolean;
 };
 
 /** Per-routine trust mode for connector action tools. Distinct from the
@@ -1835,37 +1724,24 @@ export type PendingConnectorApproval = {
   requestedAtMs: number;
 };
 
-/** One attended Browser use action parked in the Rust broker. Page content is
- * limited to the exact origin and element label needed for informed consent. */
-export type PendingBrowserApproval = {
-  approvalId: string;
-  site: string;
-  action: "click" | "fill" | "press";
-  elementLabel: string;
-  requestedAtMs: number;
-};
-
+/** Local facts only: the grant, the bundled driver and macOS access
+ * (ADR-0067). No plan, vision model or remote rollout. */
 export type ComputerUseStatusDto = {
+  platform?: "macos" | "windows" | "unsupported";
   platformSupported: boolean;
-  planEligible: boolean;
   grantEnabled: boolean;
   driverAvailable: boolean;
   driverVersion?: string;
   accessibility: boolean;
   screenRecording: boolean;
-  modelSupportsVision: boolean;
-  generationModel: string;
   ready: boolean;
   state:
     | "off"
     | "permission_missing"
-    | "model_unsupported"
-    | "plan_required"
     | "ready"
     | "unsupported"
     | "driver_missing"
     | "driver_mismatch"
-    | "rollout_disabled"
     | "error"
     | (string & {});
   error?: string;
@@ -1934,6 +1810,18 @@ export async function connectorsConnect(input: {
   return invoke<ConnectorAccount>("connectors_connect", {
     request: { scopes: input.scopes, loginHint: input.loginHint, provider: input.provider },
   });
+}
+
+/** Connects "GitHub (via gh)" when the GitHub CLI is signed in and there is
+ * no GitHub account yet. Never throws for a missing or signed-out gh. */
+export async function connectorsGithubCliDetect() {
+  return invoke<ConnectorAccount | null>("connectors_github_cli_detect");
+}
+
+/** The explicit "Connect with GitHub CLI" action; also turns the automatic
+ * connection back on after a disconnect. */
+export async function connectorsGithubCliConnect() {
+  return invoke<ConnectorAccount | null>("connectors_github_cli_connect");
 }
 
 export async function connectorsCancelConnect() {
@@ -2059,10 +1947,6 @@ export async function obsidianDisconnect() {
   return invoke<ObsidianStatus>("obsidian_disconnect");
 }
 
-export async function connectorsApplyRuntime() {
-  return invoke<void>("connectors_apply_runtime");
-}
-
 export async function routineTrustGet(jobId: string) {
   return invoke<RoutineTrust | null>("routine_trust_get", { jobId });
 }
@@ -2149,22 +2033,6 @@ export async function connectorApprovalsRespondAll(input: {
   });
 }
 
-export async function browserApprovalsPending() {
-  return invoke<PendingBrowserApproval[]>("browser_approvals_pending");
-}
-
-export async function browserApprovalRespond(input: {
-  approvalId: string;
-  approve: boolean;
-  allowSite?: boolean;
-}) {
-  return invoke<void>("browser_approval_respond", {
-    approvalId: input.approvalId,
-    approve: input.approve,
-    allowSite: input.allowSite ?? false,
-  });
-}
-
 export async function computerUseStatus() {
   return invoke<ComputerUseStatusDto>("computer_use_status");
 }
@@ -2218,416 +2086,41 @@ export function computerUseCaptureSrc(path: string) {
   return convertFileSrc(path);
 }
 
-// ---- Private sharing (JUN-308) -------------------------------------------
-// Owner-side share commands. Ciphertext, IVs, envelopes, and locally stored
-// keys cross the IPC boundary as base64url strings; plaintext and unwrapped
-// keys never leave the webview (see src/lib/share-crypto.ts).
-
-export type ShareKind = "note" | "session";
-
-export type ShareInviteState = "pending" | "accepted" | "revoked";
-
-export type ShareInvitePayload = {
-  email: string;
-  envelopeB64: string;
-  envelopeIvB64: string;
-};
-
-export type ShareCreatedInviteDto = {
-  inviteId: string;
-  email: string;
-};
-
-export type ShareCreatedDto = {
-  shareId: string;
-  invites: ShareCreatedInviteDto[];
-};
-
-// `POST /v1/shares/{id}/invites` returns only the new invites (no shareId).
-export type ShareInvitesAddedDto = {
-  invites: ShareCreatedInviteDto[];
-};
-
-// `GET /v1/shares` returns summaries only; invites live on the detail response.
-export type ShareSummaryDto = {
-  shareId: string;
-  kind: ShareKind;
-  createdAt?: string;
-};
-
-export type ShareInviteDto = {
-  inviteId: string;
-  email: string;
-  state: ShareInviteState;
-  lastAccessAt?: string;
-};
-
-export type ShareDto = {
-  shareId: string;
-  kind: ShareKind;
-  createdAt?: string;
-  invites: ShareInviteDto[];
-};
-
-export type ShareKeyDto = {
-  shareId: string;
-  contentKeyB64: string;
-};
-
-export type ShareInviteKeyDto = {
-  inviteId: string;
-  inviteKeyB64: string;
-};
-
-export async function shareCreate(input: {
-  kind: ShareKind;
-  ciphertextB64: string;
-  ivB64: string;
-  invites: ShareInvitePayload[];
-}) {
-  return invoke<ShareCreatedDto>("share_create", { request: input });
+export type LocalTranscriptionModelState =
+  | { state: "absent" }
+  | { state: "downloading"; received: number; total: number }
+  | { state: "ready"; bytes: number }
+  | { state: "failed"; reason: string };
+export async function localTranscriptionModelState() {
+  return invoke<LocalTranscriptionModelState>("local_transcription_model_state");
 }
-
-export async function shareList() {
-  return invoke<ShareSummaryDto[]>("share_list");
+export async function installLocalTranscriptionModel(
+  onProgress: (state: LocalTranscriptionModelState) => void,
+) {
+  const channel = new Channel<LocalTranscriptionModelState>();
+  channel.onmessage = onProgress;
+  return invoke<void>("install_local_transcription_model", { channel });
 }
-
-export async function shareGet(shareId: string) {
-  return invoke<ShareDto>("share_get", { request: { shareId } });
+export async function cancelLocalTranscriptionModelInstall() {
+  return invoke<void>("cancel_local_transcription_model_install");
 }
-
-export async function shareAddInvites(shareId: string, invites: ShareInvitePayload[]) {
-  return invoke<ShareInvitesAddedDto>("share_add_invites", { request: { shareId, invites } });
+export async function removeLocalTranscriptionModel() {
+  return invoke<{ switched_to_groq: boolean }>("remove_local_transcription_model");
 }
-
-export async function shareRevokeInvite(shareId: string, inviteId: string) {
-  return invoke<void>("share_revoke_invite", { request: { shareId, inviteId } });
-}
-
-export async function shareDelete(shareId: string) {
-  return invoke<void>("share_delete", { request: { shareId } });
-}
-
-export async function shareKeySave(input: {
-  shareId: string;
-  itemKind: ShareKind;
-  itemId: string;
-  contentKeyB64: string;
-}) {
-  return invoke<void>("share_key_save", { request: input });
-}
-
-export async function shareKeyGet(itemKind: ShareKind, itemId: string) {
-  return invoke<ShareKeyDto | null>("share_key_get", { request: { itemKind, itemId } });
-}
-
-export async function shareInviteKeySave(input: {
-  inviteId: string;
-  shareId: string;
-  inviteKeyB64: string;
-}) {
-  return invoke<void>("share_invite_key_save", { request: input });
-}
-
-export async function shareInviteKeysGet(shareId: string) {
-  return invoke<ShareInviteKeyDto[]>("share_invite_keys_get", { request: { shareId } });
-}
-
-export async function getShareBaseUrl() {
-  return invoke<string>("get_share_base_url");
-}
-
-// ---------------------------------------------------------------------------
-// Clovy companion (typed frontend completion boundary)
-// ---------------------------------------------------------------------------
-
-export type CompanionCapability =
-  | "notesRead"
-  | "notesEdit"
-  | "agentRead"
-  | "agentChat"
-  | "agentCancel"
-  | "modelRead"
-  | "modelEdit"
-  | "mediaRead"
-  | "settingsRead"
-  | "settingsEditSafe"
-  | "recordingControlExisting"
-  | "appFocus"
-  | "filesUpload"
-  | "filesBrowse"
-  | "devicesReadSelf"
-  | "devicesRevokeSelf"
-  | "computerUseApprove";
-
-export type CompanionPairingQr = {
-  pairingId: string;
-  expiresAtMs: number;
-  qrSvg: string;
-  pairingCode: string;
-};
-
-export type CompanionPairingStatus = {
-  pairingId: string;
-  expiresAtMs: number;
-  state: "waitingForPhone" | "waitingForApproval" | "approved" | "expired";
-  desktopDeviceId: string;
-  desktopPublicKey: number[];
-  mobileDeviceId?: string;
-  mobilePublicKey?: number[];
-  mobileDisplayName?: string;
-};
-
-export type LinkedCompanionDevice = {
-  id: string;
-  displayName: string;
-  linkedAt: string;
-  lastSeenAt?: string;
-  revokedAt?: string;
-  capabilities: CompanionCapability[];
-};
-
-export async function companionBeginPairing() {
-  return invoke<CompanionPairingQr>("companion_begin_pairing");
-}
-
-export async function companionPairingStatus(pairingId: string) {
-  return invoke<CompanionPairingStatus>("companion_pairing_status", { pairingId });
-}
-
-export async function companionApprovePairing(pairingId: string, mobileDeviceId: string) {
-  return invoke<CompanionPairingStatus>("companion_approve_pairing", {
-    pairingId,
-    mobileDeviceId,
-  });
-}
-
-export async function companionListDevices() {
-  return invoke<LinkedCompanionDevice[]>("companion_list_devices");
-}
-
-export type CompanionBrowseRoot = {
-  id: string;
-  name: string;
-  path: string;
-};
-
-export async function companionListBrowseRoots() {
-  return invoke<CompanionBrowseRoot[]>("companion_list_browse_roots");
-}
-
-export async function companionGrantBrowseRoot(path: string) {
-  return invoke<CompanionBrowseRoot>("companion_grant_browse_root", {
-    request: { path },
-  });
-}
-
-export async function companionRevokeBrowseRoot(rootId: string) {
-  return invoke<void>("companion_revoke_browse_root", { rootId });
-}
-
-export async function companionConsumeAttachments(referenceIds: string[]) {
-  return invoke<void>("companion_consume_attachments", { referenceIds });
-}
-
-export type CompanionComputerUseApprovalSettings = {
-  enabled: boolean;
-  available: boolean;
-};
-
-export async function companionComputerUseApprovalSettings() {
-  return invoke<CompanionComputerUseApprovalSettings>("companion_computer_use_approval_settings");
-}
-
-export async function companionSetComputerUseApprovalEnabled(enabled: boolean) {
-  return invoke<CompanionComputerUseApprovalSettings>(
-    "companion_set_computer_use_approval_enabled",
-    { enabled },
+export async function onLocalTranscriptionModelState(
+  onState: (state: LocalTranscriptionModelState) => void,
+) {
+  return listen<LocalTranscriptionModelState>("local-transcription-model-state", ({ payload }) =>
+    onState(payload),
   );
 }
 
-export async function companionRenameDevice(deviceId: string, displayName: string) {
-  return invoke<void>("companion_rename_device", {
-    request: { deviceId, displayName },
-  });
+export type AppPreferences = { hideFromDock: boolean };
+
+export function appPreferencesGet() {
+  return invoke<AppPreferences>("app_preferences_get");
 }
 
-export async function companionRevokeDevice(deviceId: string) {
-  return invoke<void>("companion_revoke_device", { deviceId });
-}
-
-export type CompanionAgentStatus =
-  | "idle"
-  | "running"
-  | "waitingForUser"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export type CompanionAgentEventRequest =
-  | { type: "delta"; data: { storedSessionId: string; text: string } }
-  | {
-      type: "status";
-      data: { storedSessionId: string; status: CompanionAgentStatus; runId?: string };
-    }
-  | { type: "modelChanged"; data: { selection: CompanionSessionModelSelection } };
-
-export async function companionPublishAgentEvent(request: CompanionAgentEventRequest) {
-  return invoke<void>("companion_publish_agent_event", { request });
-}
-
-export type CompanionMediaReference = {
-  artifactId: string;
-  kind: "image" | "video";
-  mediaType: string;
-  widthPx?: number;
-  heightPx?: number;
-  durationMs?: number;
-  sizeBytes: number;
-};
-
-export type CompanionMediaProjection = {
-  runId?: string;
-  createdAt: string;
-  reference: CompanionMediaReference;
-};
-
-export async function companionListAgentMedia(storedSessionId: string) {
-  return invoke<CompanionMediaProjection[]>("companion_list_agent_media", { storedSessionId });
-}
-
-export type CompanionMediaChunk = {
-  artifactId: string;
-  offsetBytes: number;
-  totalSizeBytes: number;
-  sha256: string;
-  bytes: string;
-  complete: boolean;
-};
-
-export async function companionReadAgentMediaChunk(
-  storedSessionId: string,
-  artifactId: string,
-  offsetBytes: number,
-) {
-  return invoke<CompanionMediaChunk>("companion_read_agent_media_chunk", {
-    storedSessionId,
-    artifactId,
-    offsetBytes,
-  });
-}
-
-export type CompanionFrontendIntent =
-  | { type: "agentSessionsList"; data: { cursor?: string; limit: number } }
-  | {
-      type: "agentMessagesList";
-      data: { storedSessionId: string; cursor?: string; limit: number };
-    }
-  | {
-      type: "agentSend";
-      data: {
-        storedSessionId?: string;
-        message: string;
-        attachments: Array<{ path: string; name: string; mediaType?: string }>;
-        attachmentReferenceIds: string[];
-      };
-    }
-  | { type: "agentCancel"; data: { storedSessionId: string } }
-  | { type: "modelsList" }
-  | { type: "sessionModelGet"; data: { storedSessionId: string } }
-  | { type: "sessionModelSet"; data: { storedSessionId: string; modelId: string } }
-  | {
-      type: "mediaFetch";
-      data: { storedSessionId: string; artifactId: string; offsetBytes: number };
-    };
-
-export type CompanionFrontendRequest = {
-  operationId: string;
-  intent: CompanionFrontendIntent;
-};
-
-export type CompanionResultPayload =
-  | { type: "accepted" }
-  | {
-      type: "agentSessions";
-      data: {
-        items: Array<{
-          id: string;
-          title: string;
-          status: CompanionAgentStatus;
-          updatedAt: string;
-        }>;
-        nextCursor?: string;
-      };
-    }
-  | {
-      type: "agentMessages";
-      data: {
-        items: Array<{
-          id: string;
-          role: "user" | "assistant" | "system";
-          text: string;
-          createdAt: string;
-          streaming: boolean;
-          media?: CompanionMediaReference[];
-        }>;
-        nextCursor?: string;
-      };
-    }
-  | { type: "agentAccepted"; data: { storedSessionId: string } }
-  | { type: "models"; data: { models: CompanionModelOption[] } }
-  | { type: "sessionModel"; data: CompanionSessionModelSelection }
-  | { type: "mediaChunk"; data: CompanionMediaChunk }
-  | {
-      type: "error";
-      data: {
-        code:
-          | "unauthorized"
-          | "revoked"
-          | "expired"
-          | "replay"
-          | "unsupported"
-          | "invalid_request"
-          | "not_found"
-          | "conflict"
-          | "mac_offline"
-          | "busy"
-          | "outcome_unknown"
-          | "limit_exceeded"
-          | "integrity_mismatch"
-          | "internal";
-        message: string;
-        retryable: boolean;
-      };
-    };
-
-export type CompanionModelPrivacy = "endToEndEncrypted" | "private" | "anonymous";
-
-export type CompanionModelOption = {
-  id: string;
-  name: string;
-  provider: string;
-  description: string;
-  routing: "automatic" | "remote";
-  privacy?: CompanionModelPrivacy;
-  privacyLabel?: string;
-  priceLabel?: string;
-};
-
-export type CompanionSessionModelSelection = {
-  storedSessionId: string;
-  modelId: string;
-  modelName: string;
-  costQuality?: number;
-};
-
-export async function companionCompleteFrontendRequest(
-  operationId: string,
-  result: CompanionResultPayload,
-) {
-  return invoke<void>("companion_complete_frontend_request", { operationId, result });
-}
-
-export async function companionCancelFrontendRequest(operationId: string) {
-  return invoke<void>("companion_cancel_frontend_request", { operationId });
+export function appPreferencesSet(request: AppPreferences) {
+  return invoke<AppPreferences>("app_preferences_set", { request });
 }

@@ -1,4 +1,3 @@
-import "./lib/storage-compat-bootstrap";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -44,12 +43,15 @@ import {
   agentHudShow,
 } from "./lib/tauri";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
+import { subscribeInterfaceLocale, subscribeInterfaceLocaleAcrossWindows, t } from "./i18n";
 import "./styles/agent-hud.css";
 
 const lifecycle = createHudLifecycle();
 
 // Recolor this HUD window to the selected accent and keep it live-synced.
 lifecycle.trackUnlisten(subscribeBrand());
+// Follow the interface language chosen in the main window (sets <html lang>).
+lifecycle.addCleanup(subscribeInterfaceLocaleAcrossWindows());
 
 type HudSessionStatus = AgentSessionStatusKind | "idle";
 
@@ -100,6 +102,14 @@ const pillChevron = document.querySelector<HTMLElement>("#agent-hud-chevron");
 const stack = document.querySelector<HTMLElement>("#agent-hud-stack");
 const menu = document.querySelector<HTMLElement>("#agent-hud-menu");
 const hideHud = document.querySelector<HTMLButtonElement>("#agent-hud-hide");
+
+// The static page chrome from agent-hud.html, in the current language.
+function applyStaticLabels() {
+  document.title = t("hud.agents.windowTitle");
+  surface?.setAttribute("aria-label", t("hud.agents.activity"));
+  stack?.setAttribute("aria-label", t("hud.agents.sessions"));
+  if (hideHud) hideHud.textContent = t("hud.agents.hide");
+}
 
 lifecycle.addCleanup(installNativeContextMenuGuard());
 
@@ -449,12 +459,13 @@ function renderPill(entries: HudEntry[], expanded: boolean) {
     pillBadge.hidden = !showBadge;
     if (showBadge) {
       pillBadge.textContent = String(activeCount);
-      pillBadge.setAttribute("aria-label", `${activeCount} active agents`);
-      pillBadge.title = `${activeCount} active agents`;
+      const activeLabel = t("hud.agents.activeAgents", { count: activeCount });
+      pillBadge.setAttribute("aria-label", activeLabel);
+      pillBadge.title = activeLabel;
     }
   }
   pill.setAttribute("aria-expanded", expanded ? "true" : "false");
-  pill.setAttribute("aria-label", expanded ? "Collapse agent activity" : "Expand agent activity");
+  pill.setAttribute("aria-label", expanded ? t("hud.agents.collapse") : t("hud.agents.expand"));
 }
 
 function pillSummary(entries: HudEntry[]): {
@@ -470,7 +481,7 @@ function pillSummary(entries: HudEntry[]): {
   ).length;
   if (waitingCount > 0) {
     return {
-      label: waitingCount === 1 ? "1 needs input" : `${waitingCount} need input`,
+      label: t("hud.agents.needInput", { count: waitingCount }),
       status: "waitingForUser",
       runningCount,
       waitingCount,
@@ -478,7 +489,7 @@ function pillSummary(entries: HudEntry[]): {
   }
   if (runningCount > 0) {
     return {
-      label: runningCount === 1 ? "1 running" : String(runningCount),
+      label: t("hud.agents.running", { count: runningCount }),
       status: "running",
       runningCount,
       waitingCount,
@@ -493,7 +504,7 @@ function pillSummary(entries: HudEntry[]): {
       waitingCount,
     };
   }
-  return { label: "Idle", status: "idle", runningCount, waitingCount };
+  return { label: t("hud.status.idle"), status: "idle", runningCount, waitingCount };
 }
 
 function renderRow(entry: HudEntry, index: number) {
@@ -625,21 +636,21 @@ function sessionTitle(session: AgentSessionDto, record?: StatusRecord) {
     ) {
       return safeSessionTitle;
     }
-    return record?.prompt?.trim() || "Agent session";
+    return record?.prompt?.trim() || t("hud.agents.untitledSession");
   }
   if (storedTitle) {
     return isHudStoredSessionTitleSafe(storedTitle, session.id, record?.prompt, record?.prompt)
       ? storedTitle
-      : record?.prompt?.trim() || "Agent session";
+      : record?.prompt?.trim() || t("hud.agents.untitledSession");
   }
-  return record?.prompt?.trim() || "Agent session";
+  return record?.prompt?.trim() || t("hud.agents.untitledSession");
 }
 
 function sessionSummary(status: HudSessionStatus, record?: StatusRecord) {
   const summary = record?.summary?.trim();
   if (summary) return summary;
   if (status !== "idle") return statusLabel(status);
-  return "Idle";
+  return t("hud.status.idle");
 }
 
 function sessionTimestamp(session: AgentSessionDto, record?: StatusRecord) {
@@ -651,7 +662,7 @@ function statusTitle(record: StatusRecord) {
   const title = record.title?.trim();
   return title && isHudStatusTitleSafe(title, record.sessionId, record.prompt)
     ? title
-    : record.prompt?.trim() || "Agent session";
+    : record.prompt?.trim() || t("hud.agents.untitledSession");
 }
 
 function isHudStatusTitleSafe(title: string, sessionId?: string, prompt?: string) {
@@ -716,19 +727,19 @@ function statusLabel(status: HudSessionStatus) {
     case "received":
     case "starting":
     case "running":
-      return "Thinking";
+      return t("hud.agents.status.thinking");
     case "waitingForUser":
-      return "Needs input";
+      return t("hud.agents.status.needsInput");
     case "completed":
-      return "Done";
+      return t("hud.agents.status.done");
     case "failed":
-      return "Hit a problem";
+      return t("hud.agents.status.failed");
     case "cancelled":
-      return "Stopped";
+      return t("hud.agents.status.stopped");
     case "idle":
-      return "Idle";
+      return t("hud.status.idle");
     default:
-      return "Idle";
+      return t("hud.status.idle");
   }
 }
 
@@ -804,7 +815,9 @@ function terminalRecord(record: StatusRecord, previous?: StatusRecord) {
     ...record,
     prompt: previous?.prompt ?? record.prompt,
     title: previous?.title ?? record.title,
-    summary: record.summary?.trim() || statusLabel(record.status),
+    // Left empty when the runtime sent no summary so the row falls back to
+    // the status label at render time, in the current interface language.
+    summary: record.summary?.trim() || undefined,
     receivedAt: record.receivedAt,
   };
 }
@@ -1382,8 +1395,20 @@ if (typeof document.fonts?.ready?.then === "function") {
   });
 }
 
+// Language change from the main window: relabel the chrome and re-render the
+// rows (their text is part of the stack key, so they rebuild) and re-fit the
+// native window to the new label widths.
+lifecycle.addCleanup(
+  subscribeInterfaceLocale(() => {
+    applyStaticLabels();
+    lastLayoutKey = "";
+    render();
+  }),
+);
+
 if (hud) hud.dataset.placement = state.placement;
 setIcon(pillChevron, IconChevronDownSmall, 14);
+applyStaticLabels();
 render();
 
 // Console driver for this page when served standalone in a browser:

@@ -1,3 +1,4 @@
+import { t } from "../i18n/translate";
 /**
  * Orchestration for generating an image from chat and handing it to Clovy's
  * EXISTING inline image display path.
@@ -5,7 +6,7 @@
  * Clovy imports a pasted or dropped image into the session workspace and shows it inline as a composer
  * attachment (`attachmentStateFrom` -> `attachImageToSession`, rendered from
  * `previewDataUrl`). This module reuses that path verbatim for a GENERATED
- * image: it calls the Clovy API image endpoint, decodes the base64 result,
+ * image: it calls the native direct fal image command, decodes the base64 result,
  * imports the bytes into the workspace, and returns the same
  * `AgentAttachmentState` a pasted image produces. The caller drops the
  * attachment into the composer list exactly as it does for a paste.
@@ -25,7 +26,7 @@ import { messageFromError } from "./errors";
 import type { GeneratedImageDto } from "./tauri";
 
 export type GenerateChatImageDeps = {
-  /** Calls the Clovy API image endpoint; `model` falls back server-side. */
+  /** Calls the native direct fal image command; `model` defaults to the saved selection. */
   generate: (
     prompt: string,
     model: string | undefined,
@@ -52,7 +53,7 @@ export type GenerateChatImageResult =
 export type EditChatImageDeps = {
   /** Reads the source workspace file as a `data:<mime>;base64,...` URL. */
   readImageData: (path: string) => Promise<string | null>;
-  /** Calls the Clovy API image-edit endpoint. */
+  /** Calls the native direct fal image-edit command. */
   edit: (
     imageBase64: string,
     prompt: string,
@@ -66,7 +67,7 @@ export type EditChatImageDeps = {
 export type EditChatImageResult = GenerateChatImageResult;
 
 /** File extension for the workspace import, by mime. Defaults to png (what the
- * backend always requests from Venice). */
+ * backend always requests from the provider). */
 const EXTENSION_BY_MIME: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -110,7 +111,7 @@ export async function generateChatImage(
 ): Promise<GenerateChatImageResult> {
   const trimmed = prompt.trim();
   if (!trimmed) {
-    return { status: "error", message: "Enter a prompt to generate an image." };
+    return { status: "error", message: t("lib.errors.imagePromptRequired") };
   }
 
   let image: GeneratedImageDto;
@@ -126,7 +127,7 @@ export async function generateChatImage(
   if (!parseImageDataUrl(dataUrl)) {
     return {
       status: "error",
-      message: "Clovy returned an image it can't display.",
+      message: t("lib.errors.imageUndisplayable"),
     };
   }
 
@@ -164,7 +165,7 @@ export async function editChatImage(
 ): Promise<EditChatImageResult> {
   const trimmed = instruction.trim();
   if (!trimmed) {
-    return { status: "error", message: "Enter an edit instruction." };
+    return { status: "error", message: t("lib.errors.imageEditInstructionRequired") };
   }
 
   let sourceData: string | null;
@@ -177,7 +178,7 @@ export async function editChatImage(
   if (!parsedSource) {
     return {
       status: "error",
-      message: "Clovy couldn't read the source image.",
+      message: t("lib.errors.imageSourceUnreadable"),
     };
   }
 
@@ -192,7 +193,7 @@ export async function editChatImage(
   if (!parseImageDataUrl(dataUrl)) {
     return {
       status: "error",
-      message: "Clovy returned an image it can't display.",
+      message: t("lib.errors.imageUndisplayable"),
     };
   }
 

@@ -1,7 +1,8 @@
 use super::{
     finish_recording_session_with_timing,
     note_transcription_benchmark::{
-        benchmark_repositories, spawn_fake_clovy_api, BenchmarkClock, RequestEvents,
+        benchmark_repositories, configure_fake_note_provider_keys, spawn_fake_note_providers,
+        BenchmarkClock, RequestEvents,
     },
 };
 use crate::{
@@ -91,6 +92,7 @@ fn timing_finished_recording(
 }
 
 async fn assert_done_origin_checkpoints_are_monotonic_and_single_shot() {
+    configure_fake_note_provider_keys();
     let dir = tempfile::tempdir().expect("timing tempdir");
     let repos = benchmark_repositories(&dir).await;
     let note = repos
@@ -126,6 +128,8 @@ async fn assert_done_origin_checkpoints_are_monotonic_and_single_shot() {
     let timing = ProcessingTiming::from_done(Instant::now());
     let response = finish_recording_session_with_timing(
         &repos,
+        crate::app_paths::AppPaths::from_data_dir(dir.path().join("video-data"))
+            .expect("owned timing paths"),
         timing_finished_recording(&note.id, &recording_session_id, audio_path),
         Instant::now(),
         timing,
@@ -244,7 +248,7 @@ async fn done_origin_checkpoints_are_monotonic_and_single_shot() {
     let clock = BenchmarkClock::default();
     clock.start();
     let events = RequestEvents::new(clock);
-    let (address, api_handle) = spawn_fake_clovy_api(events).await;
+    let (address, api_handle) = spawn_fake_note_providers(events).await;
     let executable = std::env::current_exe().expect("timing test executable");
     let output = tokio::task::spawn_blocking(move || {
         Command::new(executable)
@@ -255,9 +259,10 @@ async fn done_origin_checkpoints_are_monotonic_and_single_shot() {
                 "--test-threads=1",
             ])
             .env(TIMING_TEST_CHILD_ENV, "1")
-            .env("CLOVY_API_URL", format!("http://{address}"))
-            .env("OS_CLOVY_LOCAL_DEV", "1")
-            .env("OS_CLOVY_LOCAL_DEV_BEARER_TOKEN", "timing-test-token")
+            .env(
+                "CLOVY_TEST_NOTE_PROVIDER_ORIGIN",
+                format!("http://{address}"),
+            )
             .output()
             .expect("run isolated timing test child")
     })

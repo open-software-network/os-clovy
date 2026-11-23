@@ -102,8 +102,9 @@ pipelines, Salesforce record types, Asana projects, Box/Dropbox folders,
 GitLab groups/projects, ClickUp spaces/lists, Pipedrive pipelines, Azure DevOps
 projects, or Canva folders/designs. The component that holds the provider
 credential enforces that selection after resolving provider ids: the Rust
-provider proxy for local mode, or the Clovy API broker for a server connector.
-A model-supplied id cannot widen it at either boundary.
+provider proxy for local mode. The proposed hosted connector broker was
+superseded by ADR-0073; no replacement is authorized. A model-supplied id
+cannot widen the local boundary.
 
 ## Sequencing
 

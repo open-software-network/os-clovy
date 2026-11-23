@@ -1,10 +1,8 @@
-import {
-  type AgentChatPart,
-  type AgentChatTurn,
-  UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
-} from "./agent-chat-runtime";
+import { t } from "../i18n/translate";
+import type { AgentChatPart, AgentChatTurn } from "./agent-chat-runtime";
 import {
   AGENT_RUNTIME_PROTOCOL_VERSION,
+  type AgentInterruptionDto,
   type AgentItemDto,
   type AgentRunDto,
   type AgentRuntimeEvent,
@@ -19,6 +17,10 @@ export type AgentRuntimeProjection = {
   items: AgentItemDto[];
   lastSequenceByRun: Record<string, number>;
   processedEventIds: Set<string>;
+  /** Provenance of live diagnostics, not a second transcript. */
+  diagnosticEventIds: ReadonlyMap<string, string>;
+  /** Terminal authority retained across stale snapshots and late CLI starts. */
+  terminalRunKeys: Set<string>;
 };
 
 export function createAgentRuntimeProjection(
@@ -30,6 +32,13 @@ export function createAgentRuntimeProjection(
     items: [...(input.items ?? [])].sort(compareAgentItems),
     lastSequenceByRun: {},
     processedEventIds: new Set(),
+    diagnosticEventIds: new Map(),
+    terminalRunKeys: new Set([
+      ...(input.run && isTerminalRun(input.run) ? [runKey(input.run.sessionId, input.run.id)] : []),
+      ...(input.items ?? [])
+        .filter((item) => item.kind === "tool_call" && item.status === "interrupted")
+        .map((item) => runKey(item.sessionId, item.runId)),
+    ]),
   };
 }
 
@@ -54,7 +63,12 @@ export function reconcileAgentInterruptionResolution(
         interruption: {
           ...interruption,
           status: "resolved",
-          resolution: resolution.choice,
+          // The approval broker grants nothing beyond this call: a CLI
+          // approval for the session or always is approved once.
+          resolution:
+            interruption.engine === "cli" && resolution.choice !== "deny"
+              ? "once"
+              : resolution.choice,
         },
       };
     }
@@ -83,15 +97,81 @@ export function reconcileAgentInterruptionResolution(
 
 /**
  * Hydrates a persisted transcript without dropping deltas that arrived while
- * the snapshot request was in flight. Only streamed text from the active run
- * is carried across, so switching sessions cannot leak items from the previous
- * transcript.
+ * the snapshot request was in flight. The read-start event IDs distinguish
+ * newly observed diagnostics from older omitted items. Session identity gates
+ * all live state; existing tool settlements and active text retain their rules.
  */
 export function mergeAgentRuntimeSnapshot(
   current: AgentRuntimeProjection,
   input: { session: AgentSessionDto; run?: AgentRunDto; items: AgentItemDto[] },
+  readStartedEventIds: ReadonlySet<string>,
 ): AgentRuntimeProjection {
+  if (
+    current.session?.id === input.session.id &&
+    input.run &&
+    !isTerminalRun(input.run) &&
+    current.terminalRunKeys.has(runKey(input.run.sessionId, input.run.id)) &&
+    current.run &&
+    current.run.id !== input.run.id
+  ) {
+    // This response still calls a known terminal run active; it predates Stop
+    // and cannot replace the newer run accepted while hydration was in flight.
+    return current;
+  }
   const snapshot = createAgentRuntimeProjection(input);
+  if (current.session?.id === input.session.id) {
+    snapshot.terminalRunKeys = new Set([...snapshot.terminalRunKeys, ...current.terminalRunKeys]);
+    snapshot.processedEventIds = new Set(current.processedEventIds);
+    snapshot.lastSequenceByRun = { ...current.lastSequenceByRun };
+    snapshot.diagnosticEventIds = new Map(
+      [...current.diagnosticEventIds].filter(([id]) =>
+        snapshot.items.some((item) => item.id === id),
+      ),
+    );
+
+    // A request begun before Stop may return running calls after its terminal
+    // event. Keep that exact call's settlement and any genuinely observed result.
+    for (const liveItem of current.items) {
+      if (liveItem.sessionId !== input.session.id) continue;
+      if (liveItem.kind === "tool_call" && liveItem.status === "interrupted") {
+        const persisted = snapshot.items.find(
+          (item) => item.kind === "tool_call" && sameToolCall(item, liveItem),
+        );
+        if (!persisted) snapshot.items = upsertItem(snapshot.items, liveItem);
+        else if (persisted.kind === "tool_call" && persisted.status === "running") {
+          snapshot.items = upsertItem(snapshot.items, { ...persisted, status: "interrupted" });
+        }
+      } else if (
+        liveItem.kind === "tool_result" &&
+        current.terminalRunKeys.has(runKey(liveItem.sessionId, liveItem.runId)) &&
+        !snapshot.items.some((item) => item.kind === "tool_result" && sameToolCall(item, liveItem))
+      ) {
+        snapshot.items = upsertItem(snapshot.items, liveItem);
+      }
+    }
+  }
+  // During first hydration the selected session is known by the consumer,
+  // while its full session DTO is still pending. Only event-backed cleanup
+  // diagnostics can cross that gap, scoped by each item's session identity.
+  if (!current.session || current.session.id === input.session.id) {
+    // Carry only an actual diagnostic event received after this read began.
+    // An older omitted item is authoritative deletion/compaction, not a delta.
+    for (const item of current.items) {
+      const eventId = current.diagnosticEventIds.get(item.id);
+      if (
+        item.sessionId === input.session.id &&
+        item.kind === "error" &&
+        item.code === "agent_workspace_mcp_cleanup" &&
+        eventId &&
+        current.processedEventIds.has(eventId) &&
+        !readStartedEventIds.has(eventId)
+      ) {
+        snapshot.items = upsertItem(snapshot.items, item);
+        snapshot.diagnosticEventIds = new Map(snapshot.diagnosticEventIds).set(item.id, eventId);
+        snapshot.processedEventIds.add(eventId);
+      }
+    }
+  }
   const run = input.run;
   if (!run || (run.status !== "running" && run.status !== "waiting_for_user")) return snapshot;
 
@@ -117,12 +197,11 @@ export function mergeAgentRuntimeSnapshot(
     }
   }
 
-  const currentRun = current.run?.id === run.id ? current.run : undefined;
-  const currentRunFinished =
-    currentRun &&
-    (currentRun.status === "completed" ||
-      currentRun.status === "cancelled" ||
-      currentRun.status === "failed");
+  const currentRun =
+    current.run?.id === run.id && current.run.sessionId === input.session.id
+      ? current.run
+      : undefined;
+  const currentRunFinished = currentRun && isTerminalRun(currentRun);
   return {
     ...snapshot,
     run: currentRunFinished ? currentRun : run,
@@ -157,18 +236,56 @@ export function applyAgentRuntimeEvent(
     throw new Error(`Unsupported agent runtime protocol version: ${event.protocolVersion}`);
   }
   if (projection.processedEventIds.has(event.eventId)) return projection;
-  if (event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)) return projection;
+  // The approval broker writes CLI cards while the CLI turn keeps numbering
+  // its own events, so its events carry no place in the run's sequence: they
+  // replace the card by id and never move the run's sequence gate.
+  const brokerEvent = isCliInterruptionEvent(event);
+  const terminalEvent =
+    event.method === "run.completed" ||
+    event.method === "run.cancelled" ||
+    event.method === "run.failed";
+  if (
+    !brokerEvent &&
+    !terminalEvent &&
+    event.sequence <= (projection.lastSequenceByRun[event.runId] ?? -1)
+  ) {
+    return projection;
+  }
 
   const next: AgentRuntimeProjection = {
     ...projection,
     items: [...projection.items],
-    lastSequenceByRun: { ...projection.lastSequenceByRun, [event.runId]: event.sequence },
+    lastSequenceByRun: brokerEvent
+      ? projection.lastSequenceByRun
+      : {
+          ...projection.lastSequenceByRun,
+          [event.runId]: Math.max(event.sequence, projection.lastSequenceByRun[event.runId] ?? -1),
+        },
     processedEventIds: new Set(projection.processedEventIds).add(event.eventId),
+    terminalRunKeys: new Set(projection.terminalRunKeys),
   };
+  const eventRunKey = runKey(event.sessionId, event.runId);
+  const currentRunMatches = next.run?.id === event.runId && next.run.sessionId === event.sessionId;
+  if (terminalEvent) {
+    next.terminalRunKeys.add(eventRunKey);
+    const interruptedCallIds = new Set(event.data.interruptedCallIds ?? []);
+    next.items = next.items.map((item) =>
+      item.kind === "tool_call" &&
+      item.status === "running" &&
+      item.sessionId === event.sessionId &&
+      item.runId === event.runId &&
+      interruptedCallIds.has(item.callId) &&
+      !next.items.some((result) => result.kind === "tool_result" && sameToolCall(result, item))
+        ? { ...item, status: "interrupted" }
+        : item,
+    );
+  }
 
   switch (event.method) {
     case "run.started":
+      if (next.terminalRunKeys.has(eventRunKey)) break;
       next.run = {
+        ...(next.run?.id === event.runId ? next.run : {}),
         id: event.runId,
         sessionId: event.sessionId,
         status: "running",
@@ -191,7 +308,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "message",
         role: event.data.role,
@@ -207,18 +324,37 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "steering",
         text: event.data.text,
       });
       break;
-    case "tool.started":
+    case "run.diagnostic":
+      next.diagnosticEventIds = new Map(next.diagnosticEventIds).set(
+        event.data.itemId,
+        event.eventId,
+      );
       next.items = upsertItem(next.items, {
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
+        createdAt: event.data.createdAt,
+        kind: "error",
+        message: event.data.message,
+        category: event.data.category,
+        code: event.data.code,
+        retryable: event.data.retryable,
+      });
+      break;
+    case "tool.started":
+      if (next.terminalRunKeys.has(eventRunKey)) break;
+      next.items = upsertItem(next.items, {
+        id: event.data.itemId,
+        sessionId: event.sessionId,
+        runId: event.runId,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "tool_call",
         callId: event.data.callId,
@@ -231,7 +367,10 @@ export function applyAgentRuntimeEvent(
     case "tool.failed": {
       const failed = event.method === "tool.failed";
       next.items = next.items.map((item) =>
-        item.kind === "tool_call" && item.callId === event.data.callId
+        item.kind === "tool_call" &&
+        item.sessionId === event.sessionId &&
+        item.runId === event.runId &&
+        item.callId === event.data.callId
           ? { ...item, status: failed ? "failed" : "complete" }
           : item,
       );
@@ -239,7 +378,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "tool_result",
         callId: event.data.callId,
@@ -250,31 +389,47 @@ export function applyAgentRuntimeEvent(
       break;
     }
     case "interruption.requested":
+    case "interruption.updated": {
+      if (next.terminalRunKeys.has(eventRunKey) && event.data.interruption.status === "pending") {
+        break;
+      }
+      const existing = next.items.find(
+        (item) =>
+          item.kind === "interruption" &&
+          item.runId === event.runId &&
+          item.interruption.id === event.data.interruption.id,
+      );
       next.items = upsertItem(
-        next.items.filter(
-          (item) =>
-            item.kind !== "interruption" ||
-            item.runId !== event.runId ||
-            item.interruption.id !== event.data.interruption.id,
-        ),
+        next.items.filter((item) => item !== existing),
         {
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.interruption.createdAt,
           kind: "interruption",
           interruption: event.data.interruption,
         },
       );
-      if (next.run) next.run = { ...next.run, status: "waiting_for_user" };
+      if (next.run && currentRunMatches && !next.terminalRunKeys.has(eventRunKey)) {
+        const waiting = next.items.some(
+          (item) =>
+            item.kind === "interruption" &&
+            item.runId === event.runId &&
+            item.interruption.status === "pending",
+        );
+        if (waiting) next.run = { ...next.run, status: "waiting_for_user" };
+        else if (next.run.status === "waiting_for_user")
+          next.run = { ...next.run, status: "running" };
+      }
       break;
+    }
     case "usage.updated":
-      if (next.run) next.run = { ...next.run, usage: event.data };
+      if (next.run && currentRunMatches) next.run = { ...next.run, usage: event.data };
       break;
     case "run.completed":
     case "run.cancelled":
-      if (next.run) {
+      if (next.run && currentRunMatches && !isTerminalRun(next.run)) {
         next.run = {
           ...next.run,
           status: event.method === "run.completed" ? "completed" : "cancelled",
@@ -283,7 +438,7 @@ export function applyAgentRuntimeEvent(
       }
       break;
     case "run.failed":
-      if (next.run) {
+      if (next.run && currentRunMatches && !isTerminalRun(next.run)) {
         next.run = {
           ...next.run,
           status: "failed",
@@ -295,7 +450,7 @@ export function applyAgentRuntimeEvent(
         id: `error:${event.eventId}`,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.completedAt,
         kind: "error",
         message: event.data.message,
@@ -314,14 +469,15 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
   const settledToolCalls = new Set(
     orderedItems
       .filter((item) => item.kind === "tool_result")
-      .map((item) => toolCallKey(item.runId, item.callId)),
+      .map((item) => toolCallKey(item.sessionId, item.runId, item.callId)),
   );
   const runIdsByItemId = new Map(orderedItems.map((item) => [item.id, item.runId]));
 
   const turns = orderedItems
     .filter(
       (item) =>
-        item.kind !== "tool_call" || !settledToolCalls.has(toolCallKey(item.runId, item.callId)),
+        item.kind !== "tool_call" ||
+        !settledToolCalls.has(toolCallKey(item.sessionId, item.runId, item.callId)),
     )
     .map((item): AgentChatTurn => {
       const base = {
@@ -456,7 +612,14 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
             return {
               ...base,
               role: "system",
-              parts: [{ type: "notice", kind: "credits", text: item.message }],
+              parts: [
+                {
+                  type: "notice",
+                  kind: "runtime",
+                  text: t("chat.notice.runtimeStopped"),
+                  retryable: false,
+                },
+              ],
             };
           }
           return {
@@ -471,7 +634,13 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
                     : item.category === "runtime"
                       ? "runtime"
                       : "upstream-provider",
-                text: UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+                text:
+                  item.code === "agent_workspace_mcp_cleanup"
+                    ? item.message
+                    : t("lib.upstream.noticeBody"),
+                ...(item.code === "agent_workspace_mcp_cleanup"
+                  ? { diagnostic: item.message }
+                  : {}),
                 retryable: item.retryable,
               },
             ],
@@ -570,6 +739,18 @@ function generatedImagePart(output: unknown): AgentChatPart | undefined {
 function generatedVideoPart(output: unknown): AgentChatPart | undefined {
   if (!output || typeof output !== "object") return undefined;
   const value = output as Record<string, unknown>;
+  // The fal key could not be used, so the job waits on the server for the agent
+  // to continue it by job id: this attempt shows why it paused, never a
+  // finished video without an asset.
+  if (value.status === "waitingForProviderKey" && typeof value.jobId === "string") {
+    return {
+      type: "video",
+      status: "error",
+      prompt: "",
+      jobId: value.jobId,
+      error: t("chat.media.videoWaitingForProviderKey"),
+    };
+  }
   if (value.mediaType !== "video" || typeof value.path !== "string") return undefined;
   return {
     type: "video",
@@ -582,8 +763,23 @@ function generatedVideoPart(output: unknown): AgentChatPart | undefined {
   };
 }
 
-function toolCallKey(runId: string | undefined, callId: string) {
-  return `${runId ?? ""}:${callId}`;
+function runKey(sessionId: string, runId: string | undefined) {
+  return JSON.stringify([sessionId, runId]);
+}
+
+function toolCallKey(sessionId: string, runId: string | undefined, callId: string) {
+  return JSON.stringify([sessionId, runId, callId]);
+}
+
+function sameToolCall(
+  a: Extract<AgentItemDto, { kind: "tool_call" | "tool_result" }>,
+  b: Extract<AgentItemDto, { kind: "tool_call" | "tool_result" }>,
+) {
+  return a.sessionId === b.sessionId && a.runId === b.runId && a.callId === b.callId;
+}
+
+function isTerminalRun(run: AgentRunDto) {
+  return ["completed", "cancelled", "failed", "interrupted"].includes(run.status);
 }
 
 function interruptionToPart(
@@ -600,7 +796,8 @@ function interruptionToPart(
       question: interruption.question,
       choices: interruption.choices,
       answer: interruption.answer,
-      status: interruption.status === "pending" ? "pending" : "resolved",
+      status: clarifyStatus(interruption),
+      ...(interruption.engine === "cli" ? { engine: "cli" as const } : {}),
     };
   }
   if (interruption.kind === "secret") {
@@ -622,7 +819,28 @@ function interruptionToPart(
     allowPermanent: interruption.allowAlways,
     choice: interruption.resolution,
     status: interruption.status,
+    ...(interruption.retiredReason ? { retiredReason: interruption.retiredReason } : {}),
+    ...(interruption.engine === "cli" ? { engine: "cli" as const } : {}),
   };
+}
+
+/** Native questions only resolve; a CLI question can also expire or be
+ * cancelled without an answer. */
+function clarifyStatus(
+  interruption: Extract<AgentInterruptionDto, { kind: "clarification" }>,
+): Extract<AgentChatPart, { type: "clarify" }>["status"] {
+  if (interruption.status === "pending") return "pending";
+  if (interruption.engine === "cli" && interruption.status !== "resolved") {
+    return interruption.status;
+  }
+  return "resolved";
+}
+
+function isCliInterruptionEvent(event: AgentRuntimeEvent) {
+  return (
+    (event.method === "interruption.requested" || event.method === "interruption.updated") &&
+    event.data.interruption.engine === "cli"
+  );
 }
 
 function appendTextDelta(
@@ -639,7 +857,7 @@ function appendTextDelta(
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.createdAt,
           kind,
           role: "assistant",
@@ -650,7 +868,7 @@ function appendTextDelta(
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.createdAt,
           kind,
           text,
@@ -668,9 +886,7 @@ function upsertItem(items: AgentItemDto[], item: AgentItemDto) {
 }
 
 function compareAgentItems(a: AgentItemDto, b: AgentItemDto) {
-  return (
-    a.sequence - b.sequence || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
-  );
+  return a.sequence - b.sequence;
 }
 
 function itemIsRunning(item: AgentItemDto) {

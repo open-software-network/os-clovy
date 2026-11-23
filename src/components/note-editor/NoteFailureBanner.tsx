@@ -1,33 +1,12 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useState } from "react";
-import { isInsufficientCreditsMessage } from "../../lib/errors";
-import { TierMiniCard } from "../account/FundingNotice";
-import type { FundingTier } from "../account/FundingNotice";
-
-export type FailureKind = "balance_low" | "generic";
+import { type MessageKey, t as translate, useT } from "../../i18n";
 
 type Props = {
   errorMessage?: string;
   audioPreserved: boolean;
   onRetry: () => void | Promise<void>;
-  onTopUp: () => void;
-  topUpLabel?: string;
-  retryBlockedReason?: string;
-  /** The user's current plan; balance failures lead with its tier card so
-   * the banner reads as "your card declined", matching the other credits
-   * surfaces. */
-  tier?: FundingTier;
 };
-
-// String match (see isInsufficientCreditsMessage) is intentional and a known
-// weakness — the backend currently persists only the error message on the
-// note, not the structured code (see commands.rs::finish_recording where
-// set_note_status is called with Some(error.message)). When we start storing
-// the code we can switch to a strict equality check on the backend billing
-// error code.
-export function classifyFailure(message?: string): FailureKind {
-  return isInsufficientCreditsMessage(message) ? "balance_low" : "generic";
-}
 
 export function userFacingFailureMessage(message?: string) {
   if (!message) return undefined;
@@ -38,23 +17,79 @@ export function userFacingFailureMessage(message?: string) {
     .join(" | ");
 }
 
+/** Failure sentences the desktop backend writes into a note
+ * (`domain/processing.rs`: `user_facing_transcription_failure_message`,
+ * `note_generation_failure_for_user`, and direct providers for a missing provider
+ * key or oversized audio). Notes persist only that English
+ * sentence, not its error code, so the sentence is the stable identifier:
+ * each key's English text is byte-identical to what Rust stores, and the
+ * banner shows it in the interface language. */
+const STORED_FAILURE_KEYS: MessageKey[] = [
+  "notes.failure.transcriptionEngineChanged",
+  "notes.failure.localTranscriberFailed",
+  "notes.failure.noSpeech",
+  "notes.failure.silenceSystem",
+  "notes.failure.silenceMicrophone",
+  "notes.failure.providerFailed",
+  "notes.failure.serviceBusy",
+  "notes.failure.generationBusy",
+  "notes.failure.generationFailed",
+  "notes.failure.groqKeyMissing",
+  "notes.failure.audioTooLarge",
+  "notes.failure.groqUsageLimit",
+  "notes.failure.groqKeyUnavailable",
+  "notes.failure.generationKeyMissing",
+];
+
+/** `notes.failure.rateLimitPaused` as Rust stores it
+ * (`processing.rs`: `rate_limit_paused_message`), with the HH:MM it resumes. */
+const RATE_LIMIT_PAUSED =
+  /^Groq usage limit reached\. Clovy continues transcribing at (\d{1,2}:\d{2})\. Parts already transcribed are kept\.$/;
+
+function storedFailureKey(body: string): MessageKey | undefined {
+  const trimmed = body.trim();
+  return STORED_FAILURE_KEYS.find((key) => translate(key, undefined, "en") === trimmed);
+}
+
 function friendlyFailureSegment(message: string) {
   const source = message.match(/^(Microphone|System):\s*/i)?.[1];
   const body = source ? message.replace(/^(Microphone|System):\s*/i, "") : message;
   const normalized = body.toLowerCase();
   let friendly = body;
-  if (normalized.includes("no_speech") || normalized.includes("no speech")) {
-    friendly = "No speech detected. Try speaking louder or moving closer to the microphone.";
+  const storedKey = storedFailureKey(body);
+  const pausedUntil = body.trim().match(RATE_LIMIT_PAUSED)?.[1];
+  if (storedKey) {
+    friendly = translate(storedKey);
+  } else if (pausedUntil) {
+    friendly = translate("notes.failure.rateLimitPaused", { time: pausedUntil });
+  } else if (normalized.includes("no_speech") || normalized.includes("no speech")) {
+    friendly = translate("notes.failure.noSpeech");
   } else if (isInvalidClovyResponseMessage(body)) {
-    friendly = "The processing service returned an invalid response.";
-  } else if (normalized.includes("metering_provider_failed")) {
-    friendly = "Billing is temporarily unavailable. Please try again in a moment.";
+    friendly = translate("notes.failure.invalidResponse");
+  } else if (
+    normalized.includes("metering_provider_failed") ||
+    normalized.startsWith("billing is temporarily unavailable")
+  ) {
+    friendly = translate("notes.failure.providerFailed");
   } else if (normalized.includes("upstream_provider_failed")) {
-    friendly = "The transcription provider could not process this audio.";
+    friendly = translate("notes.failure.providerFailed");
   } else if (normalized.includes("authorization_denied")) {
-    friendly = "The service is busy right now. Wait a minute, then retry.";
+    friendly = translate("notes.failure.serviceBusy");
   }
-  return source ? `${source}: ${friendly}` : friendly;
+  return source
+    ? translate("notes.failure.sourcePrefixed", {
+        source: failureSourceLabel(source),
+        message: friendly,
+      })
+    : friendly;
+}
+
+/** The transcript source a backend failure names ("Microphone: ..."), shown in
+ * the interface language; any other casing passes through untouched. */
+function failureSourceLabel(source: string) {
+  if (source === "Microphone") return translate("notes.editor.source.microphone");
+  if (source === "System") return translate("notes.editor.source.system");
+  return source;
 }
 
 export function isInvalidClovyResponseMessage(message: string) {
@@ -66,25 +101,15 @@ export function isInvalidClovyResponseMessage(message: string) {
   );
 }
 
-export function NoteFailureBanner({
-  errorMessage,
-  audioPreserved,
-  onRetry,
-  onTopUp,
-  topUpLabel = "Upgrade",
-  retryBlockedReason,
-  tier,
-}: Props) {
-  const kind = classifyFailure(errorMessage);
-  const isBalanceIssue = kind === "balance_low";
+export function NoteFailureBanner({ errorMessage, audioPreserved, onRetry }: Props) {
+  const t = useT();
   const displayMessage = userFacingFailureMessage(errorMessage);
-  const topUpAction = topUpLabel.toLowerCase();
   // Local busy flag so a fast double-click can't fire onRetry twice. The
   // banner unmounts when the note transitions out of `failed` status, so we
   // don't need to reset this state ourselves; the catch covers the case
   // where onRetry rejects and the note stays in `failed`.
   const [retrying, setRetrying] = useState(false);
-  // Mirror the settings balance-refresh affordance: each click advances the
+  // Each retry click advances the
   // rotation by a full turn so the arrow sweeps once on press.
   const [spins, setSpins] = useState(0);
 
@@ -102,30 +127,17 @@ export function NoteFailureBanner({
   }
 
   return (
-    <aside className="note-failure-banner" role="alert" data-kind={kind}>
-      {isBalanceIssue && tier ? <TierMiniCard tier={tier} /> : null}
+    <aside className="note-failure-banner" role="alert">
       <p className="note-failure-message">
-        {isBalanceIssue
-          ? audioPreserved
-            ? `Your balance ran out. Your recording is saved locally, so ${topUpAction} and retry.`
-            : `Your balance is too low. ${topUpLabel} to continue.`
-          : (displayMessage ?? "Clovy couldn't finish processing this note.")}
-        {!isBalanceIssue && audioPreserved
-          ? " Your recording is saved locally, so you can retry."
-          : null}
-        {retryBlockedReason ? ` ${retryBlockedReason}` : null}
+        {displayMessage ?? t("notes.failure.generic")}
+        {audioPreserved ? ` ${t("notes.failure.savedCanRetry")}` : null}
       </p>
       <div className="note-failure-actions">
-        {isBalanceIssue ? (
-          <button type="button" className="btn btn-secondary" onClick={onTopUp} disabled={retrying}>
-            {topUpLabel}
-          </button>
-        ) : null}
         <button
           type="button"
           className="btn btn-ghost"
           onClick={() => void handleRetry()}
-          disabled={!audioPreserved || retrying || Boolean(retryBlockedReason)}
+          disabled={!audioPreserved || retrying}
           aria-busy={retrying || undefined}
         >
           <IconArrowRotateClockwise
@@ -133,7 +145,7 @@ export function NoteFailureBanner({
             className="balance-refresh-icon"
             style={{ transform: `rotate(${spins * 360}deg)` }}
           />
-          Retry
+          {t("common.retry")}
         </button>
       </div>
     </aside>

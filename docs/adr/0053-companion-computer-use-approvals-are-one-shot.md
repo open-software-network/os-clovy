@@ -272,3 +272,7 @@ attempt. Once that transaction commits, a sidecar resume failure may restore
 the visible interruption while retaining the receipt, as documented above:
 the authenticated decision did commit, remote authority is retired, and any
 later action is desktop-local.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

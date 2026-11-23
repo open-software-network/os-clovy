@@ -11,24 +11,18 @@ import {
   notifyAgentSessionStatus,
   type AgentAttentionContext,
 } from "../lib/agent-notifications";
+import { agentRuntimeBindings } from "../lib/tauri";
 import { getAgentSoundsEnabled } from "../lib/agent-sound-settings";
 import type { UseAgentAttentionNotificationsDependencies } from "./use-agent-attention-notifications-types";
 
 export function useAgentAttentionNotifications(
   dependencies: UseAgentAttentionNotificationsDependencies,
 ) {
-  const {
-    activeAgentSessionIdRef,
-    activeViewRef,
-    agentHudEnabledRef,
-    dictationWorkflowActiveRef,
-    noteChatOpenRef,
-    noteChatSessionIdRef,
-    recordingStatusRef,
-  } = dependencies;
+  const { activeViewRef, dictationWorkflowActiveRef, recordingStatusRef } = dependencies;
 
   useEffect(() => {
-    async function attentionContextFor(sessionId?: string): Promise<AgentAttentionContext> {
+    let disposed = false;
+    async function attentionContextFor(): Promise<AgentAttentionContext> {
       let windowFocused = document.hasFocus();
       try {
         const appWindow = getCurrentWindow();
@@ -47,39 +41,41 @@ export function useAgentAttentionNotifications(
         recordingState === "validating";
       return {
         away,
-        agentHudEnabled: agentHudEnabledRef.current,
-        viewingSession:
-          !away &&
-          ((activeViewRef.current === "agent" &&
-            (!sessionId || sessionId === activeAgentSessionIdRef.current)) ||
-            (activeViewRef.current === "meetings" &&
-              noteChatOpenRef.current &&
-              !!sessionId &&
-              sessionId === noteChatSessionIdRef.current)),
+        agentHudEnabled: false,
+        viewingSession: !away && activeViewRef.current === "routines",
         captureActive: recordingCaptureActive || dictationWorkflowActiveRef.current,
         soundsEnabled: getAgentSoundsEnabled(),
+        routineResult: true,
       };
+    }
+
+    async function notifyRoutine<Detail extends { sessionId?: string; title?: string }>(
+      detail: Detail,
+      notify: (detail: Detail, context: AgentAttentionContext) => Promise<boolean>,
+    ) {
+      if (!detail.sessionId) return;
+      const run = await agentRuntimeBindings.getSession(detail.sessionId).catch(() => null);
+      if (disposed || (run?.source !== "routine" && run?.source !== "legacy_routine")) return;
+      const context = await attentionContextFor();
+      if (!disposed) await notify({ ...detail, title: run.title }, context);
     }
 
     const handleAgentStatus = (event: Event) => {
       const detail = (event as CustomEvent<AgentSessionStatusDetail>).detail;
       if (!detail || (detail.status !== "waitingForUser" && detail.status !== "failed")) return;
-      void attentionContextFor(detail.sessionId).then((context) =>
-        notifyAgentSessionStatus(detail, context),
-      );
+      void notifyRoutine(detail, notifyAgentSessionStatus);
     };
     const handleAgentRunSettled = (event: Event) => {
       const detail = (event as CustomEvent<AgentRunSettledDetail>).detail;
       if (!detail) return;
-      void attentionContextFor(detail.sessionId).then((context) =>
-        notifyAgentRunSettled(detail, context),
-      );
+      void notifyRoutine(detail, notifyAgentRunSettled);
     };
     window.addEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatus);
     window.addEventListener(AGENT_RUN_SETTLED_EVENT, handleAgentRunSettled);
     return () => {
+      disposed = true;
       window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatus);
       window.removeEventListener(AGENT_RUN_SETTLED_EVENT, handleAgentRunSettled);
     };
-  }, []);
+  }, [activeViewRef, dictationWorkflowActiveRef, recordingStatusRef]);
 }

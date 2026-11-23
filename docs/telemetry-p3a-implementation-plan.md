@@ -1,8 +1,11 @@
 # Clovy P3A — implementation plan
 
-> Engineering companion to [`telemetry-p3a-prd.md`](./telemetry-p3a-prd.md).
-> Read the PRD first; its "What is never collected" section is a hard
-> constraint on every design choice below.
+> **Fork note:** P3A telemetry was removed from this fork's desktop app (the
+> `desvincular-servicos-open-software` change), along with its PRD, question
+> catalog and user doc. This plan is kept as history only.
+>
+> Originally the engineering companion to the P3A PRD, whose "What is never
+> collected" section was a hard constraint on every design choice below.
 
 ## Architecture at a glance
 

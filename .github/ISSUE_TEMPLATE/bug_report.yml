@@ -10,7 +10,7 @@ body:
         issue is great for anything you want tracked in the open.
 
         For security vulnerabilities, please do not open a public issue.
-        Follow the [security policy](https://github.com/open-software-network/os-clovy/security/policy) instead.
+        Follow the [security policy](https://github.com/guilhermexp/os-clovy/security/policy) instead.
   - type: textarea
     id: what-happened
     attributes:

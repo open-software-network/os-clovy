@@ -12,6 +12,7 @@ import {
 } from "../../lib/tauri";
 import type { DictionaryEntryDto } from "../../lib/tauri";
 import { Dialog, DialogField } from "../ui/Dialog";
+import { useT } from "../../i18n";
 
 type Draft = {
   phrase: string;
@@ -22,6 +23,7 @@ const EMPTY_DRAFT: Draft = {
 };
 
 export function DictionarySettingsSection() {
+  const t = useT();
   const [entries, setEntries] = useState<DictionaryEntryDto[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [editingId, setEditingId] = useState<string>();
@@ -99,17 +101,15 @@ export function DictionarySettingsSection() {
 
   const emptyMessage =
     entries.length === 0
-      ? "No entries yet. Add words or phrases for transcription to preserve."
-      : `No entries match "${query.trim()}".`;
+      ? t("settings.dictionary.empty")
+      : t("settings.dictionary.noMatch", { query: query.trim() });
 
   return (
     <section className="settings-group" aria-labelledby="dictionary-heading">
       <h2 id="dictionary-heading" className="settings-group-heading">
-        Dictionary
+        {t("settings.dictionary.title")}
       </h2>
-      <p className="settings-group-description">
-        Words or phrases Clovy should preserve during transcription.
-      </p>
+      <p className="settings-group-description">{t("settings.dictionary.description")}</p>
       <div className="settings-card dictionary-card">
         <div className="dictionary-toolbar">
           <label className="folders-search">
@@ -118,13 +118,13 @@ export function DictionarySettingsSection() {
               type="search"
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
-              placeholder="Search"
-              aria-label="Search dictionary"
+              placeholder={t("common.search")}
+              aria-label={t("settings.dictionary.searchAria")}
             />
           </label>
           <button type="button" className="primary-action primary-solid" onClick={startCreating}>
             <IconPlusMedium size={14} />
-            Add entry
+            {t("settings.dictionary.add")}
           </button>
         </div>
         {visibleEntries.length === 0 ? (
@@ -140,7 +140,7 @@ export function DictionarySettingsSection() {
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={`Edit ${entry.phrase}`}
+                    aria-label={t("settings.dictionary.editAria", { phrase: entry.phrase })}
                     onClick={() => startEditing(entry)}
                   >
                     <IconPencilLine size={14} />
@@ -148,7 +148,7 @@ export function DictionarySettingsSection() {
                   <button
                     type="button"
                     className="icon-button icon-button-destructive"
-                    aria-label={`Delete ${entry.phrase}`}
+                    aria-label={t("settings.dictionary.deleteAria", { phrase: entry.phrase })}
                     onClick={() => void removeEntry(entry.id)}
                   >
                     <IconTrashCanSimple size={14} />
@@ -194,6 +194,7 @@ function DictionaryEntryDialog({
   onClose: () => void;
   onSave: () => void;
 }) {
+  const t = useT();
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (phrase.trim()) onSave();
@@ -203,12 +204,12 @@ function DictionaryEntryDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title={editing ? "Edit dictionary entry" : "Add dictionary entry"}
+      title={editing ? t("settings.dictionary.editTitle") : t("settings.dictionary.addTitle")}
       initialFocusSelector='input[name="dictionary-phrase"]'
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="submit"
@@ -216,20 +217,20 @@ function DictionaryEntryDialog({
             className="primary-action primary-solid"
             disabled={phrase.trim().length === 0}
           >
-            {editing ? "Save changes" : "Add entry"}
+            {editing ? t("settings.dictionary.saveChanges") : t("settings.dictionary.add")}
           </button>
         </>
       }
     >
       <form id="dictionary-entry-form" className="dialog-body" onSubmit={handleSubmit}>
-        <DialogField label="Word or phrase" htmlFor="dictionary-phrase">
+        <DialogField label={t("settings.dictionary.field")} htmlFor="dictionary-phrase">
           <input
             id="dictionary-phrase"
             name="dictionary-phrase"
             className="dialog-input"
             value={phrase}
             onChange={(event) => onChange(event.currentTarget.value)}
-            placeholder="e.g. Anthropic, ARR, Jane Doe"
+            placeholder={t("settings.dictionary.placeholder")}
             autoComplete="off"
             maxLength={160}
             aria-invalid={error ? true : undefined}

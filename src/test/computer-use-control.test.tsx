@@ -28,14 +28,11 @@ import type { ComputerUseStatusDto } from "../lib/tauri";
 function status(overrides: Partial<ComputerUseStatusDto> = {}): ComputerUseStatusDto {
   return {
     platformSupported: true,
-    planEligible: true,
     grantEnabled: false,
     driverAvailable: true,
-    driverVersion: "0.5.0",
+    driverVersion: "1.0.2",
     accessibility: false,
     screenRecording: false,
-    modelSupportsVision: true,
-    generationModel: "vision-model",
     ready: false,
     state: "off",
     ...overrides,
@@ -61,8 +58,23 @@ afterEach(() => {
 });
 
 describe("ComputerUseControl", () => {
+  it("shows Windows desktop requirements and preserves Stop without macOS setup", async () => {
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ platform: "windows", grantEnabled: true, state: "permission_missing" }),
+    );
+    render(<ComputerUseControl />);
+    expect(await screen.findByText("Desktop unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/Unlock your Windows session/)).toBeInTheDocument();
+    expect(screen.getByText(/Uses the background when supported/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Accessibility settings" })).toBeNull();
+    expect(screen.queryByText("Screen recording")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Stop current task" }));
+    expect(tauriMocks.computerUseStop).toHaveBeenCalledOnce();
+    expect(tauriMocks.computerUseRequestPermissions).not.toHaveBeenCalled();
+  });
+
   it("enables the Clovy grant without prompting for macOS access", async () => {
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
 
     await userEvent.click(toggle);
@@ -76,7 +88,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText("Allow Accessibility")).toBeInTheDocument();
     expect(screen.getByText("Screen recording")).toBeInTheDocument();
@@ -107,7 +119,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText("Step 2 of 2")).toBeInTheDocument();
     expect(screen.getByText("Allow Screen recording")).toBeInTheDocument();
@@ -134,7 +146,7 @@ describe("ComputerUseControl", () => {
           finishPermissionProbe = resolve;
         }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     const button = await screen.findByRole("button", { name: "Open Screen recording settings" });
     await userEvent.click(button);
@@ -172,7 +184,7 @@ describe("ComputerUseControl", () => {
         )
         .mockResolvedValue(incomplete);
 
-      render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+      render(<ComputerUseControl />);
       await act(async () => {
         await Promise.resolve();
       });
@@ -210,7 +222,7 @@ describe("ComputerUseControl", () => {
     try {
       const incomplete = status({ grantEnabled: true, state: "permission_missing" });
       tauriMocks.computerUseStatus.mockResolvedValue(incomplete);
-      render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+      render(<ComputerUseControl />);
       await act(async () => {
         await Promise.resolve();
       });
@@ -250,13 +262,13 @@ describe("ComputerUseControl", () => {
           finishPermissionProbe = resolve;
         }),
     );
-    const first = render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    const first = render(<ComputerUseControl />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Open Screen recording settings" }),
     );
 
     first.unmount();
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Open Screen recording settings" }),
     );
@@ -293,7 +305,7 @@ describe("ComputerUseControl", () => {
             finishScreenRecordingProbe = resolve;
           }),
       );
-    const first = render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    const first = render(<ComputerUseControl />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Open Accessibility settings" }),
     );
@@ -302,7 +314,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
     await userEvent.click(
       await screen.findByRole("button", { name: "Open Screen recording settings" }),
     );
@@ -328,7 +340,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, screenRecording: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText("Step 1 of 2")).toBeInTheDocument();
     expect(screen.getByText("Allow Accessibility")).toBeInTheDocument();
@@ -338,7 +350,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText("Driver is not in the list?")).toBeInTheDocument();
     expect(
@@ -353,9 +365,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, state: "permission_missing" }),
     );
-    const { unmount } = render(
-      <ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />,
-    );
+    const { unmount } = render(<ComputerUseControl />);
 
     await screen.findByRole("button", {
       name: "Drag Clovy Computer Use Driver to the open System Settings list",
@@ -372,7 +382,7 @@ describe("ComputerUseControl", () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ grantEnabled: true, accessibility: true, state: "permission_missing" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     await screen.findByRole("button", {
       name: "Drag Clovy to the open System Settings list",
@@ -393,7 +403,7 @@ describe("ComputerUseControl", () => {
         error: "Broken pipe (os error 32)",
       }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText("Allow Accessibility")).toBeInTheDocument();
     expect(screen.queryByText(/Broken pipe/)).toBeNull();
@@ -407,78 +417,89 @@ describe("ComputerUseControl", () => {
         error: "The Computer use driver did not respond in time.",
       }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByText(/driver did not respond in time/)).toBeInTheDocument();
   });
 
-  it("routes a model mismatch to the model picker", async () => {
-    const onOpenModels = vi.fn();
-    tauriMocks.computerUseStatus.mockResolvedValue(
-      status({
-        grantEnabled: true,
-        accessibility: true,
-        screenRecording: true,
-        modelSupportsVision: false,
-        generationModel: "text-only-model",
-        state: "model_unsupported",
-      }),
-    );
-    render(<ComputerUseControl onOpenModels={onOpenModels} onOpenBilling={vi.fn()} />);
-
-    await userEvent.click(await screen.findByRole("button", { name: "Choose model" }));
-    expect(onOpenModels).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the switch unavailable off macOS", async () => {
+  it("keeps the switch unavailable on unsupported platforms", async () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ platformSupported: false, driverAvailable: false, state: "unsupported" }),
     );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
     await waitFor(() => expect(toggle).toBeDisabled());
-    expect(screen.getByText(/available on macOS only/)).toBeInTheDocument();
-  });
-
-  it("keeps the native grant off without an active plan", async () => {
-    const onOpenBilling = vi.fn();
-    tauriMocks.computerUseStatus.mockResolvedValue(
-      status({ planEligible: false, driverAvailable: false, state: "plan_required" }),
-    );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={onOpenBilling} />);
-
-    expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeDisabled();
-    expect(screen.queryByText(/macOS will ask for Accessibility/)).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "View plans" }));
-    expect(onOpenBilling).toHaveBeenCalledTimes(1);
-  });
-
-  it("disables setup while the safety rollout is paused", async () => {
-    tauriMocks.computerUseStatus.mockResolvedValue(
-      status({
-        grantEnabled: false,
-        driverAvailable: false,
-        state: "rollout_disabled",
-        error: "Computer use is temporarily unavailable for this Clovy or macOS version.",
-      }),
-    );
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
-
-    expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeDisabled();
-    expect(screen.getAllByText("Temporarily unavailable")).toHaveLength(2);
-    expect(
-      screen.getAllByText(/temporarily unavailable for this Clovy or macOS version/),
-    ).toHaveLength(1);
-    expect(screen.queryByText("Bundled driver unavailable")).not.toBeInTheDocument();
+    expect(screen.getByText(/requires macOS or Windows/)).toBeInTheDocument();
   });
 
   it("renders Computer use as a plugin row without a Pro tag", async () => {
-    render(<ComputerUseControl onOpenModels={vi.fn()} onOpenBilling={vi.fn()} />);
+    render(<ComputerUseControl />);
 
     expect(await screen.findByRole("switch", { name: "Enable Computer use" })).toBeInTheDocument();
     expect(screen.getByText("Computer use").closest("li")).toHaveClass("connector-row");
     expect(screen.queryByText("Pro")).not.toBeInTheDocument();
     expect(SETTINGS_TABS).toContainEqual({ id: "connectors", label: "Plugins" });
+  });
+
+  describe("without plan, vision model or rollout (ADR-0067)", () => {
+    // What the backend reports now: only local facts.
+    const local = (overrides: Record<string, unknown> = {}) =>
+      ({
+        platformSupported: true,
+        grantEnabled: true,
+        driverAvailable: true,
+        driverVersion: "0.5.0",
+        accessibility: true,
+        screenRecording: true,
+        ready: true,
+        state: "ready",
+        ...overrides,
+      }) as unknown as ComputerUseStatusDto;
+
+    it("is Ready from the grant, the driver and macOS access alone", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(local());
+      render(<ComputerUseControl />);
+
+      expect(await screen.findByText("Ready")).toBeInTheDocument();
+      expect(screen.queryByText("Vision-capable model")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Choose model" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "View plans" })).not.toBeInTheDocument();
+    });
+
+    it("lets the user turn it on with no Clovy account state", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(
+        local({
+          grantEnabled: false,
+          ready: false,
+          accessibility: false,
+          screenRecording: false,
+          state: "off",
+        }),
+      );
+      render(<ComputerUseControl />);
+
+      const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
+      await waitFor(() => expect(toggle).toBeEnabled());
+      for (const gone of [
+        "Pro plan required",
+        "Needs a vision model",
+        "Temporarily unavailable",
+        "Pro feature",
+      ]) {
+        expect(screen.queryByText(gone)).not.toBeInTheDocument();
+      }
+    });
+
+    it("says captures go to the agent CLI running the turn", async () => {
+      tauriMocks.computerUseStatus.mockResolvedValue(local());
+      render(<ComputerUseControl />);
+
+      await userEvent.hover(
+        await screen.findByRole("button", { name: "Computer use privacy and permissions" }),
+      );
+      expect(await screen.findByText(/agent CLI running the turn/)).toBeInTheDocument();
+      expect(screen.queryByText(/your selected model/)).not.toBeInTheDocument();
+    });
   });
 });

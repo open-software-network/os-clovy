@@ -3,6 +3,8 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Fragment } from "react";
 import { ConnectorProviderIcon } from "../connectors/ConnectorProviderIcon";
+import { BrowserUseControl } from "../plugins/BrowserUseControl";
+import { useExperimentalFlags } from "../../lib/experimental-flags";
 import { ComputerUseControl } from "../plugins/ComputerUseControl";
 import {
   accountStatusMeta,
@@ -16,13 +18,15 @@ import {
 } from "../../lib/connectors";
 import { useConnectorPolicy } from "../../lib/connector-policy";
 import { errorCode, messageFromError } from "../../lib/errors";
+import { type MessageKey, t as translate, useT } from "../../i18n";
 import {
   CONNECTORS_CHANGED_EVENT,
   GITHUB_DEVICE_CODE_EVENT,
-  connectorsApplyRuntime,
   connectorsCancelConnect,
   connectorsConnect,
   connectorsDisconnect,
+  connectorsGithubCliConnect,
+  connectorsGithubCliDetect,
   connectorsList,
   notionConnectorConnect,
   notionConnectorDisconnect,
@@ -56,35 +60,16 @@ const PROVIDER_NAMES = {
 
 /** One-line capability blurb shown while a provider is not connected: what
  * connecting it lets Clovy do, in the provider directory row. */
-const PROVIDER_BLURBS = {
-  google: "Mail and calendar for briefings, triage, and meeting prep.",
-  linear: "Workspace-wide access through Linear's official MCP server.",
-  github:
-    "Read issues, pull requests, and code in the repositories chosen when you install the GitHub App. Clovy allows drafting issues and comments with your approval. Repository access is managed on GitHub, not here.",
-} satisfies Record<OAuthConnectorProvider, string>;
-
-const NOTION_CONNECTOR_BLURB =
-  "Pages and workspace content for briefs, search, and approved updates.";
-
-const NOTION_CONNECTED_BLURB = "Pages, search, and approved updates.";
-
-const NOTION_RECONNECT_BLURB = "Reconnect Notion to restore pages, search, and approved updates.";
-
-const NOTION_SCOPE_DISCLOSURE = "Access may extend beyond selected pages.";
-
-const NOTION_SEARCH_DISCLOSURE = "Search may include Notion-connected sources.";
+const PROVIDER_BLURB_KEYS = {
+  google: "settingsPanels.connectors.blurbGoogle",
+  linear: "settingsPanels.connectors.blurbLinear",
+  github: "settingsPanels.connectors.blurbGithub",
+} as const satisfies Record<OAuthConnectorProvider, MessageKey>;
 
 const LINEAR_FULL_ACCESS_BUNDLES = [
   "linear_read",
   "linear_write",
 ] as const satisfies readonly ConnectorScopeBundle[];
-
-const NOTION_CONNECT_DIALOG_DESCRIPTION =
-  "You'll sign in to Notion and approve Clovy's access in your browser. Clovy reads pages and workspace content for briefs and search, and creates or updates pages only with your approval.";
-
-const NOTION_CONNECT_DIALOG_TITLE = "Connect Notion";
-
-const NOTION_RECONNECT_DIALOG_TITLE = "Reconnect Notion";
 
 type NotionConnectorRowProps = {
   account: ConnectorAccount | null;
@@ -119,17 +104,20 @@ function NotionConnectorActions({
   onOpenConnectDialog,
   onOpenReconnectDialog,
 }: NotionConnectorActionsProps) {
+  const t = useT();
   const busy = connecting || disconnecting;
   const disconnectButton = (
     <button
       type="button"
       className="btn btn-ghost"
-      aria-label="Disconnect Notion"
+      aria-label={t("settingsPanels.connectors.disconnectNotion")}
       disabled={busy}
       aria-busy={disconnecting || undefined}
       onClick={onDisconnect}
     >
-      {disconnecting ? "Disconnecting…" : "Disconnect"}
+      {disconnecting
+        ? t("settingsPanels.connectors.disconnecting")
+        : t("settingsPanels.connectors.disconnect")}
     </button>
   );
 
@@ -140,12 +128,14 @@ function NotionConnectorActions({
         <button
           type="button"
           className="btn btn-secondary"
-          aria-label="Reconnect Notion"
+          aria-label={t("settingsPanels.connectors.reconnectNotion")}
           disabled={busy}
           aria-busy={connecting || undefined}
           onClick={onOpenReconnectDialog}
         >
-          {connecting ? "Waiting for browser…" : "Reconnect"}
+          {connecting
+            ? t("settingsPanels.connectors.waitingForBrowser")
+            : t("settingsPanels.connectors.reconnect")}
         </button>
         {disconnectButton}
       </>
@@ -155,12 +145,14 @@ function NotionConnectorActions({
     <button
       type="button"
       className="btn btn-secondary"
-      aria-label="Connect Notion"
+      aria-label={t("settingsPanels.connectors.connectNotion")}
       disabled={busy}
       aria-busy={connecting || undefined}
       onClick={onOpenConnectDialog}
     >
-      {connecting ? "Waiting for browser…" : "Connect"}
+      {connecting
+        ? t("settingsPanels.connectors.waitingForBrowser")
+        : t("settingsPanels.connectors.connect")}
     </button>
   );
 }
@@ -173,22 +165,27 @@ function NotionConnectorRow({
   onOpenConnectDialog,
   onOpenReconnectDialog,
 }: NotionConnectorRowProps) {
+  const t = useT();
   const state = notionConnectorState(account);
   const details = {
     disconnected: {
-      subtitle: NOTION_CONNECTOR_BLURB,
+      subtitle: t("settingsPanels.connectors.notionBlurb"),
       statusLabel: null,
       statusTone: "warning",
     },
-    connected: { subtitle: NOTION_CONNECTED_BLURB, statusLabel: "Connected", statusTone: "ok" },
+    connected: {
+      subtitle: t("settingsPanels.connectors.notionConnectedBlurb"),
+      statusLabel: t("settingsPanels.connectors.connected"),
+      statusTone: "ok",
+    },
     reconnect_required: {
-      subtitle: NOTION_RECONNECT_BLURB,
-      statusLabel: "Reconnect needed",
+      subtitle: t("settingsPanels.connectors.notionReconnectBlurb"),
+      statusLabel: t("settingsPanels.connectors.reconnectNeeded"),
       statusTone: "warning",
     },
     unavailable: {
-      subtitle: "Clovy could not confirm the Notion connection. Try again in a moment.",
-      statusLabel: "Status unavailable",
+      subtitle: t("settingsPanels.connectors.notionUnavailableBlurb"),
+      statusLabel: t("settingsPanels.connectors.statusUnavailable"),
       statusTone: "warning",
     },
   } as const;
@@ -205,7 +202,8 @@ function NotionConnectorRow({
           <HoverTip
             tip={
               <>
-                {NOTION_SCOPE_DISCLOSURE} {NOTION_SEARCH_DISCLOSURE}
+                {t("settingsPanels.connectors.notionScopeDisclosure")}{" "}
+                {t("settingsPanels.connectors.notionSearchDisclosure")}
               </>
             }
             width={360}
@@ -213,14 +211,15 @@ function NotionConnectorRow({
             <button
               type="button"
               className="settings-row-info-affordance"
-              aria-label="Notion privacy and access scope"
+              aria-label={t("settingsPanels.connectors.notionScopeAria")}
               aria-describedby="notion-scope-disclosure"
             >
               <IconCircleInfo size={13} ariaHidden />
             </button>
           </HoverTip>
           <span id="notion-scope-disclosure" className="visually-hidden">
-            {NOTION_SCOPE_DISCLOSURE} {NOTION_SEARCH_DISCLOSURE}
+            {t("settingsPanels.connectors.notionScopeDisclosure")}{" "}
+            {t("settingsPanels.connectors.notionSearchDisclosure")}
           </span>
         </span>
         <p className="connector-subtitle" title={subtitle}>
@@ -247,32 +246,44 @@ function NotionConnectorRow({
 }
 
 const CONNECT_TITLES = {
-  google: { connect: "Connect Google account", add: "Add Google access" },
-  linear: { connect: "Connect Linear workspace", add: "Add Linear access" },
-  github: {
-    connect: "Connect GitHub account",
-    add: "Add GitHub access",
-    reconnect: "Reconnect GitHub account",
+  google: {
+    connect: "settingsPanels.connectors.titleConnectGoogle",
+    add: "settingsPanels.connectors.titleAddGoogle",
   },
-} satisfies Record<OAuthConnectorProvider, { connect: string; add: string; reconnect?: string }>;
+  linear: {
+    connect: "settingsPanels.connectors.titleConnectLinear",
+    add: "settingsPanels.connectors.titleAddLinear",
+  },
+  github: {
+    connect: "settingsPanels.connectors.titleConnectGithub",
+    add: "settingsPanels.connectors.titleAddGithub",
+    reconnect: "settingsPanels.connectors.titleReconnectGithub",
+  },
+} as const satisfies Record<
+  OAuthConnectorProvider,
+  { connect: MessageKey; add: MessageKey; reconnect?: MessageKey }
+>;
 
 const CONNECT_TOASTS = {
   google: {
-    connect: "Google account connected",
-    add: "Google access updated",
-    reconnect: "Google reconnected",
+    connect: "settingsPanels.connectors.toastConnectGoogle",
+    add: "settingsPanels.connectors.toastAddGoogle",
+    reconnect: "settingsPanels.connectors.toastReconnectGoogle",
   },
   linear: {
-    connect: "Linear workspace connected",
-    add: "Linear access updated",
-    reconnect: "Linear reconnected",
+    connect: "settingsPanels.connectors.toastConnectLinear",
+    add: "settingsPanels.connectors.toastAddLinear",
+    reconnect: "settingsPanels.connectors.toastReconnectLinear",
   },
   github: {
-    connect: "GitHub account connected",
-    add: "GitHub access updated",
-    reconnect: "GitHub reconnected",
+    connect: "settingsPanels.connectors.toastConnectGithub",
+    add: "settingsPanels.connectors.toastAddGithub",
+    reconnect: "settingsPanels.connectors.toastReconnectGithub",
   },
-} satisfies Record<OAuthConnectorProvider, { connect: string; add: string; reconnect: string }>;
+} as const satisfies Record<
+  OAuthConnectorProvider,
+  { connect: MessageKey; add: MessageKey; reconnect: MessageKey }
+>;
 
 /** True once an account holds every feature bundle its provider offers -
  * nothing left to add. */
@@ -292,7 +303,11 @@ function allBundlesGranted(
  * and then a generic label; the email for Google. */
 function accountDisplayName(account: ConnectorAccount): string {
   if (account.provider === "linear") {
-    return account.workspaceName || account.email || "Linear workspace";
+    return (
+      account.workspaceName ||
+      account.email ||
+      translate("settingsPanels.connectors.linearWorkspaceFallback")
+    );
   }
   if (account.provider === "notion") return "Notion";
   return account.email;
@@ -311,7 +326,11 @@ function featureSummary(
   account: ConnectorAccount,
 ): string {
   const features = grantedFeatureLabels(policy, account.scopes, account.provider);
-  return features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : "";
+  return features.length > 0
+    ? translate("settingsPanels.connectors.featureSummary", {
+        features: features.join(", ").toLowerCase(),
+      })
+    : "";
 }
 
 function linearNeedsScopeReconnect(
@@ -325,17 +344,24 @@ function linearNeedsScopeReconnect(
 }
 
 function obsidianSubtitle(status: ObsidianStatus | null): string {
-  if (!status?.connected)
-    return "Local vault read capability. Note updates need an unrestricted session.";
-  const vault = status.vaultName ?? "Vault";
-  if (status.available === false) return `${vault} · Vault unavailable at ${status.vaultPath}`;
+  if (!status?.connected) return translate("settingsPanels.connectors.obsidianBlurb");
+  const vault = status.vaultName ?? translate("settingsPanels.connectors.vault");
+  if (status.available === false)
+    return translate("settingsPanels.connectors.vaultUnavailableAt", {
+      vault,
+      path: status.vaultPath,
+    });
   return `${vault} · ${status.vaultPath}`;
 }
 
 function obsidianStatusMeta(status: ObsidianStatus | null) {
   if (!status?.connected) return null;
-  if (status.available === false) return { label: "Vault unavailable", tone: "warning" } as const;
-  return { label: "Connected", tone: "ok" } as const;
+  if (status.available === false)
+    return {
+      label: translate("settingsPanels.connectors.vaultUnavailable"),
+      tone: "warning",
+    } as const;
+  return { label: translate("settingsPanels.connectors.connected"), tone: "ok" } as const;
 }
 
 /** The connected row's one-liner: who is connected, then what Clovy may do. */
@@ -345,12 +371,18 @@ function accountSubtitle(
 ): string {
   if (account.provider === "linear") {
     if (account.status === "unavailable") {
-      return `${accountDisplayName(account)} · Clovy could not confirm Linear MCP access.`;
+      return translate("settingsPanels.connectors.linearUnavailable", {
+        name: accountDisplayName(account),
+      });
     }
     if (account.status === "reconnect_required" || linearNeedsScopeReconnect(policy, account)) {
-      return `${accountDisplayName(account)} · Reconnect to enable workspace-wide Linear MCP access.`;
+      return translate("settingsPanels.connectors.linearReconnect", {
+        name: accountDisplayName(account),
+      });
     }
-    return `${accountDisplayName(account)} · Workspace-wide Linear MCP access.`;
+    return translate("settingsPanels.connectors.linearConnected", {
+      name: accountDisplayName(account),
+    });
   }
   const parts = [accountDisplayName(account)];
   const summary = featureSummary(policy, account);
@@ -366,20 +398,17 @@ function connectDescription(
   provider: OAuthConnectorProvider,
   target: ConnectorAccount | null,
 ): string {
-  const isLinear = provider === "linear";
-  const noun = isLinear ? "workspace" : "account";
   const lead = target
-    ? `Add to what Clovy may do with ${accountDisplayName(target)}.`
-    : `Pick what Clovy may do with this ${noun}.`;
-  let contentPhrase: string;
-  if (provider === "google") {
-    contentPhrase = "selected mail or calendar content";
-  } else if (provider === "github") {
-    contentPhrase = "selected repository and issue content";
-  } else {
-    contentPhrase = "workspace content";
-  }
-  return `${lead} You approve everything in ${PROVIDER_NAMES[provider]}'s own sign-in, and you can disconnect any time. When a feature uses AI, ${contentPhrase} goes to your chosen model provider. Choose a local model to keep inference on this device.`;
+    ? translate("settingsPanels.connectors.leadAdd", { name: accountDisplayName(target) })
+    : provider === "linear"
+      ? translate("settingsPanels.connectors.leadWorkspace")
+      : translate("settingsPanels.connectors.leadAccount");
+  const bodyKey = {
+    google: "settingsPanels.connectors.connectBodyGoogle",
+    github: "settingsPanels.connectors.connectBodyGithub",
+    linear: "settingsPanels.connectors.connectBodyLinear",
+  } as const satisfies Record<OAuthConnectorProvider, MessageKey>;
+  return translate(bodyKey[provider], { lead });
 }
 
 /**
@@ -387,17 +416,12 @@ function connectDescription(
  * always listed) with a feature-bundle picker per provider, reconnect for
  * lapsed grants, and disconnect with optional provider-side revoke. A
  * Linear connects workspace-wide through the provider's official hosted MCP.
- * Browser use is a separate capability row because its grant and extension
- * pairing have no account, email, or scopes. Local mode only: tokens live in
+ * Browser use owns a separate browser profile with its own stored grant. Local mode only: tokens live in
  * the Mac's Keychain and provider calls originate on this device.
  */
-export function ConnectorsSection({
-  onOpenModels = () => {},
-  onOpenBilling = () => {},
-}: {
-  onOpenModels?: () => void;
-  onOpenBilling?: () => void;
-}) {
+export function ConnectorsSection() {
+  const t = useT();
+  const { browserUseEnabled } = useExperimentalFlags();
   const { policy, error: policyError } = useConnectorPolicy();
   const oauthProviders =
     policy?.providers.flatMap((definition) =>
@@ -444,6 +468,7 @@ export function ConnectorsSection({
   // available for a deliberate reconnect-soon disconnect.
   const [revoke, setRevoke] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [ghConnecting, setGhConnecting] = useState(false);
   const [obsidian, setObsidian] = useState<ObsidianStatus | null>(null);
   const [obsidianError, setObsidianError] = useState<string | null>(null);
   const [obsidianBusy, setObsidianBusy] = useState(false);
@@ -490,6 +515,20 @@ export function ConnectorsSection({
     };
   }, [refresh]);
 
+  // A signed-in GitHub CLI connects "GitHub (via gh)" on its own when there
+  // is no GitHub account yet; the backend answers quickly and never throws.
+  useEffect(() => {
+    let cancelled = false;
+    void connectorsGithubCliDetect()
+      .then((account) => {
+        if (account && !cancelled) void refresh();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh]);
+
   // Listen for GitHub device-authorization codes while a GitHub connect is in
   // flight. The backend may re-emit the event (code renewal); we always render
   // the latest. We subscribe once for the lifetime of the component rather than
@@ -520,10 +559,8 @@ export function ConnectorsSection({
       scopes: input.scopes,
       loginHint: input.loginHint,
     });
-    // The Clovy-owned runtime derives managed Linear MCP availability from
-    // current connector state for every run. Other providers retain their
-    // existing apply behavior until their migrations are handled separately.
-    if (input.provider !== "linear") await connectorsApplyRuntime();
+    // The Clovy-owned runtime reads connector state for every run, so a new
+    // account needs no runtime apply step: refreshing Settings is enough.
     await refresh();
     return account;
   }
@@ -545,7 +582,7 @@ export function ConnectorsSection({
       });
       setConnectOpen(false);
       setConnectIsReconnect(false);
-      toast.success(target ? CONNECT_TOASTS.linear.reconnect : CONNECT_TOASTS.linear.connect);
+      toast.success(t(target ? CONNECT_TOASTS.linear.reconnect : CONNECT_TOASTS.linear.connect));
     } catch (err) {
       setConnectOpen(false);
       setConnectIsReconnect(false);
@@ -598,7 +635,7 @@ export function ConnectorsSection({
       setGithubDeviceCode(null);
       const toasts = CONNECT_TOASTS[connectProvider];
       toast.success(
-        connectIsReconnect ? toasts.reconnect : connectTarget ? toasts.add : toasts.connect,
+        t(connectIsReconnect ? toasts.reconnect : connectTarget ? toasts.add : toasts.connect),
       );
     } catch (err) {
       const code = errorCode(err);
@@ -613,10 +650,10 @@ export function ConnectorsSection({
       } else if (code === "connector_github_device_expired") {
         // Code expired — let the user retry from the bundle picker.
         setGithubDeviceCode(null);
-        setConnectError("The code expired before it was approved. Try again.");
+        setConnectError(t("settingsPanels.connectors.githubCodeExpired"));
       } else if (code === "connector_github_device_declined") {
         setGithubDeviceCode(null);
-        setConnectError("GitHub reported the request was declined.");
+        setConnectError(t("settingsPanels.connectors.githubDeclined"));
       } else {
         setGithubDeviceCode(null);
         toast.error(messageFromError(err));
@@ -654,7 +691,7 @@ export function ConnectorsSection({
       }
       await refresh();
       if (operationId === notionOperationIdRef.current) {
-        toast.success("Notion connected");
+        toast.success(t("settingsPanels.connectors.toastNotionConnected"));
       }
     } catch (err) {
       if (operationId === notionOperationIdRef.current) toast.error(messageFromError(err));
@@ -675,7 +712,8 @@ export function ConnectorsSection({
     try {
       await notionConnectorDisconnect();
       await refresh();
-      if (operationId === notionOperationIdRef.current) toast.success("Notion disconnected");
+      if (operationId === notionOperationIdRef.current)
+        toast.success(t("settingsPanels.connectors.toastNotionDisconnected"));
     } catch (err) {
       if (operationId === notionOperationIdRef.current) toast.error(messageFromError(err));
     } finally {
@@ -694,9 +732,27 @@ export function ConnectorsSection({
     setConnectIsReconnect(false);
   }
 
+  async function connectViaGh() {
+    if (ghConnecting) return;
+    setGhConnecting(true);
+    try {
+      const account = await connectorsGithubCliConnect();
+      await refresh();
+      if (account) toast.success(t("settingsPanels.connectors.ghConnected"));
+    } catch (err) {
+      toast.error(messageFromError(err));
+    } finally {
+      setGhConnecting(false);
+    }
+  }
+
   async function reconnect(account: ConnectorAccount) {
     if (account.provider === "notion" || !policy) return;
     setNotConfigured(null);
+    if (account.viaGh) {
+      await connectViaGh();
+      return;
+    }
 
     // GitHub uses the device-authorization flow: the device-code panel only
     // renders inside the connect dialog. Route GitHub reconnects through the
@@ -724,7 +780,7 @@ export function ConnectorsSection({
         setConnectOpen(false);
         setConnectIsReconnect(false);
         setGithubDeviceCode(null);
-        toast.success(CONNECT_TOASTS.github.reconnect);
+        toast.success(t(CONNECT_TOASTS.github.reconnect));
       } catch (err) {
         const code = errorCode(err);
         if (isConnectorNotConfiguredError(err)) {
@@ -735,10 +791,10 @@ export function ConnectorsSection({
           setGithubDeviceCode(null);
         } else if (code === "connector_github_device_expired") {
           setGithubDeviceCode(null);
-          setConnectError("The code expired before it was approved. Try again.");
+          setConnectError(t("settingsPanels.connectors.githubCodeExpired"));
         } else if (code === "connector_github_device_declined") {
           setGithubDeviceCode(null);
-          setConnectError("GitHub reported the request was declined.");
+          setConnectError(t("settingsPanels.connectors.githubDeclined"));
         } else {
           setGithubDeviceCode(null);
           toast.error(messageFromError(err));
@@ -761,7 +817,7 @@ export function ConnectorsSection({
         scopes: bundlesFromScopes(policy, account.scopes, account.provider),
         loginHint: loginHintFor(account),
       });
-      toast.success(CONNECT_TOASTS[account.provider].reconnect);
+      toast.success(t(CONNECT_TOASTS[account.provider].reconnect));
     } catch (err) {
       if (isConnectorNotConfiguredError(err)) setNotConfigured(account.provider);
       else toast.error(messageFromError(err));
@@ -775,16 +831,24 @@ export function ConnectorsSection({
     if (!account || disconnecting) return;
     setDisconnecting(true);
     try {
-      const outcome = await connectorsDisconnect({ accountId: account.accountId, revoke });
-      if (account.provider !== "linear") await connectorsApplyRuntime();
+      const outcome = await connectorsDisconnect({
+        accountId: account.accountId,
+        // Clovy holds no gh credential to revoke.
+        revoke: account.viaGh ? false : revoke,
+      });
       await refresh();
       setDisconnectTarget(null);
       if (outcome?.providerRevocationConfirmed === false) {
         toast.warning(
-          `Disconnected ${accountDisplayName(account)} locally. Clovy could not confirm revocation with ${PROVIDER_NAMES[account.provider]}; you can remove Clovy in ${PROVIDER_NAMES[account.provider]} settings.`,
+          t("settingsPanels.connectors.disconnectedLocally", {
+            name: accountDisplayName(account),
+            provider: PROVIDER_NAMES[account.provider],
+          }),
         );
       } else {
-        toast.success(`Disconnected ${accountDisplayName(account)}`);
+        toast.success(
+          t("settingsPanels.connectors.disconnectedName", { name: accountDisplayName(account) }),
+        );
       }
     } catch (err) {
       toast.error(messageFromError(err));
@@ -802,7 +866,7 @@ export function ConnectorsSection({
       if (typeof selected !== "string") return;
       setObsidian(await obsidianConfigure(selected));
       await refresh();
-      toast.success("Obsidian vault connected");
+      toast.success(t("settingsPanels.connectors.toastObsidianConnected"));
     } catch (err) {
       setObsidianError(messageFromError(err));
     } finally {
@@ -818,7 +882,7 @@ export function ConnectorsSection({
     try {
       await obsidianDisconnect();
       await refresh();
-      toast.success("Obsidian disconnected");
+      toast.success(t("settingsPanels.connectors.toastObsidianDisconnected"));
     } catch (err) {
       setObsidianError(messageFromError(err));
     } finally {
@@ -841,29 +905,39 @@ export function ConnectorsSection({
     <section className="settings-group" aria-labelledby="plugins-heading">
       <SettingsPageHeader
         id="plugins-heading"
-        title="Plugins"
-        blurb="Connect apps and services in local mode. Tokens stay in your Mac's Keychain, and provider calls go straight from this device. When an AI feature uses plugin content, that content goes to your chosen model provider. Choose a local model to keep inference on this device."
+        title={t("settingsPanels.connectors.title")}
+        blurb={t("settingsPanels.connectors.blurb")}
       />
 
       {notConfigured ? (
         <InlineNotice
           tone="info"
-          body={`${PROVIDER_NAMES[notConfigured]} isn't configured in this build.`}
-          aria-label="Plugin not configured"
+          body={t("settingsPanels.connectors.notConfigured", {
+            provider: PROVIDER_NAMES[notConfigured],
+          })}
+          aria-label={t("settingsPanels.connectors.notConfiguredAria")}
         />
       ) : null}
       {loadError ? (
-        <InlineNotice tone="warning" body={loadError} aria-label="Plugins load error" />
+        <InlineNotice
+          tone="warning"
+          body={loadError}
+          aria-label={t("settingsPanels.connectors.loadErrorAria")}
+        />
       ) : null}
       {policyError ? (
         <InlineNotice
           tone="warning"
           body={messageFromError(policyError)}
-          aria-label="Plugin policy load error"
+          aria-label={t("settingsPanels.connectors.policyErrorAria")}
         />
       ) : null}
       {obsidianError ? (
-        <InlineNotice tone="warning" body={obsidianError} aria-label="Obsidian plugin error" />
+        <InlineNotice
+          tone="warning"
+          body={obsidianError}
+          aria-label={t("settingsPanels.connectors.obsidianErrorAria")}
+        />
       ) : null}
 
       <div className="settings-card connectors-card">
@@ -887,23 +961,31 @@ export function ConnectorsSection({
               <button
                 type="button"
                 className="btn btn-secondary"
-                aria-label={obsidian?.connected ? "Change Obsidian vault" : "Connect Obsidian"}
+                aria-label={
+                  obsidian?.connected
+                    ? t("settingsPanels.connectors.changeObsidianVault")
+                    : t("settingsPanels.connectors.connectObsidian")
+                }
                 disabled={obsidian === null || obsidianBusy}
                 aria-busy={obsidianBusy || undefined}
                 onClick={() => void chooseObsidianVault()}
               >
-                {obsidian?.connected ? "Change vault" : "Connect"}
+                {obsidian?.connected
+                  ? t("settingsPanels.connectors.changeVault")
+                  : t("settingsPanels.connectors.connect")}
               </button>
               {obsidian?.connected ? (
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  aria-label="Disconnect Obsidian"
+                  aria-label={t("settingsPanels.connectors.disconnectObsidian")}
                   disabled={obsidianBusy}
                   aria-busy={obsidianDisconnecting || undefined}
                   onClick={() => void disconnectObsidian()}
                 >
-                  {obsidianDisconnecting ? "Disconnecting…" : "Disconnect"}
+                  {obsidianDisconnecting
+                    ? t("settingsPanels.connectors.disconnecting")
+                    : t("settingsPanels.connectors.disconnect")}
                 </button>
               ) : null}
             </div>
@@ -921,7 +1003,7 @@ export function ConnectorsSection({
                   : null;
                 const subtitle = account
                   ? accountSubtitle(policy, account)
-                  : PROVIDER_BLURBS[provider];
+                  : t(PROVIDER_BLURB_KEYS[provider]);
                 const reconnecting =
                   account !== null &&
                   (reconnectingId === account.accountId ||
@@ -938,7 +1020,17 @@ export function ConnectorsSection({
                       <ConnectorProviderIcon provider={provider} />
                     </span>
                     <div className="connector-main">
-                      <span className="connector-name">{name}</span>
+                      <span className="connector-title-line">
+                        <span className="connector-name">{name}</span>
+                        {account?.viaGh ? (
+                          <span
+                            className="connector-source-tag"
+                            title={t("settingsPanels.connectors.viaGhTip")}
+                          >
+                            {t("settingsPanels.connectors.viaGh")}
+                          </span>
+                        ) : null}
+                      </span>
                       <p className="connector-subtitle" title={subtitle}>
                         {subtitle}
                       </p>
@@ -953,16 +1045,32 @@ export function ConnectorsSection({
                           {status.label}
                         </span>
                       ) : null}
+                      {!account && provider === "github" ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          aria-label={t("settingsPanels.connectors.connectWithGhName", { name })}
+                          disabled={accounts === null || ghConnecting || connectingThisProvider}
+                          aria-busy={ghConnecting || undefined}
+                          onClick={() => void connectViaGh()}
+                        >
+                          {ghConnecting
+                            ? t("settingsPanels.connectors.connecting")
+                            : t("settingsPanels.connectors.connectWithGh")}
+                        </button>
+                      ) : null}
                       {!account ? (
                         <button
                           type="button"
                           className="btn btn-secondary"
-                          aria-label={`Connect ${name}`}
+                          aria-label={t("settingsPanels.connectors.connectName", { name })}
                           disabled={accounts === null || connectingThisProvider}
                           aria-busy={connectingThisProvider || undefined}
                           onClick={() => openConnectNew(provider)}
                         >
-                          {connectingThisProvider ? "Connecting…" : "Connect"}
+                          {connectingThisProvider
+                            ? t("settingsPanels.connectors.connecting")
+                            : t("settingsPanels.connectors.connect")}
                         </button>
                       ) : (
                         <>
@@ -970,12 +1078,14 @@ export function ConnectorsSection({
                             <button
                               type="button"
                               className="btn btn-secondary"
-                              aria-label={`Reconnect ${name}`}
+                              aria-label={t("settingsPanels.connectors.reconnectName", { name })}
                               disabled={reconnectingId !== null || reconnecting}
                               aria-busy={reconnecting || undefined}
                               onClick={() => void reconnect(account)}
                             >
-                              {reconnecting ? "Reconnecting…" : "Reconnect"}
+                              {reconnecting
+                                ? t("settingsPanels.connectors.reconnecting")
+                                : t("settingsPanels.connectors.reconnect")}
                             </button>
                           ) : showAddAccess ? (
                             <button
@@ -983,19 +1093,19 @@ export function ConnectorsSection({
                               className="btn btn-secondary"
                               onClick={() => openAddAccess(account)}
                             >
-                              Add access
+                              {t("settingsPanels.connectors.addAccess")}
                             </button>
                           ) : null}
                           <button
                             type="button"
                             className="btn btn-ghost"
-                            aria-label={`Disconnect ${name}`}
+                            aria-label={t("settingsPanels.connectors.disconnectName", { name })}
                             onClick={() => {
                               setRevoke(true);
                               setDisconnectTarget(account);
                             }}
                           >
-                            Disconnect
+                            {t("settingsPanels.connectors.disconnect")}
                           </button>
                         </>
                       )}
@@ -1027,7 +1137,7 @@ export function ConnectorsSection({
               aria-expanded={advancedOpen}
               onClick={() => setAdvancedOpen((open) => !open)}
             >
-              <span>Advanced</span>
+              <span>{t("settingsPanels.connectors.advanced")}</span>
               <IconChevronDownSmall
                 size={14}
                 aria-hidden
@@ -1036,9 +1146,8 @@ export function ConnectorsSection({
               />
             </button>
           </li>
-          {advancedOpen ? (
-            <ComputerUseControl onOpenModels={onOpenModels} onOpenBilling={onOpenBilling} />
-          ) : null}
+          {advancedOpen && browserUseEnabled ? <BrowserUseControl /> : null}
+          {advancedOpen ? <ComputerUseControl /> : null}
         </ul>
       </div>
 
@@ -1047,18 +1156,18 @@ export function ConnectorsSection({
         onClose={dismissConnect}
         title={
           connectIsReconnect && connectProvider === "linear"
-            ? "Reconnect Linear workspace"
+            ? t("settingsPanels.connectors.titleReconnectLinear")
             : connectIsReconnect && connectProvider === "github" && CONNECT_TITLES.github.reconnect
-              ? CONNECT_TITLES.github.reconnect
+              ? t(CONNECT_TITLES.github.reconnect)
               : connectTarget
-                ? CONNECT_TITLES[connectProvider].add
-                : CONNECT_TITLES[connectProvider].connect
+                ? t(CONNECT_TITLES[connectProvider].add)
+                : t(CONNECT_TITLES[connectProvider].connect)
         }
         description={
           connecting && connectProvider === "linear"
             ? connectIsReconnect
-              ? "Finish reconnecting Linear in your browser. You can cancel this request at any time."
-              : "Finish connecting Linear in your browser. You can cancel this request at any time."
+              ? t("settingsPanels.connectors.linearFinishReconnect")
+              : t("settingsPanels.connectors.linearFinishConnect")
             : githubDeviceCode && connectProvider === "github"
               ? undefined
               : connectDescription(connectProvider, connectTarget)
@@ -1070,12 +1179,12 @@ export function ConnectorsSection({
             // resolves (or errors) on its own once the user approves on GitHub.
             // Cancel calls connectorsCancelConnect via dismissConnect.
             <button type="button" className="primary-action" onClick={dismissConnect}>
-              Cancel
+              {t("common.cancel")}
             </button>
           ) : (
             <>
               <button type="button" className="primary-action" onClick={dismissConnect}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 type="button"
@@ -1084,7 +1193,9 @@ export function ConnectorsSection({
                 aria-busy={connecting || undefined}
                 onClick={() => void submitConnect()}
               >
-                {connecting && connectProvider !== "github" ? "Waiting for browser…" : "Connect"}
+                {connecting && connectProvider !== "github"
+                  ? t("settingsPanels.connectors.waitingForBrowser")
+                  : t("settingsPanels.connectors.connect")}
               </button>
             </>
           )
@@ -1097,26 +1208,36 @@ export function ConnectorsSection({
           // the page; the code display and link are the fallback.
           <div className="github-device-code-panel">
             <p className="github-device-code-label">
-              Enter this code at github.com/login/device to approve Clovy
+              {t("settingsPanels.connectors.githubEnterCode")}
             </p>
             <div className="github-device-code-row">
               <span className="github-device-code-value">{githubDeviceCode.userCode}</span>
               <button
                 type="button"
                 className="btn btn-secondary github-device-code-copy"
-                aria-label={codeCopied ? "Code copied" : "Copy code"}
+                aria-label={
+                  codeCopied
+                    ? t("settingsPanels.connectors.codeCopied")
+                    : t("settingsPanels.connectors.copyCode")
+                }
                 onClick={copyDeviceCode}
               >
                 <CopyStateIcon copied={codeCopied} />
-                Copy code
+                {t("settingsPanels.connectors.copyCode")}
               </button>
             </div>
-            <p className="github-device-code-status">Waiting for approval on GitHub…</p>
+            <p className="github-device-code-status">
+              {t("settingsPanels.connectors.githubWaiting")}
+            </p>
           </div>
         ) : (
           <>
             {connectError ? (
-              <InlineNotice tone="warning" body={connectError} aria-label="Connect error" />
+              <InlineNotice
+                tone="warning"
+                body={connectError}
+                aria-label={t("settingsPanels.connectors.connectErrorAria")}
+              />
             ) : null}
             <div className="connectors-bundle-list">
               {(policy ? bundlesForProvider(policy, connectProvider) : []).map((bundle) => {
@@ -1150,8 +1271,14 @@ export function ConnectorsSection({
         onClose={() => {
           if (!disconnecting) setDisconnectTarget(null);
         }}
-        title={`Disconnect ${disconnectTarget ? accountDisplayName(disconnectTarget) : ""}?`}
-        description="Clovy stops using this account and removes its tokens from your Keychain. Routines that rely on it will fail until you reconnect."
+        title={t("settingsPanels.connectors.disconnectTitle", {
+          name: disconnectTarget ? accountDisplayName(disconnectTarget) : "",
+        })}
+        description={
+          disconnectTarget?.viaGh
+            ? t("settingsPanels.connectors.disconnectGhDescription")
+            : t("settingsPanels.connectors.disconnectDescription")
+        }
         footer={
           <>
             <button
@@ -1160,7 +1287,7 @@ export function ConnectorsSection({
               onClick={() => setDisconnectTarget(null)}
               disabled={disconnecting}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -1169,21 +1296,28 @@ export function ConnectorsSection({
               aria-busy={disconnecting || undefined}
               onClick={() => void confirmDisconnect()}
             >
-              {disconnecting ? "Disconnecting…" : "Disconnect"}
+              {disconnecting
+                ? t("settingsPanels.connectors.disconnecting")
+                : t("settingsPanels.connectors.disconnect")}
             </button>
           </>
         }
       >
-        <label className="connectors-revoke-option" htmlFor="connectors-revoke">
-          <Checkbox
-            id="connectors-revoke"
-            checked={revoke}
-            disabled={disconnecting}
-            onChange={(event) => setRevoke(event.currentTarget.checked)}
-          />
-          Also revoke Clovy's access with{" "}
-          {disconnectTarget ? PROVIDER_NAMES[disconnectTarget.provider] : "the provider"}
-        </label>
+        {disconnectTarget?.viaGh ? null : (
+          <label className="connectors-revoke-option" htmlFor="connectors-revoke">
+            <Checkbox
+              id="connectors-revoke"
+              checked={revoke}
+              disabled={disconnecting}
+              onChange={(event) => setRevoke(event.currentTarget.checked)}
+            />
+            {disconnectTarget
+              ? t("settingsPanels.connectors.revokeWith", {
+                  provider: PROVIDER_NAMES[disconnectTarget.provider],
+                })
+              : t("settingsPanels.connectors.revokeWithProvider")}
+          </label>
+        )}
       </Dialog>
 
       <Dialog
@@ -1193,10 +1327,10 @@ export function ConnectorsSection({
         }}
         title={
           notionDialogMode === "reconnect"
-            ? NOTION_RECONNECT_DIALOG_TITLE
-            : NOTION_CONNECT_DIALOG_TITLE
+            ? t("settingsPanels.connectors.reconnectNotion")
+            : t("settingsPanels.connectors.connectNotion")
         }
-        description={NOTION_CONNECT_DIALOG_DESCRIPTION}
+        description={t("settingsPanels.connectors.notionDialogDescription")}
         disableBackdropClose={notionConnecting}
         closeDisabled={notionConnecting}
         footer={
@@ -1207,7 +1341,7 @@ export function ConnectorsSection({
               onClick={() => setNotionConnectOpen(false)}
               disabled={notionConnecting}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               type="button"
@@ -1222,14 +1356,20 @@ export function ConnectorsSection({
                 }
               }}
             >
-              {notionConnecting ? "Waiting for browser…" : "Continue"}
+              {notionConnecting
+                ? t("settingsPanels.connectors.waitingForBrowser")
+                : t("common.continue")}
             </button>
           </Fragment>
         }
       >
         <div className="connectors-notion-disclosures">
-          <p className="connectors-notion-disclosure">{NOTION_SCOPE_DISCLOSURE}</p>
-          <p className="connectors-notion-disclosure">{NOTION_SEARCH_DISCLOSURE}</p>
+          <p className="connectors-notion-disclosure">
+            {t("settingsPanels.connectors.notionScopeDisclosure")}
+          </p>
+          <p className="connectors-notion-disclosure">
+            {t("settingsPanels.connectors.notionSearchDisclosure")}
+          </p>
         </div>
       </Dialog>
     </section>

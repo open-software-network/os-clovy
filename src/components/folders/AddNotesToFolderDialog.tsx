@@ -4,6 +4,7 @@ import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FolderDto, NoteListItemDto } from "../../lib/tauri";
+import { useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
 
 type AddNotesToFolderDialogProps = {
@@ -22,6 +23,7 @@ export function AddNotesToFolderDialog({
   notes,
   onAdd,
 }: AddNotesToFolderDialogProps) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
@@ -76,13 +78,13 @@ export function AddNotesToFolderDialog({
         if (submitting) return;
         onClose();
       }}
-      title={`Add meeting notes to ${folder.name}`}
-      description="Pick the meeting notes you want in this project."
+      title={t("notes.add.notes.title", { name: folder.name })}
+      description={t("notes.add.notes.description")}
       initialFocusSelector='input[name="add-notes-search"]'
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -90,11 +92,7 @@ export function AddNotesToFolderDialog({
             onClick={() => void handleSubmit()}
             disabled={submitting || count === 0}
           >
-            {submitting
-              ? "Adding…"
-              : count === 0
-                ? "Add meeting notes"
-                : `Add ${count} ${count === 1 ? "meeting note" : "meeting notes"}`}
+            {submitting ? t("notes.move.adding") : t("notes.add.notes.commit", { count })}
           </button>
         </>
       }
@@ -106,7 +104,7 @@ export function AddNotesToFolderDialog({
             ref={searchRef}
             type="search"
             name="add-notes-search"
-            placeholder="Search meeting notes"
+            placeholder={t("notes.add.notes.search")}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             autoComplete="off"
@@ -115,7 +113,7 @@ export function AddNotesToFolderDialog({
             <button
               type="button"
               className="search-clear"
-              aria-label="Clear search"
+              aria-label={t("notes.folderChip.clearSearch")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setQuery("");
@@ -144,9 +142,11 @@ export function AddNotesToFolderDialog({
                       <IconNoteText size={14} />
                     </span>
                     <span className="add-notes-body">
-                      <span className="add-notes-title">{note.title.trim() || "New note"}</span>
+                      <span className="add-notes-title">
+                        {note.title.trim() || t("notes.editor.titlePlaceholder")}
+                      </span>
                       <span className="add-notes-preview">
-                        {note.preview.trim() ? note.preview : "No preview yet"}
+                        {note.preview.trim() ? note.preview : t("notes.add.notes.noPreview")}
                       </span>
                     </span>
                     <span className="add-notes-check" aria-hidden>
@@ -160,8 +160,8 @@ export function AddNotesToFolderDialog({
         ) : (
           <p className="add-notes-empty">
             {notes.some((note) => !note.folderIds.includes(folder.id))
-              ? "No meeting notes match that search."
-              : "Every meeting note already lives in this project."}
+              ? t("notes.add.notes.noMatch")
+              : t("notes.add.notes.allIn")}
           </p>
         )}
       </div>

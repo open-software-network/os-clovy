@@ -1,3 +1,4 @@
+import { type MessageKey, t } from "../i18n/translate";
 import { IMAGE_GENERATION_ENABLED, VIDEO_GENERATION_ENABLED } from "./feature-flags";
 
 export type BuiltinComposerSlashCommandName = "model" | "file" | "image" | "video";
@@ -28,42 +29,37 @@ export type SlashModelResolution =
   | { status: "missing"; query: string }
   | { status: "ambiguous"; query: string; matches: ComposerSlashModelOption[] };
 
+function builtinCommand(
+  name: BuiltinComposerSlashCommandName,
+  labelKey: MessageKey,
+  descriptionKey: MessageKey,
+): BuiltinComposerSlashCommandDef {
+  // The command name and insert text stay fixed; the menu label and
+  // description follow the interface language.
+  return {
+    name,
+    get label() {
+      return t(labelKey);
+    },
+    get description() {
+      return t(descriptionKey);
+    },
+    insertText: `/${name} `,
+  };
+}
+
 const BASE_BUILTIN_COMPOSER_SLASH_COMMANDS: BuiltinComposerSlashCommandDef[] = [
-  {
-    name: "model",
-    label: "Model",
-    description: "Change the text model.",
-    insertText: "/model ",
-  },
-  {
-    name: "file",
-    label: "File",
-    description: "Attach files to this message.",
-    insertText: "/file ",
-  },
+  builtinCommand("model", "lib.slash.model.label", "lib.slash.model.description"),
+  builtinCommand("file", "lib.slash.file.label", "lib.slash.file.description"),
 ];
 
 export const BUILTIN_COMPOSER_SLASH_COMMANDS: BuiltinComposerSlashCommandDef[] = [
   ...BASE_BUILTIN_COMPOSER_SLASH_COMMANDS,
   ...(IMAGE_GENERATION_ENABLED
-    ? [
-        {
-          name: "image" as const,
-          label: "Image",
-          description: "Generate an image from a prompt.",
-          insertText: "/image ",
-        },
-      ]
+    ? [builtinCommand("image", "lib.slash.image.label", "lib.slash.image.description")]
     : []),
   ...(VIDEO_GENERATION_ENABLED
-    ? [
-        {
-          name: "video" as const,
-          label: "Video",
-          description: "Generate a video from a prompt.",
-          insertText: "/video ",
-        },
-      ]
+    ? [builtinCommand("video", "lib.slash.video.label", "lib.slash.video.description")]
     : []),
 ];
 
@@ -139,7 +135,7 @@ export function parseSlashFileArguments(argument: string): SlashFileArgumentsRes
   if (quote) {
     return {
       status: "error",
-      message: "Could not parse /file paths. Close the quote and try again.",
+      message: t("lib.errors.slashFileParse"),
     };
   }
   if (current) paths.push(current);

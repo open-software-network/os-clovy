@@ -1,46 +1,25 @@
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import type { CSSProperties } from "react";
-import type { AgentSessionStatusDetail } from "../../lib/agent-events";
+import { type TFunction, useT } from "../../i18n";
 import type { ClovyUpdate } from "../../lib/updater";
 import { ClovyMark } from "../../components/brand/ClovyLogo";
 import { Spinner } from "../../components/ui/Spinner";
-import type { UpdateInstallProgress, UpdatePromptPayload } from "../update-decision";
+import {
+  UP_TO_DATE_STATUS,
+  type UpdateInstallProgress,
+  type UpdatePromptPayload,
+} from "../update-decision";
 
-export function updateMenuBarSessionStatus(
-  sessionId: string,
-  status: AgentSessionStatusDetail["status"],
-  sessions: { working: Set<string>; waiting: Set<string> },
-) {
-  if (status === "waitingForUser") {
-    sessions.working.delete(sessionId);
-    sessions.waiting.add(sessionId);
-    return;
-  }
-  if (status === "starting" || status === "running") {
-    sessions.waiting.delete(sessionId);
-    sessions.working.add(sessionId);
-    return;
-  }
-  if (status === "completed" || status === "failed" || status === "cancelled") {
-    sessions.working.delete(sessionId);
-    sessions.waiting.delete(sessionId);
-  }
-}
-
-export function UpdateHub({
-  readyUpdate,
-  status,
-  failed,
-  statusLeaving,
-  checking,
-  preparing,
-  relaunching,
-  progress,
-  onDismissStatus,
-  onRelaunch,
-}: {
-  readyUpdate: UpdatePromptPayload<ClovyUpdate> | null;
+export type UpdateHubProps = {
+  // The newer version found by the last check, until the owner postpones it.
+  offer: UpdatePromptPayload<ClovyUpdate> | null;
+  // The owner chose to update and has not postponed since.
+  accepted: boolean;
+  // Installed; only the restart is left.
+  ready: boolean;
+  // Accepted while a recording or dictation runs: the next step waits for it.
+  waitingForCapture: boolean;
   status: string | null;
   failed: boolean;
   statusLeaving: boolean;
@@ -48,19 +27,48 @@ export function UpdateHub({
   preparing: boolean;
   relaunching: boolean;
   progress: UpdateInstallProgress | null;
-  onDismissStatus: () => void;
+  onInstall: () => void;
+  onPostpone: () => void;
   onRelaunch: () => void;
-}) {
-  if (readyUpdate) {
+  onDismissStatus: () => void;
+};
+
+// The sidebar footer card for every update state. Exactly one card shows: the
+// offer, the wait for a recording to end, the restart, or a transient status
+// (checking, downloading, up to date, failure).
+export function UpdateHub({
+  offer,
+  accepted,
+  ready,
+  waitingForCapture,
+  status,
+  failed,
+  statusLeaving,
+  checking,
+  preparing,
+  relaunching,
+  progress,
+  onInstall,
+  onPostpone,
+  onRelaunch,
+  onDismissStatus,
+}: UpdateHubProps) {
+  if (offer && waitingForCapture) {
+    return <UpdateWaitCard ready={ready} onPostpone={onPostpone} />;
+  }
+  if (offer && (ready || relaunching)) {
     return (
       <UpdateRelaunchCard
-        payload={readyUpdate}
+        payload={offer}
         status={status}
         failed={failed}
         relaunching={relaunching}
         onRelaunch={onRelaunch}
       />
     );
+  }
+  if (offer && !accepted && !preparing) {
+    return <UpdateOfferCard payload={offer} onInstall={onInstall} onPostpone={onPostpone} />;
   }
 
   if (!status) return null;
@@ -77,6 +85,64 @@ export function UpdateHub({
   );
 }
 
+function UpdateOfferCard({
+  payload,
+  onInstall,
+  onPostpone,
+}: {
+  payload: UpdatePromptPayload<ClovyUpdate>;
+  onInstall: () => void;
+  onPostpone: () => void;
+}) {
+  const t = useT();
+  return (
+    <aside
+      className="update-popover update-card"
+      role="status"
+      aria-live="polite"
+      aria-label={t("app.update.offerAria", { version: payload.version })}
+    >
+      <div className="update-status-row">
+        <span className="update-status-mark" aria-hidden>
+          <ClovyMark variant="mono" />
+        </span>
+        <span className="update-card-title">
+          {t("app.update.available", { version: payload.version })}
+        </span>
+      </div>
+      <div className="update-card-actions">
+        <button type="button" className="btn btn-ghost update-card-action" onClick={onPostpone}>
+          {t("app.update.later")}
+        </button>
+        <button type="button" className="btn btn-primary update-card-action" onClick={onInstall}>
+          {t("app.update.install")}
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function UpdateWaitCard({ ready, onPostpone }: { ready: boolean; onPostpone: () => void }) {
+  const t = useT();
+  return (
+    <aside className="update-popover update-card" role="status" aria-live="polite">
+      <div className="update-status-row">
+        <span className="update-status-mark" aria-hidden>
+          <ClovyMark variant="mono" />
+        </span>
+        <span className="update-card-text">
+          {ready ? t("app.update.restartAfterCapture") : t("app.update.waitingForCapture")}
+        </span>
+      </div>
+      <div className="update-card-actions">
+        <button type="button" className="btn btn-ghost update-card-action" onClick={onPostpone}>
+          {t("app.update.later")}
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 function UpdateRelaunchCard({
   payload,
   status,
@@ -90,7 +156,8 @@ function UpdateRelaunchCard({
   relaunching: boolean;
   onRelaunch: () => void;
 }) {
-  const meta = status ?? updateVersionLabel(payload.version);
+  const t = useT();
+  const meta = displayedUpdateStatus(status, t) ?? updateVersionLabel(payload.version);
 
   return (
     <aside className="update-popover" role={failed ? "alert" : "status"} aria-live="polite">
@@ -98,17 +165,17 @@ function UpdateRelaunchCard({
         type="button"
         className="update-relaunch-card"
         disabled={relaunching}
-        aria-label={`Relaunch to update to Clovy ${payload.version}`}
+        aria-label={t("app.update.relaunchAria", { version: payload.version })}
         onClick={onRelaunch}
       >
         {/* One motion cue per card: while relaunching the mark slot swaps to the
-         * dot spinner (no title shimmer) and the title stays plain text. */}
+         * dot spinner and the title stays plain text. */}
         <span className="update-relaunch-mark" aria-hidden>
           {relaunching ? <Spinner size="sm" aria-hidden /> : <ClovyMark variant="mono" />}
         </span>
         <span className="update-relaunch-copy">
           <span className="update-relaunch-title">
-            {relaunching ? "Relaunching..." : "Relaunch to update"}
+            {relaunching ? t("app.update.relaunching") : t("app.update.relaunch")}
           </span>
           <span className={status ? "update-relaunch-status" : undefined}>{meta}</span>
         </span>
@@ -137,17 +204,20 @@ function UpdateStatusCard({
   progress: UpdateInstallProgress | null;
   onDismiss: () => void;
 }) {
+  const t = useT();
   const percent = updateProgressPercent(progress);
   const progressWidth =
     progress?.state === "installing" && percent === undefined ? "100%" : `${percent ?? 0}%`;
-  // Explicit flags, never string-sniffed: checking covers the manual
-  // "Checking for updates..." round-trip, preparing covers download + install.
-  // The spinner is decorative; the status text announces the state to AT.
+  // Explicit flags, never string-sniffed: checking covers the manual check
+  // round-trip, preparing covers download and install. The spinner is
+  // decorative; the status text announces the state to assistive technology.
   const busy = checking || preparing;
 
   return (
     <aside
-      className="update-popover update-status-card"
+      className={
+        failed ? "update-popover update-card update-card-failed" : "update-popover update-card"
+      }
       data-leaving={leaving || undefined}
       role={failed ? "alert" : "status"}
       aria-live="polite"
@@ -159,12 +229,12 @@ function UpdateStatusCard({
         <span
           className={failed ? "update-status-text update-status-text-failed" : "update-status-text"}
         >
-          {status}
+          {displayedUpdateStatus(status, t)}
         </span>
         <button
           type="button"
           className="update-status-close"
-          aria-label={preparing ? "Hide update progress" : "Dismiss update status"}
+          aria-label={preparing ? t("app.update.hideProgress") : t("app.update.dismissStatus")}
           onClick={onDismiss}
         >
           <IconCrossSmall size={12} aria-hidden />
@@ -191,7 +261,7 @@ function UpdateStatusCard({
               {String(percent)
                 .split("")
                 .map((char, i) => (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: the position-plus-character key is the mechanism — a changed digit remounts to replay the pop-in.
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the position-plus-character key is the mechanism; a changed digit remounts to replay the pop-in.
                   <span key={`${i}-${char}`} className="update-digit">
                     {char}
                   </span>
@@ -213,11 +283,12 @@ function updateProgressPercent(progress: UpdateInstallProgress | null) {
   );
 }
 
+// The up-to-date status is an English sentinel in state (the auto-dismiss
+// reducer matches on it); translate it only for display.
+function displayedUpdateStatus(status: string | null, t: TFunction) {
+  return status === UP_TO_DATE_STATUS ? t("app.update.upToDate") : status;
+}
+
 function updateVersionLabel(version: string) {
   return version.startsWith("v") ? version : `v${version}`;
 }
-
-// Sidebar toggle icon. One static panel with a single divider that animates:
-// expanded it's a full-height line at x=9, collapsed it slides left to x=7 and
-// shrinks to a short centered bar — the same glyph the two central-icons draw,
-// but tweened via a transform on the divider so it visibly moves between states.

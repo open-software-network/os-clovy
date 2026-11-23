@@ -13,16 +13,14 @@
 // synthetic recording status straight into the reducer (under a sentinel
 // session id the status poll and the pause/resume/finish handlers skip, so no
 // backend call fires) and pins the consent reminder past its timers, so the
-// notices — just restyled to match the chat funding-notice chrome — can be
-// inspected in the browser sandbox or `pnpm tauri:dev`. It parks on the
+// notices can be inspected in the browser sandbox or `pnpm tauri:dev`. It parks on the
 // selected note, seeding a minimal in-memory note when none is selected.
 //
 // Because it drives the same reducer recording status, every state-mutating
 // command refuses while a real recording is live, rather than stomping it and
 // stranding the backend recording with no pause/resume/finish controls.
 //
-// The out-of-credits editor-footer notice is a separate surface: drive it with
-// __fundingDemo("free"). Mirrors the sibling dev drivers in
+// Mirrors the sibling dev drivers in
 // lib/processing-progress-demo.ts and lib/global-recorder-demo.ts.
 //
 // Never bundled in production: App gates the dynamic import on
@@ -61,8 +59,7 @@ const HELP = [
   '  __recordNoticesDemo("clear")          tear the demo down, back to real state',
   "",
   "Parks the recorder notices without a real recording, on the selected note",
-  "(seeds one if none is selected). The out-of-credits editor-footer notice is",
-  'a separate surface: drive it with __fundingDemo("free"). Dev only.',
+  "(seeds one if none is selected). Dev only.",
 ].join("\n");
 
 // Shown when a command that would mutate recorder state runs while a real

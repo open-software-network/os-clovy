@@ -1,0 +1,133 @@
+diff --git a/cli/Cargo.toml b/cli/Cargo.toml
+index c474f89..3fd910f 100644
+--- a/cli/Cargo.toml
++++ b/cli/Cargo.toml
+@@ -47 +47 @@ libc = "0.2"
+-windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_JobObjects", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi"] }
++windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_JobObjects", "Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi", "Win32_System_Pipes"] }
+@@ -72,0 +73,8 @@ opt-level = 3
++
++[features]
++clovy-private = []
++
++[[bin]]
++name = "clovy-agent-browser"
++path = "src/clovy_private_main.rs"
++required-features = ["clovy-private"]
+diff --git a/cli/src/native/browser.rs b/cli/src/native/browser.rs
+index 20b1b80..2ba6725 100644
+--- a/cli/src/native/browser.rs
++++ b/cli/src/native/browser.rs
+@@ -636,0 +637,45 @@ impl BrowserManager {
++    #[cfg(feature = "clovy-private")]
++    pub fn select_private_tab(&mut self, tab_id: u32) -> Result<(), String> {
++        let index = self
++            .pages
++            .iter()
++            .position(|p| p.tab_id == tab_id)
++            .ok_or("tab_gone")?;
++        self.active_page_index = index;
++        self.bind_active_target();
++        Ok(())
++    }
++
++    #[cfg(feature = "clovy-private")]
++    pub async fn from_private_pipe(client: CdpClient) -> Result<Self, String> {
++        let mut manager = Self {
++            client: Arc::new(client),
++            browser_process: None,
++            ws_url: String::new(),
++            pages: Vec::new(),
++            active_page_index: 0,
++            default_timeout_ms: 15_000,
++            download_path: None,
++            ignore_https_errors: false,
++            visited_origins: HashSet::new(),
++            next_tab_id: 1,
++            direct_page: false,
++            pin_tab: true,
++            bound_target_id: None,
++            bound_target_gone: None,
++            wedge_suspect: None,
++            headless: true,
++        };
++        manager
++            .client
++            .send_command(
++                "Browser.setDownloadBehavior",
++                Some(json!({"behavior":"deny","eventsEnabled":false})),
++                None,
++            )
++            .await?;
++        manager.tab_new(None, None).await?;
++        manager.set_pin_tab(true);
++        Ok(manager)
++    }
++
+@@ -1039,21 +1084,24 @@ impl BrowserManager {
+-        let _ = self
+-            .client
+-            .send_command_no_params("WebMCP.enable", Some(session_id))
+-            .await;
+-        // Enable auto-attach for cross-origin iframe support.
+-        // flatten: true gives each iframe its own session_id.
+-        // waitForDebuggerOnStart keeps child targets paused until the daemon
+-        // installs any required network controls and explicitly resumes them.
+-        // Ignored on engines that don't support it (e.g. Lightpanda).
+-        let _ = self
+-            .client
+-            .send_command(
+-                "Target.setAutoAttach",
+-                Some(json!({
+-                    "autoAttach": true,
+-                    "waitForDebuggerOnStart": true,
+-                    "flatten": true
+-                })),
+-                Some(session_id),
+-            )
+-            .await;
++        #[cfg(not(feature = "clovy-private"))]
++        {
++            let _ = self
++                .client
++                .send_command_no_params("WebMCP.enable", Some(session_id))
++                .await;
++            // Enable auto-attach for cross-origin iframe support.
++            // flatten: true gives each iframe its own session_id.
++            // waitForDebuggerOnStart keeps child targets paused until the daemon
++            // installs any required network controls and explicitly resumes them.
++            // Ignored on engines that don't support it (e.g. Lightpanda).
++            let _ = self
++                .client
++                .send_command(
++                    "Target.setAutoAttach",
++                    Some(json!({
++                        "autoAttach": true,
++                        "waitForDebuggerOnStart": true,
++                        "flatten": true
++                    })),
++                    Some(session_id),
++                )
++                .await;
++        }
+diff --git a/cli/src/native/cdp/mod.rs b/cli/src/native/cdp/mod.rs
+index 912860a..cc2d188 100644
+--- a/cli/src/native/cdp/mod.rs
++++ b/cli/src/native/cdp/mod.rs
+@@ -1,0 +2,4 @@ pub mod chrome;
++#[cfg(not(feature = "clovy-private"))]
++pub mod client;
++#[cfg(feature = "clovy-private")]
++#[path = "../../clovy_private_client.rs"]
+diff --git a/cli/src/native/snapshot.rs b/cli/src/native/snapshot.rs
+index 01c257f..3fb00b0 100644
+--- a/cli/src/native/snapshot.rs
++++ b/cli/src/native/snapshot.rs
+@@ -481,0 +482 @@ pub async fn take_snapshot(
++    #[cfg(not(feature = "clovy-private"))]
+@@ -485,0 +487,2 @@ pub async fn take_snapshot(
++    #[cfg(feature = "clovy-private")]
++    let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+@@ -645 +648 @@ pub async fn take_snapshot(
+-    if frame_id.is_none() {
++    if frame_id.is_none() && !cfg!(feature = "clovy-private") {

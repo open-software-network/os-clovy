@@ -1,5 +1,7 @@
 use crate::{
-    audio::system_audio::SystemAudioStopResult,
+    audio::{
+        active_silence::ActiveSilence, pause_state::PauseState, system_audio::SystemAudioStopResult,
+    },
     domain::types::{AppError, AudioLevelDto, RecordingSource, SourceReadinessDto},
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -33,7 +35,7 @@ struct WindowsSystemAudioStats {
 
 pub struct SystemAudioCapture {
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     partial_path: PathBuf,
     final_path: PathBuf,
@@ -45,20 +47,28 @@ impl SystemAudioCapture {
         partial_path: PathBuf,
         final_path: PathBuf,
         _timeline_offset: Duration,
+        authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
     ) -> Result<Self, AppError> {
         let stop_requested = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
+        let pause_state = Arc::new(PauseState::default());
         let stats = Arc::new(Mutex::new(WindowsSystemAudioStats::default()));
         let (startup_sender, startup_receiver) = mpsc::channel();
         let worker = {
             let stop_requested = Arc::clone(&stop_requested);
-            let paused = Arc::clone(&paused);
+            let pause_state = Arc::clone(&pause_state);
             let stats = Arc::clone(&stats);
             let partial_path = partial_path.clone();
             thread::Builder::new()
                 .name("clovy-windows-system-audio".to_string())
                 .spawn(move || {
-                    capture_loop(partial_path, stop_requested, paused, stats, startup_sender)
+                    capture_loop(
+                        partial_path,
+                        stop_requested,
+                        pause_state,
+                        stats,
+                        startup_sender,
+                        authorization,
+                    )
                 })
                 .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?
         };
@@ -91,7 +101,7 @@ impl SystemAudioCapture {
         }
         Ok(Self {
             stop_requested,
-            paused,
+            pause_state,
             stats,
             partial_path,
             final_path,
@@ -100,11 +110,11 @@ impl SystemAudioCapture {
     }
 
     pub fn pause(&mut self) {
-        self.paused.store(true, Ordering::Release);
+        self.pause_state.pause(Instant::now());
     }
 
     pub fn resume(&mut self) {
-        self.paused.store(false, Ordering::Release);
+        self.pause_state.resume(Instant::now());
     }
 
     pub fn status(&self) -> (AudioLevelDto, i64, Option<String>) {
@@ -196,16 +206,18 @@ pub fn helper_permission_check() -> Result<(), AppError> {
 fn capture_loop(
     partial_path: PathBuf,
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
+    authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
 ) -> Result<(), AppError> {
     let result = run_capture_loop(
         partial_path,
         stop_requested,
-        paused,
+        pause_state,
         Arc::clone(&stats),
         startup_sender,
+        authorization,
     );
     if let Err(error) = result.as_ref() {
         latch_error(&stats, error);
@@ -216,11 +228,12 @@ fn capture_loop(
 fn run_capture_loop(
     partial_path: PathBuf,
     stop_requested: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    pause_state: Arc<PauseState>,
     stats: Arc<Mutex<WindowsSystemAudioStats>>,
     startup_sender: Sender<Result<(), AppError>>,
+    authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
 ) -> Result<(), AppError> {
-    let mut backend = match WasapiLoopbackBackend::new() {
+    let mut backend = match WasapiLoopbackBackend::new(authorization) {
         Ok(backend) => backend,
         Err(error) => {
             let _ = startup_sender.send(Err(error.clone()));
@@ -242,13 +255,17 @@ fn run_capture_loop(
         }
     };
     let _ = startup_sender.send(Ok(()));
-    let mut last_written_at = Instant::now();
-    let mut pending_silence_frames = 0.0_f64;
+    let mut silence = ActiveSilence::new(pause_state.snapshot().active_time);
     let mut was_paused = false;
     while !stop_requested.load(Ordering::Acquire) {
-        if paused.load(Ordering::Acquire) {
+        let pause = pause_state.snapshot();
+        if pause.paused {
             if !was_paused {
                 backend.pause()?;
+                let frames = silence.pause(pause.active_time, backend.sample_rate);
+                if frames > 0 {
+                    write_silence(&mut writer, frames, backend.channels, &stats)?;
+                }
                 was_paused = true;
             }
             thread::sleep(CAPTURE_POLL_INTERVAL);
@@ -256,14 +273,12 @@ fn run_capture_loop(
         }
         if was_paused {
             backend.resume()?;
-            last_written_at = Instant::now();
-            pending_silence_frames = 0.0;
+            silence.resume();
             was_paused = false;
         }
         let wrote_packet = backend.write_next_packet(&mut writer, &stats)?;
         if wrote_packet {
-            last_written_at = Instant::now();
-            pending_silence_frames = 0.0;
+            silence.packet(pause_state.snapshot().active_time);
             continue;
         }
         // A zero packet size means WASAPI has not delivered a packet yet, not
@@ -272,12 +287,8 @@ fn run_capture_loop(
         // trailing idle tail falls back to wall-clock padding on stop.
         thread::sleep(CAPTURE_POLL_INTERVAL);
     }
-    let trailing_silence_frames = idle_frames_since(
-        &mut pending_silence_frames,
-        last_written_at,
-        Instant::now(),
-        backend.sample_rate,
-    );
+    let end = pause_state.snapshot().active_time;
+    let trailing_silence_frames = silence.finish(end, backend.sample_rate);
     if trailing_silence_frames > 0 {
         write_silence(
             &mut writer,
@@ -348,12 +359,14 @@ impl Drop for MixFormatPtr {
 #[cfg(target_os = "windows")]
 impl WasapiLoopbackBackend {
     fn probe_default_endpoint() -> Result<(), AppError> {
-        let backend = Self::new()?;
+        let backend = Self::new(None)?;
         drop(backend);
         Ok(())
     }
 
-    fn new() -> Result<Self, AppError> {
+    fn new(
+        authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
+    ) -> Result<Self, AppError> {
         use windows::Win32::Media::Audio::{
             IAudioCaptureClient, IAudioClient, AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -392,8 +405,10 @@ impl WasapiLoopbackBackend {
         .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
         let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }
             .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
-        unsafe { audio_client.Start() }
-            .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))?;
+        crate::audio::system_audio::admit_system_audio_start(authorization.as_ref(), || {
+            unsafe { audio_client.Start() }
+                .map_err(|error| AppError::new("system_audio_unavailable", error.to_string()))
+        })?;
         Ok(Self {
             audio_client,
             capture_client,
@@ -552,7 +567,9 @@ impl WasapiLoopbackBackend {
         ))
     }
 
-    fn new() -> Result<Self, AppError> {
+    fn new(
+        _authorization: Option<crate::audio::capture::CaptureStartAuthorization>,
+    ) -> Result<Self, AppError> {
         Self::probe_default_endpoint()?;
         Ok(Self {
             channels: 2,
@@ -780,19 +797,6 @@ fn unusable_format_error() -> AppError {
     )
 }
 
-fn idle_frames_since(
-    pending_silence_frames: &mut f64,
-    last_written_at: Instant,
-    now: Instant,
-    sample_rate: u32,
-) -> u32 {
-    let elapsed = now.saturating_duration_since(last_written_at);
-    *pending_silence_frames += elapsed.as_secs_f64() * sample_rate as f64;
-    let whole_frames = pending_silence_frames.floor();
-    *pending_silence_frames -= whole_frames;
-    whole_frames.clamp(0.0, u32::MAX as f64) as u32
-}
-
 fn latch_error(stats: &Arc<Mutex<WindowsSystemAudioStats>>, error: &AppError) {
     let Ok(mut stats) = stats.lock() else {
         return;
@@ -823,6 +827,59 @@ fn update_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_tail_writes_only_active_silence_to_system_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.wav");
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 1000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec).unwrap();
+        let stats = Arc::new(Mutex::new(WindowsSystemAudioStats::default()));
+        let start = Instant::now();
+        let state = PauseState::default();
+        state.pause(start + Duration::from_secs(2));
+        let snapshot = state.snapshot_at(start + Duration::from_secs(102));
+        assert!(snapshot.paused);
+        let mut silence = ActiveSilence::new(start);
+        let frames = silence.pause(snapshot.active_time, spec.sample_rate);
+        write_silence(&mut writer, frames, spec.channels, &stats).unwrap();
+        let tail = silence.finish(snapshot.active_time, spec.sample_rate);
+        assert_eq!(tail, 0);
+        writer.finalize().unwrap();
+        assert_eq!(hound::WavReader::open(path).unwrap().duration(), 2000);
+    }
+
+    #[test]
+    fn captured_pause_snapshot_survives_resume_before_wav_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system-stereo.wav");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 1000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec).unwrap();
+        let stats = Arc::new(Mutex::new(WindowsSystemAudioStats::default()));
+        let start = Instant::now();
+        let state = PauseState::default();
+        state.pause(start + Duration::from_secs(2));
+        let snapshot = state.snapshot_at(start + Duration::from_secs(102));
+        assert!(snapshot.paused);
+        state.resume(start + Duration::from_secs(102));
+        let mut silence = ActiveSilence::new(start);
+        let frames = silence.pause(snapshot.active_time, spec.sample_rate);
+        write_silence(&mut writer, frames, spec.channels, &stats).unwrap();
+        writer.finalize().unwrap();
+        let reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.duration(), 2000);
+        assert_eq!(reader.spec().channels, 2);
+    }
 
     #[test]
     fn sample_conversion_handles_float_and_integer_mix_formats() {
@@ -940,29 +997,5 @@ mod tests {
             MixSampleFormat::PcmSigned16
         );
         assert!(extensible_pcm_sample_format(25, 24).is_err());
-    }
-
-    #[test]
-    fn idle_frames_since_converts_elapsed_time_to_frames() {
-        let start = Instant::now();
-        let later = start + Duration::from_millis(250);
-        let mut pending = 0.0;
-        assert_eq!(
-            idle_frames_since(&mut pending, start, later, 48_000),
-            12_000
-        );
-        assert_eq!(pending, 0.0);
-    }
-
-    #[test]
-    fn idle_frames_since_preserves_fractional_remainder() {
-        let start = Instant::now();
-        let mut pending = 0.0;
-        let first = start + Duration::from_micros(10_500);
-        let second = start + Duration::from_micros(21_000);
-        assert_eq!(idle_frames_since(&mut pending, start, first, 48_000), 504);
-        assert!(pending > 0.0 && pending < 1.0);
-        assert_eq!(idle_frames_since(&mut pending, first, second, 48_000), 504);
-        assert!(pending > 0.0 && pending < 1.0);
     }
 }

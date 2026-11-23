@@ -4,12 +4,14 @@
     "includes": [
       "src/**",
       "scripts/**",
-      "extension/**",
       "*.json",
       "*.ts",
       "*.mjs",
       "!**/*.min.js",
-      "!**/dist"
+      "!**/dist",
+      "!!.tmp",
+      "!!.tauri-agent-browser",
+      "!!resources/agent-browser"
     ],
     "ignoreUnknown": true
   },

@@ -13,6 +13,3 @@ crate-type = ["rlib", "staticlib"]
 snow = { version = "0.10", default-features = false, features = ["default-resolver-crypto", "std"] }
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-hex = "0.4"

@@ -11,7 +11,7 @@ Phase 3 TEE relay) will publish its own, larger threat model when it ships.
 You authorize Google on your Mac. The refresh token Google mints is stored in
 your Mac's Keychain. Every Gmail and Calendar API call Clovy makes originates
 from your device, using that token, and goes straight to Google. Clovy's
-backend (Clovy API) is not involved in connector calls.
+inference providers are not involved in those connector calls.
 
 ## What OpenSoftware can and cannot see
 
@@ -23,23 +23,17 @@ backend (Clovy API) is not involved in connector calls.
   so there is nothing to hand over under a subpoena and nothing to steal in a
   breach of our servers.
 - The content of your mail or calendar as it flows through a connector call.
-  Connector requests go device -> Google, not through Clovy API.
+  Connector requests go device -> Google, directly.
 
 **Can see, and you should know it:**
 
 - **Model inference is a separate path.** When a routine runs, its prompt (which
   can include mail or calendar content the routine chose to read) goes to
-  whichever model provider you selected. By default that is Clovy API, which runs
-  in a TEE (Phala) so its own operators cannot read prompt data, but it is still
-  a network call off your device. If you select a local model, inference stays
-  on-device too. The "OpenSoftware is not in the connector data path" claim
-  covers token custody and provider API calls. It does not cover inference, and
-  the copy never implies it does.
-- **Billing metadata.** Metered model calls settle against OS Accounts, so the
-  usual coarse billing records exist (that a metered call happened, its action
-  slug, credits charged). No mail content is in them. Clovy's only product
-  telemetry remains opt-in, coarse-bucketed P3A aggregates; connectors add no
-  per-user app telemetry.
+  the routine's installed CLI and its configured model provider/account.
+  That can be a network call off your device. The connector privacy claim
+  covers token custody and direct connector API calls, not model inference.
+  Clovy has no server billing or telemetry path; the CLI/provider's account
+  and retention rules apply to its inference requests.
 
 ## Trust surface for local mode
 

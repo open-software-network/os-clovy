@@ -20,6 +20,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { type TFunction, useT } from "../../i18n";
+import { formatListTimestamp } from "../../lib/date-format";
 import { AGENT_DELETE_SESSION_EVENT } from "../../lib/agent-events";
 import { messageFromError } from "../../lib/errors";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
@@ -62,11 +64,13 @@ export type AgentSessionsListHandle = {
  * completed_at mark (JUN-203). */
 type SessionStatusFilter = "active" | "archived" | "all";
 
-const STATUS_FILTER_OPTIONS = [
-  { value: "active", label: "Active" },
-  { value: "archived", label: "Archived" },
-  { value: "all", label: "All" },
-];
+function statusFilterOptions(t: TFunction) {
+  return [
+    { value: "active", label: t("agent.sessions.filter.active") },
+    { value: "archived", label: t("agent.sessions.filter.archived") },
+    { value: "all", label: t("agent.sessions.filter.all") },
+  ];
+}
 
 const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
 const NO_SESSIONS: AgentSessionDto[] = [];
@@ -91,6 +95,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
     },
     ref,
   ) {
+    const t = useT();
     // __emptyStates() preview (dev console): render the page as a fresh
     // install would see it, real data untouched underneath.
     const sessions = useForcedEmptyStates() ? NO_SESSIONS : allSessions;
@@ -120,11 +125,12 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
       return sortedSessions.filter((session) =>
         `${session.title} ${sessionStatusLabel(
           sessionStatus(session.id, workingSessionIds, waitingSessionIds),
+          t,
         )}`
           .toLowerCase()
           .includes(normalized),
       );
-    }, [sortedSessions, query, waitingSessionIds, workingSessionIds]);
+    }, [sortedSessions, query, waitingSessionIds, workingSessionIds, t]);
     const activeSessions = useMemo(
       () => filteredSessions.filter((session) => !completedSessionIds[session.id]),
       [filteredSessions, completedSessionIds],
@@ -274,11 +280,14 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
     }
 
     return (
-      <section className="all-notes-workspace agent-sessions-workspace" aria-label="Sessions">
+      <section
+        className="all-notes-workspace agent-sessions-workspace"
+        aria-label={t("agent.sessions.title")}
+      >
         <header className="folders-header">
           <div className="folders-heading">
             <h1>
-              Sessions
+              {t("agent.sessions.title")}
               {sessions.length > 0 ? (
                 <span className="folders-count">{sessions.length}</span>
               ) : null}
@@ -290,7 +299,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
             onClick={onNewSession}
           >
             <IconPlusMedium size={13} />
-            New session
+            {t("agent.sessions.new")}
             <kbd className="primary-action-kbd" aria-hidden>
               {newSessionShortcut}
             </kbd>
@@ -303,7 +312,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
               <IconMagnifyingGlass size={14} />
               <input
                 type="search"
-                placeholder="Search"
+                placeholder={t("common.search")}
                 value={query}
                 onChange={(event) => setQuery(event.currentTarget.value)}
               />
@@ -311,9 +320,9 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
             <Select
               className="agent-sessions-filter"
               value={statusFilter}
-              options={STATUS_FILTER_OPTIONS}
-              placeholder="Active"
-              ariaLabel="Filter sessions by status"
+              options={statusFilterOptions(t)}
+              placeholder={t("agent.sessions.filter.active")}
+              ariaLabel={t("agent.sessions.filterLabel")}
               popoverWidth={140}
               onChange={(value) => {
                 const next = value as SessionStatusFilter;
@@ -326,14 +335,14 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
 
         {sessions.length === 0 ? (
           <EmptyState
-            label="Start your first session"
+            label={t("agent.sessions.empty.label")}
             icon={<IconBubble3 size={28} />}
-            title="Put Clovy to work"
-            description="Ask Clovy to check on your computer, dig through your files, or research a topic. Each session keeps one task's conversation and everything it produces in one place."
+            title={t("agent.sessions.empty.title")}
+            description={t("agent.sessions.empty.description")}
             action={
               <button type="button" className="primary-action primary-solid" onClick={onNewSession}>
                 <IconPlusMedium size={13} />
-                Start your first session
+                {t("agent.sessions.empty.label")}
               </button>
             }
           />
@@ -341,12 +350,12 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
           <div className="folders-empty">
             <p>
               {query.trim()
-                ? `No sessions match “${query.trim()}”.`
+                ? t("agent.sessions.noMatch", { query: query.trim() })
                 : statusFilter === "archived"
-                  ? "No archived sessions yet."
+                  ? t("agent.sessions.noArchived")
                   : statusFilter === "all"
-                    ? "No sessions yet."
-                    : "No active sessions."}
+                    ? t("agent.sessions.noSessions")
+                    : t("agent.sessions.noActive")}
             </p>
           </div>
         ) : (
@@ -385,7 +394,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
           <div
             className="meetings-bulk-bar"
             role="toolbar"
-            aria-label="Selection"
+            aria-label={t("agent.sessions.selection")}
             data-exit={isExiting ? exit : undefined}
             onAnimationEnd={(event) => {
               if (!isExiting || event.target !== event.currentTarget) return;
@@ -395,7 +404,9 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
               setExit(null);
             }}
           >
-            <span className="meetings-bulk-count">{displayCount} selected</span>
+            <span className="meetings-bulk-count">
+              {t("agent.sessions.selectedCount", { count: displayCount })}
+            </span>
             {hasUnselectedVisibleSessions ? (
               <button
                 type="button"
@@ -403,7 +414,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
                 onClick={selectAllVisibleSessions}
                 disabled={isExiting}
               >
-                Select all
+                {t("agent.sessions.selectAll")}
               </button>
             ) : null}
             <button
@@ -412,7 +423,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
               onClick={deselectAllVisibleSessions}
               disabled={isExiting}
             >
-              Deselect all
+              {t("agent.sessions.deselectAll")}
             </button>
             <button
               type="button"
@@ -420,7 +431,7 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
               onClick={() => onOpenMoveSessions(selectedSessionIds)}
               disabled={isExiting}
             >
-              Move
+              {t("agent.sessions.move")}
             </button>
             <button
               type="button"
@@ -428,12 +439,12 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
               onClick={() => setConfirmBulkDelete(true)}
               disabled={isExiting}
             >
-              Delete
+              {t("common.delete")}
             </button>
             <button
               type="button"
               className="meetings-bulk-dismiss"
-              aria-label="Clear selection"
+              aria-label={t("agent.sessions.clearSelection")}
               onClick={resetSelection}
               disabled={isExiting}
             >
@@ -449,11 +460,9 @@ export const AgentSessionsList = forwardRef<AgentSessionsListHandle, AgentSessio
             setBulkDeleteError(null);
           }}
           onConfirm={() => handleBulkDelete()}
-          title={`Delete ${selectedCount} ${selectedCount === 1 ? "session" : "sessions"}?`}
-          description={
-            bulkDeleteError || "This cannot be undone. These agent sessions will be removed."
-          }
-          confirmLabel={selectedCount === 1 ? "Delete session" : "Delete sessions"}
+          title={t("agent.sessions.bulkDeleteTitle", { count: selectedCount })}
+          description={bulkDeleteError || t("agent.sessions.bulkDeleteDescription")}
+          confirmLabel={t("agent.sessions.deleteSessions", { count: selectedCount })}
           destructive
         />
       </section>
@@ -493,9 +502,9 @@ function sessionStatusPriority(
   return 0;
 }
 
-function sessionStatusLabel(status: AgentSessionListStatus) {
-  if (status === "waitingForUser") return "Needs you";
-  if (status === "running") return "Working";
+function sessionStatusLabel(status: AgentSessionListStatus, t: TFunction) {
+  if (status === "waitingForUser") return t("agent.sessions.status.needsYou");
+  if (status === "running") return t("agent.sessions.status.working");
   return "";
 }
 
@@ -531,12 +540,16 @@ function AgentSessionListRow({
   onOpenMove: () => void;
   onRemoveFromProject: (folderId: string) => void;
 }) {
-  const title = session.title.trim() || "Untitled session";
-  const preview = session.source === "legacy_routine" ? "Imported routine history" : "Conversation";
-  const subtitle = [archivedLabel ? "Archived" : null, projectName, preview]
+  const t = useT();
+  const title = session.title.trim() || t("agent.sessions.untitled");
+  const preview =
+    session.source === "legacy_routine"
+      ? t("agent.sessions.preview.routine")
+      : t("agent.sessions.preview.conversation");
+  const subtitle = [archivedLabel ? t("agent.sessions.archivedMeta") : null, projectName, preview]
     .filter(Boolean)
     .join(" · ");
-  const statusLabel = sessionStatusLabel(status);
+  const statusLabel = sessionStatusLabel(status, t);
   const [menu, setMenu] = useState<{ right: number; top: number } | null>(null);
   const { ref: menuRef, clampedTop: menuTop } = useClampedMenuTop<HTMLDivElement>(menu?.top ?? 0);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -620,7 +633,7 @@ function AgentSessionListRow({
             <input
               type="checkbox"
               checked={checked}
-              aria-label={`Select ${title}`}
+              aria-label={t("agent.sessions.selectRow", { title })}
               onChange={onToggleSelected}
             />
             <span className="folder-note-select-box" aria-hidden>
@@ -648,7 +661,7 @@ function AgentSessionListRow({
           <button
             type="button"
             className="folder-note-menu"
-            aria-label={`Actions for ${title}`}
+            aria-label={t("agent.sessions.actionsFor", { title })}
             aria-haspopup="menu"
             aria-expanded={menu !== null}
             onClick={(event) => {
@@ -685,7 +698,7 @@ function AgentSessionListRow({
               }}
             >
               <IconPencil size={14} />
-              Rename
+              {t("common.rename")}
             </button>
             <button
               type="button"
@@ -696,7 +709,9 @@ function AgentSessionListRow({
               }}
             >
               {currentFolderId ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
-              {currentFolderId ? "Change project" : "Add to project"}
+              {currentFolderId
+                ? t("agent.sessions.changeProject")
+                : t("agent.sessions.addToProject")}
             </button>
             {currentFolderId ? (
               <button
@@ -708,7 +723,7 @@ function AgentSessionListRow({
                 }}
               >
                 <IconFolderDelete size={14} />
-                Remove from project
+                {t("agent.sessions.removeFromProject")}
               </button>
             ) : null}
             {onToggleArchived ? (
@@ -721,7 +736,7 @@ function AgentSessionListRow({
                 }}
               >
                 {archived ? <IconArrowUndoUp size={14} /> : <IconArchive size={14} />}
-                {archived ? "Unarchive" : "Archive"}
+                {archived ? t("agent.sessions.unarchive") : t("agent.sessions.archive")}
               </button>
             ) : null}
             <div className="context-menu-separator" role="separator" />
@@ -736,7 +751,7 @@ function AgentSessionListRow({
               }}
             >
               <IconTrashCan size={14} />
-              Delete
+              {t("common.delete")}
             </button>
           </div>
         ) : null}
@@ -754,9 +769,9 @@ function AgentSessionListRow({
           setDeleteError(null);
         }}
         onConfirm={() => handleDelete()}
-        title={`Delete "${title}"?`}
-        description={deleteError || "This agent session cannot be restored."}
-        confirmLabel="Delete session"
+        title={t("agent.sessions.deleteTitle", { title })}
+        description={deleteError || t("agent.sessions.deleteDescription")}
+        confirmLabel={t("agent.sessions.deleteSession")}
         destructive
       />
     </li>
@@ -768,23 +783,5 @@ function AgentSessionListRow({
 function formatSessionTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() === 0) return "";
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return date.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / (24 * 60 * 60 * 1000));
-  if (diffDays < 7) {
-    return date.toLocaleDateString(undefined, { weekday: "short" });
-  }
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return formatListTimestamp(date);
 }

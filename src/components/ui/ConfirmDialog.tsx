@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { useT } from "../../i18n";
 import { Dialog } from "./Dialog";
 
 type ConfirmDialogProps = {
@@ -23,11 +24,12 @@ export function ConfirmDialog({
   onConfirm,
   title,
   description,
-  confirmLabel = "Confirm",
+  confirmLabel,
   confirmBusyLabel,
-  cancelLabel = "Cancel",
+  cancelLabel,
   destructive = false,
 }: ConfirmDialogProps) {
+  const t = useT();
   const [submitting, setSubmitting] = useState(false);
 
   async function handleConfirm() {
@@ -55,7 +57,7 @@ export function ConfirmDialog({
       footer={
         <>
           <button type="button" className="primary-action" onClick={onClose} disabled={submitting}>
-            {cancelLabel}
+            {cancelLabel ?? t("common.cancel")}
           </button>
           <button
             type="button"
@@ -64,7 +66,9 @@ export function ConfirmDialog({
             disabled={submitting}
             aria-busy={submitting || undefined}
           >
-            {submitting && confirmBusyLabel ? confirmBusyLabel : confirmLabel}
+            {submitting && confirmBusyLabel
+              ? confirmBusyLabel
+              : (confirmLabel ?? t("common.confirm"))}
           </button>
         </>
       }

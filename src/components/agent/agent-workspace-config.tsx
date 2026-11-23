@@ -18,6 +18,7 @@ import {
   type AgentSessionRenamedDetail,
   type AgentSessionsChangedDetail,
 } from "../../lib/agent-events";
+import { type MessageKey, t } from "../../i18n";
 
 export type AgentPanel = "chat" | "skills";
 
@@ -53,14 +54,22 @@ export const SANDBOX_OPTIONS = [
   {
     unrestricted: false,
     icon: <IconShieldCheck size={16} aria-hidden />,
-    title: "Sandboxed",
-    description: "Clovy can read your files but only change its own workspace.",
+    get title() {
+      return t("agent.safety.sandboxed");
+    },
+    get description() {
+      return t("agent.safety.sandboxedDescription");
+    },
   },
   {
     unrestricted: true,
     icon: <IconShieldCrossed size={16} aria-hidden />,
-    title: "Unrestricted",
-    description: "Clovy can change any file your account can.",
+    get title() {
+      return t("agent.safety.unrestricted");
+    },
+    get description() {
+      return t("agent.safety.unrestrictedDescription");
+    },
   },
 ] as const;
 
@@ -102,8 +111,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "recap-notes",
     icon: <IconNotes size={18} />,
-    title: "Recap my notes",
-    description: "What happened, what got decided, what's still open.",
+    get title() {
+      return t("agent.shortcut.recapNotes.title");
+    },
+    get description() {
+      return t("agent.shortcut.recapNotes.description");
+    },
     prompt:
       "Look through my recent meeting notes and give me a quick recap: what happened, what got decided, and any action items still open. Keep it brief.",
     action: "prefill",
@@ -111,8 +124,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "research",
     icon: <IconDeepSearch size={18} />,
-    title: "Research a topic",
-    description: "Get a short, sourced write-up on anything.",
+    get title() {
+      return t("agent.shortcut.research.title");
+    },
+    get description() {
+      return t("agent.shortcut.research.description");
+    },
     prompt:
       "Research <a topic> and write a short summary (a few paragraphs) of what you find, with sources.",
     action: "prefill",
@@ -120,16 +137,24 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "summarize-file",
     icon: <IconFileSparkle size={18} />,
-    title: "Summarize a file",
-    description: "Pick a document and get the key points out of it.",
+    get title() {
+      return t("agent.shortcut.summarizeFile.title");
+    },
+    get description() {
+      return t("agent.shortcut.summarizeFile.description");
+    },
     prompt: "Summarize the key points of the attached file and pull out any action items.",
     action: "attach",
   },
   {
     key: "health-check",
     icon: <IconHeartBeat size={18} />,
-    title: "Check my Mac's health",
-    description: "Disk, memory, and login items that need attention.",
+    get title() {
+      return t("agent.shortcut.healthCheck.title");
+    },
+    get description() {
+      return t("agent.shortcut.healthCheck.description");
+    },
     prompt:
       "Give my computer a quick health check: free disk space, memory pressure, login items, and anything else worth flagging. Summarize what looks fine and what needs attention.",
     action: "prefill",
@@ -137,8 +162,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "draft-follow-up",
     icon: <IconEmail1Sparkle size={18} />,
-    title: "Draft a follow-up",
-    description: "Turn your latest meeting note into a follow-up message.",
+    get title() {
+      return t("agent.shortcut.draftFollowUp.title");
+    },
+    get description() {
+      return t("agent.shortcut.draftFollowUp.description");
+    },
     prompt:
       "From my most recent meeting note, draft a short follow-up message covering the decisions and next steps.",
     action: "prefill",
@@ -146,8 +175,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "find-file",
     icon: <IconMagnifyingGlass size={18} />,
-    title: "Find a file",
-    description: "Describe what you remember; Clovy tracks it down.",
+    get title() {
+      return t("agent.shortcut.findFile.title");
+    },
+    get description() {
+      return t("agent.shortcut.findFile.description");
+    },
     prompt:
       "Find <a file I half-remember> on my computer and tell me where it is. If several candidates match, list them with paths and dates.",
     action: "prefill",
@@ -155,8 +188,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "analyze-spreadsheet",
     icon: <IconPieChart1 size={18} />,
-    title: "Analyze a spreadsheet",
-    description: "Key figures, trends, and oddities from a CSV or sheet.",
+    get title() {
+      return t("agent.shortcut.analyzeSpreadsheet.title");
+    },
+    get description() {
+      return t("agent.shortcut.analyzeSpreadsheet.description");
+    },
     prompt:
       "Analyze the attached spreadsheet: summarize the key figures and trends, and call out anything that looks off.",
     action: "attach",
@@ -164,8 +201,12 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "search-notes",
     icon: <IconPageTextSearch size={18} />,
-    title: "Search my notes",
-    description: "Find where something came up across your meetings.",
+    get title() {
+      return t("agent.shortcut.searchNotes.title");
+    },
+    get description() {
+      return t("agent.shortcut.searchNotes.description");
+    },
     prompt:
       "Search my notes and transcripts for <what I'm trying to remember> and show me where it came up.",
     action: "prefill",
@@ -175,7 +216,9 @@ export const AGENT_SHORTCUTS: AgentShortcut[] = [
 /**
  * Hero greetings, one per visit: the heading cycles through this pool each
  * time the hero is entered, tracked in localStorage so the rotation continues
- * across launches. Exported so tests can match "any greeting".
+ * across launches. Exported so tests can match "any greeting". This is the
+ * English source; `heroGreeting(index)` renders the entry in the interface
+ * language.
  */
 export const HERO_GREETINGS = [
   "What can Clovy do for you?",
@@ -184,9 +227,17 @@ export const HERO_GREETINGS = [
   "What can Clovy take off your plate?",
 ] as const;
 
+const HERO_GREETING_KEYS: readonly MessageKey[] = [
+  "agent.hero.greeting1",
+  "agent.hero.greeting2",
+  "agent.hero.greeting3",
+  "agent.hero.greeting4",
+];
+
 export const HERO_GREETING_INDEX_KEY = "clovy:agent:hero-greeting";
 
-export function advanceHeroGreeting(): string {
+/** Advance the per-visit rotation and return the pool index to show. */
+export function advanceHeroGreetingIndex(): number {
   try {
     const index =
       Math.abs(
@@ -196,11 +247,16 @@ export function advanceHeroGreeting(): string {
       HERO_GREETING_INDEX_KEY,
       String((index + 1) % HERO_GREETINGS.length),
     );
-    return HERO_GREETINGS[index];
+    return index;
   } catch {
     // Storage unavailable: any greeting beats none.
-    return HERO_GREETINGS[Math.floor(Math.random() * HERO_GREETINGS.length)];
+    return Math.floor(Math.random() * HERO_GREETINGS.length);
   }
+}
+
+/** The greeting at `index` in the current interface language. */
+export function heroGreeting(index: number): string {
+  return t(HERO_GREETING_KEYS[index % HERO_GREETING_KEYS.length]);
 }
 
 // Three per hand so the row never wraps — a row-count jump mid-rotation would
@@ -210,18 +266,6 @@ export const HERO_SHORTCUT_COUNT = 3;
 // the deck advances (300ms fade + 2 × 90ms stagger, see .agent-hero-chip).
 export const HERO_ROTATE_MS = 8000;
 export const HERO_CHIP_SWAP_MS = 500;
-
-// Fisher–Yates with the swap target mirrored (j = i − rand) so a rand() of 0
-// is the identity permutation: tests that mock Math.random get the curated
-// leading window, real sessions get a fresh shuffle every visit.
-export function shuffleAgentShortcuts(): AgentShortcut[] {
-  const pool = [...AGENT_SHORTCUTS];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = i - Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-  return pool;
-}
 
 export {
   AGENT_DELETE_SESSION_EVENT,

@@ -40,3 +40,7 @@ land away from the process that created the attempt.
   and let clients reconnect afterward.
 - Production promotion requires a single-replica configuration, capacity
   canaries, alerting, and an explicit scale-out gate.
+
+## Superada pela change desvincular-servicos-open-software
+
+Neste fork o app desktop não tem mais o companheiro (pareamento, transporte, aprovações remotas do Computer Use e a aba "Linked devices" foram removidos em 2026-10-21). O relay do Clovy API e os crates `crates/clovy-companion-*`/`june-companion-*` ainda existem e saem numa change futura.

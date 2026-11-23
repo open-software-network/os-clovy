@@ -3,12 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 live=false
+adhoc=false
 target=""
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --live)
       live=true
+      shift
+      ;;
+    --adhoc)
+      adhoc=true
       shift
       ;;
     --target)
@@ -28,7 +33,7 @@ while [[ "$#" -gt 0 ]]; do
       shift
       ;;
     *)
-      echo "Usage: $0 [--live] [--target <rust-target>]" >&2
+      echo "Usage: $0 [--live] [--adhoc] [--target <rust-target>]" >&2
       exit 2
       ;;
   esac
@@ -53,9 +58,15 @@ if [[ "${#apps[@]}" -ne 1 ]]; then
   exit 1
 fi
 
-helper="${apps[0]}/Contents/Resources/native/bin/June Computer Use Driver.app"
-host="${apps[0]}/Contents/MacOS/os-june"
-args=(--bundle "$helper" --host "$host" --require-developer-id)
+helper="${apps[0]}/Contents/Resources/native/bin/Clovy Computer Use Driver.app"
+host="${apps[0]}/Contents/MacOS/clovy"
+args=(--bundle "$helper" --host "$host")
+# An ad hoc release (no Apple identity) has no Developer ID to require.
+if [[ "$adhoc" == true ]]; then
+  args+=(--require-release-profile)
+else
+  args+=(--require-developer-id)
+fi
 if [[ "$live" == true ]]; then
   args+=(--live)
 fi

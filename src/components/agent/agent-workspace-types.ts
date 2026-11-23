@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import type { FundingTier, TextFundingNoticeContext } from "../account/FundingNotice";
 import type { AgentProjectContext } from "../../lib/agent-project-context";
 import type { AgentSessionDto } from "../../lib/agent-runtime-contract";
 /** Where the session was opened from — rendered as the leading crumbs in the
@@ -15,14 +14,10 @@ export type AgentWorkspaceProps = {
   initialSessionId?: string;
   /** Persistent relationship-level conversation, distinct from focused sessions. */
   homeMode?: boolean;
-  /** Best-effort account display name used only for Home's greeting. */
-  homeUserDisplayName?: string;
   onHomeSessionCreated?: (storedSessionId: string) => void;
   onOpenHomeTaskSession?: (storedSessionId: string, title: string) => void;
   origin?: AgentWorkspaceOrigin;
   onSessionSelected?: (session: AgentSessionDto | undefined) => void;
-  onTopUp?: () => void | Promise<void>;
-  topUpLabel?: string;
   /** Whether the active session is filed in a project — drives the session
    * bar menu's project item label (App owns the folder state). */
   sessionInProject?: boolean;
@@ -36,14 +31,6 @@ export type AgentWorkspaceProps = {
   /** Opens the change-project dialog (which also owns removal) for the given
    * stored session id. */
   onMoveSessionToProject?: (sessionId: string) => void;
-  creditActionsDisabledReason?: string;
-  /** App owns the account and billing action; the composer owns the active
-   * session model and picker. This typed boundary joins them without guessing
-   * from the app-wide setting. */
-  renderFundingNotice?: (context: TextFundingNoticeContext) => ReactNode;
-  /** The user's current plan; the in-transcript stopped-turn credits card
-   * leads with its tier card. */
-  fundingTier?: FundingTier;
   testOnlySlashCommandEntriesRef?: {
     current: {
       runImageSlashCommand: (argument: string, commandText: string) => Promise<void>;

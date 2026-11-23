@@ -1,70 +1,136 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  cleanStagedComputerUseBundles,
-  computerUseBundleIdentifier,
-  resetComputerUseDevGrants,
-} from "./computer-use-dev.mjs";
 import { devAppIdentityForBranch } from "./dev-app-identity.mjs";
 import { chooseDevPort } from "./dev-ports.mjs";
+import {
+  DEV_SIGNING_IDENTITY_ENV,
+  DevSigningIdentityError,
+  resolveDevSigningIdentity,
+} from "./dev-signing-identity.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(SCRIPT_DIR, "..");
+const developerDir =
+  process.platform === "darwin" && existsSync("/Applications/Xcode.app/Contents/Developer")
+    ? "/Applications/Xcode.app/Contents/Developer"
+    : process.env.DEVELOPER_DIR;
 const branch = spawnSync("git", ["branch", "--show-current"], {
   cwd: ROOT_DIR,
   encoding: "utf8",
 });
-const devAppIdentity = devAppIdentityForBranch(branch.status === 0 ? branch.stdout : "");
+const defaultIdentity = devAppIdentityForBranch("");
+const devAppIdentity = devAppIdentityForBranch(branch.status === 0 ? branch.stdout : "", {
+  identifierOverride: process.env.CLOVY_DEV_APP_IDENTIFIER,
+});
 
-if (devAppIdentity.productName !== "Clovy") {
+if (devAppIdentity.identifier !== defaultIdentity.identifier) {
   console.error(
     `Using development app identity ${devAppIdentity.productName} (${devAppIdentity.identifier}).`,
   );
 }
 
+// macOS keeps the grants of the dev app bundle and its helpers across restarts
+// and rebuilds only while every build is signed by the same certificate
+// (docs/development.md). Resolve it once and hand the same SHA-1 to the
+// Computer use helper, build.rs, and the runner that signs the app bundle.
+let devSigningIdentity;
+let windowsDevRunner;
 if (process.platform === "darwin") {
-  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
+  try {
+    devSigningIdentity = resolveDevSigningIdentity().identity;
+  } catch (error) {
+    if (!(error instanceof DevSigningIdentityError)) throw error;
+    console.error(error.message);
+    process.exit(1);
+  }
+
+  // Cargo validates bundled resources while preparing the Computer use driver.
+  // The Swift helper must exist before that first Cargo invocation on a fresh checkout.
+  const localPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-local-transcriber.mjs")],
+    {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+        CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+        [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
+      },
+      stdio: "inherit",
+    },
+  );
+  if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
+
+  const browserPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-agent-browser.mjs")],
+    {
+      cwd: ROOT_DIR,
+      env: { ...process.env, [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity },
+      stdio: "inherit",
+    },
+  );
+  if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
+
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
     cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+      CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+      [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
+    },
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+}
 
-  const pin = JSON.parse(
-    readFileSync(resolve(ROOT_DIR, "src-tauri", "cua-driver-pin.json"), "utf8"),
+if (process.platform !== "darwin") {
+  const browserPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-agent-browser.mjs")],
+    { cwd: ROOT_DIR, stdio: "inherit" },
   );
-  const helperBundleIdentifier = computerUseBundleIdentifier({
-    baseIdentifier: pin.bundleIdentifier,
-    profile: "debug",
-    worktreeRoot: ROOT_DIR,
+  if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
+}
+
+if (process.platform === "win32") {
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
+    cwd: ROOT_DIR,
+    env: { ...process.env, CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier },
+    stdio: "inherit",
   });
-  const targetDir = process.env.CARGO_TARGET_DIR
-    ? resolve(ROOT_DIR, process.env.CARGO_TARGET_DIR)
-    : resolve(ROOT_DIR, "src-tauri", "target");
-  const removed = cleanStagedComputerUseBundles({
-    worktreeRoot: ROOT_DIR,
-    bundleName: pin.bundleName,
-    targetDir,
-  });
-  const reset = resetComputerUseDevGrants({
-    bundlePath: resolve(ROOT_DIR, ".tauri-helper", pin.bundleName),
-    helperBundleIdentifier,
-    appBundleIdentifier: devAppIdentity.identifier,
-  });
-  const tccSummary = reset
-    .map((r) =>
-      r.status === "reset"
-        ? `reset ${r.service} for ${r.bundleIdentifier}`
-        : `deferred ${r.service} for ${r.bundleIdentifier} (bundle not yet registered with LaunchServices)`,
-    )
-    .join("; ");
-  console.error(
-    `Computer use TCC: ${tccSummary}; removed ${removed.length} stale staged bundle${removed.length === 1 ? "" : "s"}.`,
+  if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+  const runnerDirectory = resolve(ROOT_DIR, ".tauri-helper");
+  mkdirSync(runnerDirectory, { recursive: true });
+  windowsDevRunner = resolve(runnerDirectory, "windows-dev-runner.exe");
+  const builtRunner = spawnSync(
+    "rustc",
+    [
+      "--edition=2021",
+      resolve(ROOT_DIR, "src-tauri/native/windows-dev-runner/main.rs"),
+      "-C",
+      "opt-level=1",
+      "-o",
+      windowsDevRunner,
+    ],
+    {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        CLOVY_WINDOWS_DEV_NODE: process.execPath,
+        CLOVY_WINDOWS_DEV_SCRIPT: resolve(SCRIPT_DIR, "cargo-windows-dev-runner.mjs"),
+      },
+      stdio: "inherit",
+    },
   );
+  if (builtRunner.status !== 0) process.exit(builtRunner.status ?? 1);
 }
 
 // A port is "free" when a connection is refused. Mirrors the probe in
@@ -92,15 +158,6 @@ async function resolveFrontendPort() {
     name: "Vite",
     explicitValue: process.env.VITE_PORT,
     base: 1421,
-    portIsFree,
-  });
-}
-
-async function resolveApiPort() {
-  return chooseDevPort({
-    name: "Clovy API",
-    explicitValue: process.env.CLOVY_API_PORT ?? process.env.JUNE_API_PORT,
-    base: 8080,
     portIsFree,
   });
 }
@@ -133,16 +190,6 @@ if (config && !hasConfigOverride) {
 }
 
 const frontendPort = await resolveFrontendPort();
-const startsLocalApi =
-  (process.env.CLOVY_DEV_SKIP_LOCAL_API ?? process.env.JUNE_DEV_SKIP_LOCAL_API) !== "1";
-const apiPort = startsLocalApi ? await resolveApiPort() : undefined;
-if (apiPort !== undefined) {
-  console.error(`Using an isolated Clovy API on http://127.0.0.1:${apiPort}.`);
-}
-const developerDir =
-  process.platform === "darwin" && existsSync("/Applications/Xcode.app/Contents/Developer")
-    ? "/Applications/Xcode.app/Contents/Developer"
-    : process.env.DEVELOPER_DIR;
 // Write a tiny config overlay file so Windows shell invocation does not have to
 // preserve inline JSON quoting for `--config`.
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -152,7 +199,10 @@ writeFileSync(
   JSON.stringify({
     productName: devAppIdentity.productName,
     identifier: devAppIdentity.identifier,
-    build: { devUrl: `http://127.0.0.1:${frontendPort}` },
+    build: {
+      devUrl: `http://127.0.0.1:${frontendPort}`,
+      ...(windowsDevRunner ? { runner: windowsDevRunner } : {}),
+    },
   }),
 );
 // Merge a devUrl override last so it wins over the file configs, pointing the
@@ -164,15 +214,11 @@ const child = spawn(tauri.command, [...tauri.args, "dev", ...tauriArgs], {
   env: {
     ...process.env,
     VITE_PORT: String(frontendPort),
-    ...(apiPort === undefined
-      ? {}
-      : {
-          CLOVY_API_PORT: String(apiPort),
-          CLOVY_API_URL: `http://127.0.0.1:${apiPort}`,
-          CLOVY__SERVER__PORT: String(apiPort),
-        }),
     ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
     OS_CLOVY_DEV_APP_NAME: devAppIdentity.productName,
+    OS_CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+    CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
+    ...(devSigningIdentity ? { [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity } : {}),
     ...(replayOnboarding ? { VITE_CLOVY_REPLAY_ONBOARDING: "1" } : {}),
   },
   shell: false,

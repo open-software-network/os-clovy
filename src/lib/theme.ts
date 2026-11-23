@@ -18,7 +18,7 @@ export function getStoredTheme(): ThemePreference {
   } catch {
     // localStorage can throw in sandboxed contexts.
   }
-  return "system";
+  return "dark";
 }
 
 export function setStoredTheme(theme: ThemePreference) {

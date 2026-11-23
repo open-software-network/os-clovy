@@ -11,6 +11,7 @@
 // storage key and the id->multiplier map in sync with that bootstrap.
 
 import { useSyncExternalStore } from "react";
+import { type MessageKey, t } from "../i18n/translate";
 import { isMacLikePlatform } from "./platform";
 
 export type FontScaleId = "default" | "large" | "larger";
@@ -23,10 +24,20 @@ export const FONT_SCALE_PRESETS: {
   label: string;
   value: number;
 }[] = [
-  { id: "default", label: "Default", value: 1 },
-  { id: "large", label: "Large", value: 1.1 },
-  { id: "larger", label: "Larger", value: 1.2 },
+  preset("default", "lib.fontScale.default", 1),
+  preset("large", "lib.fontScale.large", 1.1),
+  preset("larger", "lib.fontScale.larger", 1.2),
 ];
+
+function preset(id: FontScaleId, key: MessageKey, value: number) {
+  return {
+    id,
+    get label() {
+      return t(key);
+    },
+    value,
+  };
+}
 
 const STORAGE_KEY = "os-clovy:font-scale";
 export const FONT_SCALE_CHANGED_EVENT = "clovy://font-scale-change";

@@ -21,6 +21,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { type MessageKey, t } from "../i18n/translate";
 
 export type BrandId = "rose" | "clay" | "sage" | "ocean" | "plum";
 
@@ -30,12 +31,23 @@ export const BRAND_PRESETS: {
   value: string;
   wash: string;
 }[] = [
-  { id: "sage", label: "Sage", value: "#3f812f", wash: "#5a7c56" },
-  { id: "clay", label: "Clay", value: "#b5551f", wash: "#976851" },
-  { id: "rose", label: "Rose", value: "#a5655c", wash: "#9e6961" },
-  { id: "ocean", label: "Ocean", value: "#3d7b9a", wash: "#467a95" },
-  { id: "plum", label: "Plum", value: "#965d84", wash: "#8f6380" },
+  brandPreset("sage", "lib.brand.sage", "#3f812f", "#5a7c56"),
+  brandPreset("clay", "lib.brand.clay", "#b5551f", "#976851"),
+  brandPreset("rose", "lib.brand.rose", "#a5655c", "#9e6961"),
+  brandPreset("ocean", "lib.brand.ocean", "#3d7b9a", "#467a95"),
+  brandPreset("plum", "lib.brand.plum", "#965d84", "#8f6380"),
 ];
+
+function brandPreset(id: BrandId, key: MessageKey, value: string, wash: string) {
+  return {
+    id,
+    get label() {
+      return t(key);
+    },
+    value,
+    wash,
+  };
+}
 
 const STORAGE_KEY = "os-clovy:brand";
 export const DEFAULT_BRAND: BrandId = "sage";

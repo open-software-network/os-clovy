@@ -18,8 +18,11 @@ use uuid::Uuid;
 
 use crate::note_audio_export::{NoteAudioExportSelection, NoteAudioExportSource};
 
-const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
+pub(crate) const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
 const NOTE_PREVIEW_CHAR_LIMIT: usize = 140;
+/// For one session/source, source turns supersede its aggregate; legacy rows
+/// without a session remain independent records.
+pub(crate) const AUTHORITATIVE_TRANSCRIPT: &str = "(t.recording_session_id IS NULL OR t.turn_index IS NOT NULL OR NOT EXISTS (SELECT 1 FROM transcripts turn WHERE turn.note_id = t.note_id AND turn.recording_session_id = t.recording_session_id AND turn.source IS t.source AND turn.turn_index IS NOT NULL))";
 const LIST_NOTES_CURSOR_VERSION: u8 = 1;
 const LIST_NOTES_CURSOR_MAX_ENCODED_LEN: usize = 1_024;
 
@@ -29,13 +32,52 @@ struct ListNotesCursor {
     created_at: String,
     rowid: i64,
 }
-const COMPANION_OPERATION_RETENTION_DAYS: i64 = 7;
-const MAX_COMPANION_OPERATIONS_PER_DEVICE: i64 = 1_024;
-const MAX_PENDING_COMPANION_OPERATIONS_PER_DEVICE: i64 = 128;
+
+type VideoRecoveryLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+// File repair/rename and its database transition are one operation per session,
+// including requests from separate Repositories handles over the same database.
+fn video_recovery_lock(session_id: &str) -> VideoRecoveryLock {
+    type Locks = std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<Locks>> = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(session_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id.to_owned(), std::sync::Arc::downgrade(&lock));
+    lock
+}
 
 #[derive(Clone)]
 pub struct Repositories {
     pub pool: SqlitePool,
+    #[cfg(test)]
+    memory_write_observer: Option<MemoryWriteObserver>,
+}
+
+#[cfg(test)]
+type MemoryWriteObserver = std::sync::Arc<
+    dyn Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryWriteBoundary {
+    BeforeDeleteTransaction,
+    BeforeDeleteCommit,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoteTranscriptionChunk {
+    pub text: String,
+    pub language: Option<String>,
+    /// The provider found no speech in this chunk.
+    pub no_speech: bool,
 }
 
 pub struct PendingDictationHistoryItem {
@@ -56,30 +98,6 @@ impl PendingDictationHistoryItem {
     pub async fn rollback(self) -> Result<(), sqlx::error::Error> {
         self.transaction.rollback().await
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompanionDeviceRecord {
-    pub id: String,
-    pub display_name: String,
-    pub public_key: Vec<u8>,
-    pub linked_at: String,
-    pub last_seen_at: Option<String>,
-    pub revoked_at: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct P3aCounterState {
-    pub raw_value: u64,
-    pub reported_value: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct P3aPendingReport {
-    pub question_id: String,
-    pub epoch: String,
-    pub raw_value: u64,
-    pub reported_value: u64,
 }
 
 /// Non-secret connector account index row. Tokens are NEVER stored here;
@@ -150,28 +168,6 @@ pub struct ConnectorTriggerRecord {
     pub created_at: String,
 }
 
-/// Locally retained content key for a private share (JUN-308). The content
-/// key must stay on the owner's device so later invites can wrap the same key
-/// without re-encrypting; it never leaves the device except wrapped inside
-/// per-recipient envelopes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShareKeyRecord {
-    pub share_id: String,
-    /// "note" | "session".
-    pub item_kind: String,
-    pub item_id: String,
-    pub content_key: Vec<u8>,
-}
-
-/// Locally retained invite key so "copy link" keeps working across app
-/// restarts (invite keys are not re-derivable from anything the server has).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShareInviteKeyRecord {
-    pub invite_id: String,
-    pub share_id: String,
-    pub invite_key: Vec<u8>,
-}
-
 /// Per-job, per-provider autonomy grant. Minted when a routine is set to
 /// `autonomous`: the bridge registers a per-job auto MCP server carrying the
 /// `token` in its env, and the provider proxy authorizes a tool call by
@@ -229,7 +225,30 @@ pub struct BrowserOutcomeCounts {
 
 impl Repositories {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            memory_write_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_memory_writes(
+        mut self,
+        observer: impl Fn(MemoryWriteBoundary) -> futures_util::future::BoxFuture<'static, ()>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.memory_write_observer = Some(std::sync::Arc::new(observer));
+        self
+    }
+
+    #[cfg(test)]
+    async fn memory_write_boundary(&self, boundary: MemoryWriteBoundary) {
+        if let Some(observer) = &self.memory_write_observer {
+            observer(boundary).await;
+        }
     }
 
     pub async fn declare_browser_action(
@@ -251,55 +270,6 @@ impl Repositories {
         .bind(session_id)
         .bind(outcome_class)
         .bind(timestamp())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn upsert_companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-        display_name: &str,
-        public_key: &[u8],
-    ) -> Result<CompanionDeviceRecord, sqlx::error::Error> {
-        let now = timestamp();
-        query(
-            "INSERT INTO companion_devices (account_user_id, id, display_name, public_key, linked_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-               account_user_id = excluded.account_user_id,
-               display_name = excluded.display_name,
-               public_key = excluded.public_key,
-               revoked_at = NULL
-             WHERE companion_devices.account_user_id = excluded.account_user_id
-                OR companion_devices.account_user_id = ''",
-        )
-        .bind(account_user_id)
-        .bind(id)
-        .bind(display_name)
-        .bind(public_key)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        let device = self
-            .companion_device(account_user_id, id)
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)?;
-        self.remember_companion_account(account_user_id).await?;
-        Ok(device)
-    }
-
-    pub async fn remember_companion_account(
-        &self,
-        account_user_id: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "INSERT INTO companion_account_state (singleton, account_user_id)
-             VALUES (1, ?)
-             ON CONFLICT(singleton) DO UPDATE SET account_user_id = excluded.account_user_id",
-        )
-        .bind(account_user_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -457,442 +427,6 @@ impl Repositories {
             expired: nonnegative_u64(row.get("expired")),
             cancelled_by_task_end: nonnegative_u64(row.get("cancelled_by_task_end")),
         })
-    }
-
-    pub async fn companion_account_user_id(&self) -> Result<Option<String>, sqlx::error::Error> {
-        query("SELECT account_user_id FROM companion_account_state WHERE singleton = 1")
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|row| row.try_get("account_user_id"))
-            .transpose()
-    }
-
-    pub async fn companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-    ) -> Result<Option<CompanionDeviceRecord>, sqlx::error::Error> {
-        let row = query(
-            "SELECT id, display_name, public_key, linked_at, last_seen_at, revoked_at
-             FROM companion_devices WHERE account_user_id = ? AND id = ?",
-        )
-        .bind(account_user_id)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(companion_device_from_row))
-    }
-
-    pub async fn list_companion_devices(
-        &self,
-        account_user_id: &str,
-    ) -> Result<Vec<CompanionDeviceRecord>, sqlx::error::Error> {
-        let rows = query(
-            "SELECT id, display_name, public_key, linked_at, last_seen_at, revoked_at
-             FROM companion_devices
-             WHERE account_user_id = ?
-             ORDER BY linked_at DESC",
-        )
-        .bind(account_user_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(companion_device_from_row).collect())
-    }
-
-    pub async fn rename_companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-        display_name: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "UPDATE companion_devices SET display_name = ?
-             WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL",
-        )
-        .bind(display_name)
-        .bind(account_user_id)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn revoke_companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        query(
-            "UPDATE companion_devices SET revoked_at = ?
-             WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL",
-        )
-        .bind(timestamp())
-        .bind(account_user_id)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        query(
-            "DELETE FROM companion_operations
-             WHERE device_id IN (
-               SELECT id FROM companion_devices WHERE account_user_id = ? AND id = ?
-             )",
-        )
-        .bind(account_user_id)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn revoke_companion_devices_for_account(
-        &self,
-        account_user_id: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        query(
-            "UPDATE companion_devices
-             SET revoked_at = ?
-             WHERE account_user_id = ? AND revoked_at IS NULL",
-        )
-        .bind(timestamp())
-        .bind(account_user_id)
-        .execute(&mut *transaction)
-        .await?;
-        query(
-            "DELETE FROM companion_operations
-             WHERE device_id IN (
-               SELECT id FROM companion_devices WHERE account_user_id = ?
-             )",
-        )
-        .bind(account_user_id)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn delete_companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query("DELETE FROM companion_devices WHERE account_user_id = ? AND id = ?")
-            .bind(account_user_id)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn touch_companion_device(
-        &self,
-        account_user_id: &str,
-        id: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "UPDATE companion_devices SET last_seen_at = ?
-             WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL",
-        )
-        .bind(timestamp())
-        .bind(account_user_id)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn record_companion_computer_use_approval_decision(
-        &self,
-        device_id: &str,
-        request_id: &str,
-        stored_session_id: &str,
-        decision: &str,
-        recorded_at: &str,
-    ) -> Result<bool, sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        let inserted = Self::record_companion_computer_use_approval_decision_in_transaction(
-            &mut transaction,
-            device_id,
-            request_id,
-            stored_session_id,
-            decision,
-            recorded_at,
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(inserted)
-    }
-
-    pub async fn record_companion_computer_use_approval_decision_in_transaction(
-        transaction: &mut sqlx::transaction::Transaction<'_, Sqlite>,
-        device_id: &str,
-        request_id: &str,
-        stored_session_id: &str,
-        decision: &str,
-        recorded_at: &str,
-    ) -> Result<bool, sqlx::error::Error> {
-        Ok(query(
-            "INSERT OR IGNORE INTO companion_computer_use_approval_audit (
-               id, device_id, request_id, stored_session_id, decision, recorded_at
-             ) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(device_id)
-        .bind(request_id)
-        .bind(stored_session_id)
-        .bind(decision)
-        .bind(recorded_at)
-        .execute(&mut **transaction)
-        .await?
-        .rows_affected()
-            == 1)
-    }
-
-    pub async fn companion_operation(
-        &self,
-        account_user_id: &str,
-        device_id: &str,
-        operation_id: &str,
-    ) -> Result<Option<Vec<u8>>, sqlx::error::Error> {
-        let row = query(
-            "SELECT operations.response
-             FROM companion_operations AS operations
-             JOIN companion_devices AS devices ON devices.id = operations.device_id
-             WHERE devices.account_user_id = ?
-               AND devices.revoked_at IS NULL
-               AND operations.device_id = ?
-               AND operations.operation_id = ?",
-        )
-        .bind(account_user_id)
-        .bind(device_id)
-        .bind(operation_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| row.try_get("response")).transpose()
-    }
-
-    pub async fn remember_companion_operation(
-        &self,
-        account_user_id: &str,
-        device_id: &str,
-        operation_id: &str,
-        response: &[u8],
-    ) -> Result<(), sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        query(
-            "INSERT OR IGNORE INTO companion_operations
-             (device_id, operation_id, response, operation_state, created_at)
-             SELECT ?, ?, ?, 'completed', ?
-             WHERE EXISTS (
-               SELECT 1 FROM companion_devices
-               WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL
-             )",
-        )
-        .bind(device_id)
-        .bind(operation_id)
-        .bind(response)
-        .bind(timestamp())
-        .bind(account_user_id)
-        .bind(device_id)
-        .execute(&mut *transaction)
-        .await?;
-        prune_companion_operations(&mut transaction, device_id).await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn reserve_companion_operation(
-        &self,
-        account_user_id: &str,
-        device_id: &str,
-        operation_id: &str,
-        pending_response: &[u8],
-    ) -> Result<bool, sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        let inserted = query(
-            "INSERT OR IGNORE INTO companion_operations
-             (device_id, operation_id, response, operation_state, created_at)
-             SELECT ?, ?, ?, 'pending', ?
-             WHERE EXISTS (
-               SELECT 1 FROM companion_devices
-               WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL
-             )
-               AND (
-                 SELECT COUNT(*) FROM companion_operations
-                 WHERE device_id = ? AND operation_state = 'pending'
-               ) < ?",
-        )
-        .bind(device_id)
-        .bind(operation_id)
-        .bind(pending_response)
-        .bind(timestamp())
-        .bind(account_user_id)
-        .bind(device_id)
-        .bind(device_id)
-        .bind(MAX_PENDING_COMPANION_OPERATIONS_PER_DEVICE)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected()
-            == 1;
-        prune_companion_operations(&mut transaction, device_id).await?;
-        transaction.commit().await?;
-        Ok(inserted)
-    }
-
-    pub async fn complete_companion_operation(
-        &self,
-        account_user_id: &str,
-        device_id: &str,
-        operation_id: &str,
-        response: &[u8],
-    ) -> Result<(), sqlx::error::Error> {
-        let mut transaction = self.pool.begin().await?;
-        query(
-            "INSERT INTO companion_operations
-             (device_id, operation_id, response, operation_state, created_at)
-             SELECT ?, ?, ?, 'completed', ?
-             WHERE EXISTS (
-               SELECT 1 FROM companion_devices
-               WHERE account_user_id = ? AND id = ? AND revoked_at IS NULL
-             )
-             ON CONFLICT(device_id, operation_id) DO UPDATE SET
-               response = excluded.response,
-               operation_state = 'completed'",
-        )
-        .bind(device_id)
-        .bind(operation_id)
-        .bind(response)
-        .bind(timestamp())
-        .bind(account_user_id)
-        .bind(device_id)
-        .execute(&mut *transaction)
-        .await?;
-        prune_companion_operations(&mut transaction, device_id).await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn increment_p3a_counter(
-        &self,
-        question_id: &str,
-        epoch: &str,
-        amount: u64,
-    ) -> Result<P3aCounterState, sqlx::error::Error> {
-        let now = timestamp();
-        query(
-            "INSERT INTO p3a_counters (question_id, epoch, raw_value, updated_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(question_id, epoch) DO UPDATE SET
-               raw_value = raw_value + excluded.raw_value,
-               updated_at = excluded.updated_at",
-        )
-        .bind(question_id)
-        .bind(epoch)
-        .bind(i64::try_from(amount).unwrap_or(i64::MAX))
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        self.p3a_counter_state(question_id, epoch)
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)
-    }
-
-    pub async fn mark_p3a_events_reported(
-        &self,
-        question_id: &str,
-        epoch: &str,
-        reported_value: u64,
-    ) -> Result<(), sqlx::error::Error> {
-        let now = timestamp();
-        query(
-            "UPDATE p3a_counters
-             SET reported_value = CASE
-                   WHEN reported_value < ? THEN ?
-                   ELSE reported_value
-                 END,
-                 reported_at = ?,
-                 updated_at = ?
-             WHERE question_id = ? AND epoch = ?",
-        )
-        .bind(i64::try_from(reported_value).unwrap_or(i64::MAX))
-        .bind(i64::try_from(reported_value).unwrap_or(i64::MAX))
-        .bind(&now)
-        .bind(&now)
-        .bind(question_id)
-        .bind(epoch)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn clear_p3a_counters(&self) -> Result<(), sqlx::error::Error> {
-        query("DELETE FROM p3a_counters")
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn p3a_counter_value(
-        &self,
-        question_id: &str,
-        epoch: &str,
-    ) -> Result<Option<i64>, sqlx::error::Error> {
-        let row = query("SELECT raw_value FROM p3a_counters WHERE question_id = ? AND epoch = ?")
-            .bind(question_id)
-            .bind(epoch)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|row| row.get("raw_value")))
-    }
-
-    pub async fn p3a_counter_state(
-        &self,
-        question_id: &str,
-        epoch: &str,
-    ) -> Result<Option<P3aCounterState>, sqlx::error::Error> {
-        let row = query(
-            "SELECT raw_value, reported_value FROM p3a_counters WHERE question_id = ? AND epoch = ?",
-        )
-        .bind(question_id)
-        .bind(epoch)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| {
-            let raw_value = row.get::<i64, _>("raw_value").max(0) as u64;
-            let reported_value = row.get::<i64, _>("reported_value").max(0) as u64;
-            P3aCounterState {
-                raw_value,
-                reported_value,
-            }
-        }))
-    }
-
-    pub async fn unreported_p3a_counters(
-        &self,
-    ) -> Result<Vec<P3aPendingReport>, sqlx::error::Error> {
-        let rows = query(
-            "SELECT question_id, epoch, raw_value, reported_value
-             FROM p3a_counters
-             WHERE raw_value > reported_value
-             ORDER BY epoch ASC, question_id ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| {
-                let raw_value = row.get::<i64, _>("raw_value").max(0) as u64;
-                let reported_value = row.get::<i64, _>("reported_value").max(0) as u64;
-                P3aPendingReport {
-                    question_id: row.get("question_id"),
-                    epoch: row.get("epoch"),
-                    raw_value,
-                    reported_value,
-                }
-            })
-            .collect())
     }
 
     // --- Private connectors (Google, Linear) --------------------------------
@@ -1845,14 +1379,6 @@ impl Repositories {
         Ok(folder_from_row(row))
     }
 
-    pub async fn folder_exists(&self, folder_id: &str) -> Result<bool, sqlx::error::Error> {
-        let row = query("SELECT 1 FROM folders WHERE id = ? AND deleted_at IS NULL")
-            .bind(folder_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.is_some())
-    }
-
     pub async fn set_folder_instructions(
         &self,
         folder_id: &str,
@@ -2001,6 +1527,27 @@ impl Repositories {
         content: &str,
         source: &str,
     ) -> Result<MemoryDto, AppError> {
+        self.create_memory_authorized(profile, folder_id, content, source, None)
+            .await
+    }
+
+    pub(crate) async fn create_memory_authorized(
+        &self,
+        profile: &str,
+        folder_id: Option<&str>,
+        content: &str,
+        source: &str,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<MemoryDto, AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+        }
+        if let (Some(id), Some(target)) =
+            (folder_id, authority.and_then(McpMutation::external_target))
+        {
+            check_mcp_project_target(&mut tx, profile, id, target).await?;
+        }
         let now = timestamp();
         let memory = MemoryDto {
             id: Uuid::new_v4().to_string(),
@@ -2032,7 +1579,7 @@ impl Repositories {
             .bind(&memory.updated_at)
             .bind(folder_id)
             .bind(profile)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
         } else {
             query(
@@ -2047,14 +1594,18 @@ impl Repositories {
             .bind(&memory.source)
             .bind(&memory.created_at)
             .bind(&memory.updated_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
         };
         if result.rows_affected() == 0 {
             return Err(self
-                .memory_scope_write_error(profile, folder_id.expect("scoped insert"))
+                .memory_scope_write_error(&mut tx, profile, folder_id.expect("scoped insert"))
                 .await?);
         }
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
+        tx.commit().await?;
         Ok(memory)
     }
 
@@ -2064,6 +1615,24 @@ impl Repositories {
         id: &str,
         content: &str,
     ) -> Result<MemoryDto, AppError> {
+        self.update_memory_authorized(profile, id, content, None)
+            .await
+    }
+
+    pub(crate) async fn update_memory_authorized(
+        &self,
+        profile: &str,
+        id: &str,
+        content: &str,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<MemoryDto, AppError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+            if let Some(target) = authority.external_target() {
+                check_memory_target(&mut tx, profile, id, target).await?;
+            }
+        }
         let result = query(
             "UPDATE memories
              SET content = ?, updated_at = ?
@@ -2085,18 +1654,20 @@ impl Repositories {
         .bind(id)
         .bind(profile)
         .bind(profile)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
             let folder_id = query("SELECT folder_id FROM memories WHERE id = ? AND profile = ?")
                 .bind(id)
                 .bind(profile)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?
                 .get::<Option<String>, _>("folder_id");
             if let Some(folder_id) = folder_id {
-                return Err(self.memory_scope_write_error(profile, &folder_id).await?);
+                return Err(self
+                    .memory_scope_write_error(&mut tx, profile, &folder_id)
+                    .await?);
             }
             return Err(AppError::new("memory_not_found", "Memory was not found."));
         }
@@ -2107,13 +1678,19 @@ impl Repositories {
         )
         .bind(id)
         .bind(profile)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
-        Ok(memory_from_row(row))
+        let memory = memory_from_row(row);
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
+        tx.commit().await?;
+        Ok(memory)
     }
 
     async fn memory_scope_write_error(
         &self,
+        tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
         profile: &str,
         folder_id: &str,
     ) -> Result<AppError, sqlx::error::Error> {
@@ -2124,7 +1701,7 @@ impl Repositories {
         )
         .bind(folder_id)
         .bind(profile)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?
         .map(|row| row.get::<i64, _>("memory_disabled") != 0);
         Ok(if memory_disabled == Some(true) {
@@ -2138,7 +1715,74 @@ impl Repositories {
     }
 
     pub async fn delete_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_memory_inner(profile, id, false, None).await
+    }
+
+    /// Agent deletion honors the project's memory gate at the write boundary.
+    /// Explicit user deletion remains unconditional through `delete_memory`.
+    pub(crate) async fn forget_memory(&self, profile: &str, id: &str) -> Result<(), AppError> {
+        self.delete_memory_inner(profile, id, true, None).await
+    }
+
+    pub(crate) async fn forget_memory_authorized(
+        &self,
+        profile: &str,
+        id: &str,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<(), AppError> {
+        self.delete_memory_inner(profile, id, true, authority).await
+    }
+
+    async fn delete_memory_inner(
+        &self,
+        profile: &str,
+        id: &str,
+        enforce_project_gate: bool,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteTransaction)
+            .await;
+        let mut tx = if enforce_project_gate {
+            // Reserve the writer before reading the project. No concurrent
+            // toggle can commit between this validation and the DELETE.
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+            if let Some(target) = authority.external_target() {
+                check_memory_target(&mut tx, profile, id, target).await?;
+            }
+        }
+        if enforce_project_gate {
+            let row = query(
+                "SELECT m.folder_id, f.id AS project_id, f.memory_disabled
+                FROM memories m LEFT JOIN folders f
+                  ON f.id = m.folder_id AND f.profile = m.profile AND f.deleted_at IS NULL
+                WHERE m.id = ? AND m.profile = ?",
+            )
+            .bind(id)
+            .bind(profile)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?;
+            if row.get::<Option<String>, _>("folder_id").is_some() {
+                if row.get::<Option<String>, _>("project_id").is_none() {
+                    return Err(AppError::new(
+                        "folder_not_found",
+                        "Project was not found or has already been deleted.",
+                    ));
+                }
+                if row.get::<i64, _>("memory_disabled") != 0 {
+                    return Err(AppError::new(
+                        "memory_disabled",
+                        "Memory is disabled for this scope.",
+                    ));
+                }
+            }
+        }
         let result = query("DELETE FROM memories WHERE id = ? AND profile = ?")
             .bind(id)
             .bind(profile)
@@ -2152,6 +1796,12 @@ impl Repositories {
             .bind(timestamp())
             .execute(&mut *tx)
             .await?;
+        #[cfg(test)]
+        self.memory_write_boundary(MemoryWriteBoundary::BeforeDeleteCommit)
+            .await;
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -2163,6 +1813,57 @@ impl Repositories {
     ) -> Result<NoteDto, sqlx::error::Error> {
         let id = Uuid::new_v4().to_string();
         self.create_note_with_id(profile, folder_id, &id).await
+    }
+
+    /// Create a note only if an explicitly requested project is still present
+    /// in the same partition. The write lock covers the check and insertion.
+    pub(crate) async fn create_note_checked(
+        &self,
+        profile: &str,
+        folder_id: Option<&str>,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<NoteDto, AppError> {
+        let id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+        }
+        if let Some(folder_id) = folder_id {
+            if let Some(target) = authority.and_then(McpMutation::external_target) {
+                check_mcp_project_target(&mut tx, profile, folder_id, target).await?;
+            }
+            let claimed = query(
+                "UPDATE folders SET id = id WHERE id = ? AND profile = ? AND deleted_at IS NULL",
+            )
+            .bind(folder_id)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if claimed == 0 {
+                return Err(AppError::new("folder_not_found", "Project was not found."));
+            }
+        }
+        query("INSERT INTO notes (id, title, processing_status, profile, created_at, updated_at) VALUES (?, '', 'draft', ?, ?, ?)")
+            .bind(&id).bind(profile).bind(&now).bind(&now).execute(&mut *tx).await?;
+        if let Some(folder_id) = folder_id {
+            query("INSERT INTO note_folders (note_id, folder_id, assigned_at) VALUES (?, ?, ?)")
+                .bind(&id)
+                .bind(folder_id)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
+        tx.commit().await?;
+        Ok(self.get_note_with_profile(&id, Some(profile)).await?)
     }
 
     pub async fn create_note_with_id(
@@ -2212,18 +1913,7 @@ impl Repositories {
         self.get_note_with_profile(note_id, None).await
     }
 
-    /// Looks up a note only inside the supplied data partition. Companion
-    /// callers use this at dispatch time so a cached id cannot cross a later
-    /// partition switch.
-    pub async fn get_note_in_profile(
-        &self,
-        profile: &str,
-        note_id: &str,
-    ) -> Result<NoteDto, sqlx::error::Error> {
-        self.get_note_with_profile(note_id, Some(profile)).await
-    }
-
-    async fn get_note_with_profile(
+    pub(crate) async fn get_note_with_profile(
         &self,
         note_id: &str,
         profile: Option<&str>,
@@ -2242,6 +1932,8 @@ impl Repositories {
         let row = note_query.build().fetch_one(&self.pool).await?;
         self.hydrate_note_row(note_id, row).await
     }
+
+    const NOTE_VIDEO_ANALYSIS_QUERY: &str = "SELECT video_analysis FROM generation_results WHERE note_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1";
 
     async fn hydrate_note_row(
         &self,
@@ -2281,6 +1973,11 @@ impl Repositories {
             revision: row.get::<i64, _>("revision").try_into().unwrap_or(1),
             duration_ms: None,
             calendar_event: note_calendar_event_from_row(&row),
+            video_analysis: query(Self::NOTE_VIDEO_ANALYSIS_QUERY)
+                .bind(note_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .and_then(|r| r.get("video_analysis")),
             generated_content: row.get("generated_content"),
             edited_content: row.get("edited_content"),
             transcript: self.latest_transcript(note_id).await?,
@@ -2473,10 +2170,6 @@ impl Repositories {
         } else {
             None
         };
-        let item_cursors = items_with_cursors
-            .iter()
-            .map(|(_, cursor)| encode_list_notes_cursor(cursor))
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ListNotesResponse {
             items: items_with_cursors
@@ -2484,7 +2177,6 @@ impl Repositories {
                 .map(|(item, _)| item)
                 .collect(),
             next_cursor,
-            item_cursors,
         })
     }
 
@@ -2572,7 +2264,8 @@ impl Repositories {
         let matches_active_profile = query(
             "SELECT 1
              FROM folders f
-             LEFT JOIN session_profiles sp ON sp.session_id = ?
+             JOIN agent_sessions s ON s.id = ?
+             LEFT JOIN session_profiles sp ON sp.session_id = s.id
              WHERE f.id = ?
                AND f.profile = ?
                AND f.deleted_at IS NULL
@@ -2757,11 +2450,57 @@ impl Repositories {
     }
 
     pub async fn delete_profile_data(&self, profile: &str) -> Result<(), sqlx::error::Error> {
+        self.delete_profile_data_with_artifact_paths(profile)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn delete_profile_data_with_artifact_paths(
+        &self,
+        profile: &str,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
         if profile == "default" {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows = query(
+            "SELECT path
+             FROM (
+               SELECT v.path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION
+               SELECT a.path AS path
+               FROM audio_artifacts a
+               JOIN notes n ON n.id = a.note_id
+               WHERE n.profile = ?
+               UNION
+               SELECT a.partial_path AS path
+               FROM audio_artifacts a
+               JOIN notes n ON n.id = a.note_id
+               WHERE n.profile = ? AND a.partial_path IS NOT NULL
+               UNION
+               SELECT rs.final_path AS path
+               FROM recording_sessions rs
+               JOIN notes n ON n.id = rs.note_id
+               WHERE n.profile = ? AND rs.final_path IS NOT NULL
+               UNION
+               SELECT rs.partial_path AS path
+               FROM recording_sessions rs
+               JOIN notes n ON n.id = rs.note_id
+               WHERE n.profile = ? AND rs.partial_path IS NOT NULL
+             )
+             WHERE path IS NOT NULL AND trim(path) != ''",
+        )
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let artifact_paths = rows.into_iter().map(|row| row.get("path")).collect();
         query("DELETE FROM notes WHERE profile = ?")
             .bind(profile)
             .execute(&mut *transaction)
@@ -2801,7 +2540,7 @@ impl Repositories {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(with_video_capture_metadata(artifact_paths))
     }
 
     pub async fn remove_session_from_folder(
@@ -2882,8 +2621,20 @@ impl Repositories {
         language: Option<String>,
         provider: &str,
     ) -> Result<Option<DictationHistoryItemDto>, sqlx::error::Error> {
+        self.create_dictation_history_item_with_app(profile, text, language, provider, None)
+            .await
+    }
+
+    pub async fn create_dictation_history_item_with_app(
+        &self,
+        profile: &str,
+        text: &str,
+        language: Option<String>,
+        provider: &str,
+        app_bundle_id: Option<&str>,
+    ) -> Result<Option<DictationHistoryItemDto>, sqlx::error::Error> {
         let pending = self
-            .stage_dictation_history_item(profile, text, language, provider)
+            .stage_dictation_history_item_with_app(profile, text, language, provider, app_bundle_id)
             .await?;
         match pending {
             Some(pending) => pending.commit().await.map(Some),
@@ -2898,11 +2649,27 @@ impl Repositories {
         language: Option<String>,
         provider: &str,
     ) -> Result<Option<PendingDictationHistoryItem>, sqlx::error::Error> {
+        self.stage_dictation_history_item_with_app(data_partition, text, language, provider, None)
+            .await
+    }
+
+    pub async fn stage_dictation_history_item_with_app(
+        &self,
+        data_partition: &str,
+        text: &str,
+        language: Option<String>,
+        provider: &str,
+        app_bundle_id: Option<&str>,
+    ) -> Result<Option<PendingDictationHistoryItem>, sqlx::error::Error> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(None);
         }
         let item = DictationHistoryItemDto {
+            app_bundle_id: app_bundle_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned),
             id: Uuid::new_v4().to_string(),
             text: text.to_string(),
             language,
@@ -2911,8 +2678,8 @@ impl Repositories {
         };
         let mut transaction = self.pool.begin().await?;
         query(
-            "INSERT INTO dictation_history (id, text, language, provider, profile, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dictation_history (id, text, language, provider, profile, created_at, app_bundle_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&item.id)
         .bind(&item.text)
@@ -2920,6 +2687,7 @@ impl Repositories {
         .bind(&item.provider)
         .bind(data_partition)
         .bind(&item.created_at)
+        .bind(&item.app_bundle_id)
         .execute(&mut *transaction)
         .await?;
         Ok(Some(PendingDictationHistoryItem { transaction, item }))
@@ -2932,7 +2700,7 @@ impl Repositories {
     ) -> Result<ListDictationHistoryResponse, sqlx::error::Error> {
         self.prune_old_dictation_history().await?;
         let rows = query(
-            "SELECT id, text, language, provider, created_at
+            "SELECT id, text, language, provider, created_at, app_bundle_id
              FROM dictation_history
              WHERE profile = ? AND created_at >= ?
              ORDER BY created_at DESC, rowid DESC
@@ -3090,102 +2858,62 @@ impl Repositories {
         })
     }
 
-    /// Compare-and-swap update for linked devices. A stale writer receives the
-    /// current note in structured error details instead of overwriting edits.
-    pub async fn update_note_cas(
-        &self,
-        note_id: &str,
-        expected_revision: u64,
-        title: Option<String>,
-        edited_content: Option<String>,
-    ) -> Result<NoteDto, AppError> {
-        let current = self.get_note(note_id).await.map_err(AppError::from)?;
-        let next_title = title.unwrap_or(current.title.clone());
-        let next_content = edited_content.or(current.edited_content.clone());
-        let expected_revision = i64::try_from(expected_revision)
-            .map_err(|_| AppError::new("note_revision_invalid", "The note revision is invalid."))?;
-        let result = query(
-            "UPDATE notes
-             SET title = ?, edited_content = ?, updated_at = ?, revision = revision + 1
-             WHERE id = ? AND revision = ?",
-        )
-        .bind(next_title)
-        .bind(next_content)
-        .bind(timestamp())
-        .bind(note_id)
-        .bind(expected_revision)
-        .execute(&self.pool)
-        .await
-        .map_err(AppError::from)?;
-        if result.rows_affected() == 0 {
-            let current = self.get_note(note_id).await.map_err(AppError::from)?;
-            return Err(AppError {
-                code: "note_revision_conflict".to_string(),
-                message: "The note changed on another device.".to_string(),
-                details: serde_json::to_value(current).ok(),
-            });
-        }
-        self.get_note(note_id).await.map_err(AppError::from)
-    }
-
-    /// Partition-scoped compare-and-swap used by companion edits. Both the
-    /// read and the atomic update include the active partition so a replayed
-    /// id cannot mutate a note after the user switches partitions.
-    pub async fn update_note_cas_in_profile(
+    /// Compare and update in one SQLite statement, scoped to the caller's partition.
+    pub(crate) async fn update_note_if_revision(
         &self,
         profile: &str,
         note_id: &str,
-        expected_revision: u64,
-        title: Option<String>,
-        edited_content: Option<String>,
+        expected_revision: i64,
+        title: Option<&str>,
+        content: Option<&str>,
+        authority: Option<McpMutation<'_>>,
     ) -> Result<NoteDto, AppError> {
-        let current = self
-            .get_note_in_profile(profile, note_id)
-            .await
-            .map_err(scoped_note_error)?;
-        let next_title = title.unwrap_or(current.title.clone());
-        let next_content = edited_content.or(current.edited_content.clone());
-        let expected_revision = i64::try_from(expected_revision)
-            .map_err(|_| AppError::new("note_revision_invalid", "The note revision is invalid."))?;
-        let result = query(
-            "UPDATE notes
-             SET title = ?, edited_content = ?, updated_at = ?, revision = revision + 1
-             WHERE id = ? AND revision = ? AND profile = ?",
-        )
-        .bind(next_title)
-        .bind(next_content)
-        .bind(timestamp())
-        .bind(note_id)
-        .bind(expected_revision)
-        .bind(profile)
-        .execute(&self.pool)
-        .await
-        .map_err(AppError::from)?;
-        if result.rows_affected() == 0 {
-            let current = self
-                .get_note_in_profile(profile, note_id)
-                .await
-                .map_err(scoped_note_error)?;
-            return Err(AppError {
-                code: "note_revision_conflict".to_string(),
-                message: "The note changed on another device.".to_string(),
-                details: serde_json::to_value(current).ok(),
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+        }
+        let updated = query("UPDATE notes SET title = COALESCE(?, title), edited_content = COALESCE(?, edited_content), updated_at = ?, revision = revision + 1 WHERE id = ? AND profile = ? AND revision = ?")
+            .bind(title).bind(content).bind(timestamp()).bind(note_id).bind(profile).bind(expected_revision)
+            .execute(&mut *tx).await?.rows_affected();
+        if updated == 0 {
+            let exists: i64 = sqlx::query_scalar::query_scalar(
+                "SELECT COUNT(*) FROM notes WHERE id = ? AND profile = ?",
+            )
+            .bind(note_id)
+            .bind(profile)
+            .fetch_one(&mut *tx)
+            .await?;
+            return Err(if exists == 0 {
+                AppError::new("note_not_found", "Note was not found.")
+            } else {
+                AppError::new(
+                    "note_conflict",
+                    "The note changed; read it again before updating.",
+                )
             });
         }
-        self.get_note_in_profile(profile, note_id)
-            .await
-            .map_err(scoped_note_error)
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
+        tx.commit().await?;
+        Ok(self.get_note_with_profile(note_id, Some(profile)).await?)
     }
 
     pub async fn audio_artifact_paths_for_note(
         &self,
         note_id: &str,
     ) -> Result<Vec<String>, sqlx::error::Error> {
-        let rows = query("SELECT path FROM audio_artifacts WHERE note_id = ?")
-            .bind(note_id)
+        let rows = query("SELECT path FROM audio_artifacts WHERE note_id = ? UNION SELECT partial_path AS path FROM video_artifacts WHERE note_id=? UNION SELECT path FROM video_artifacts WHERE note_id=?")
+            .bind(note_id).bind(note_id).bind(note_id)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
     }
 
     /// Recording files owned by a profile's notes, for the delete-permanently
@@ -3197,6 +2925,9 @@ impl Repositories {
         let rows = query(
             "SELECT path
              FROM (
+               SELECT v.path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION
                SELECT a.path AS path
                FROM audio_artifacts a
                JOIN notes n ON n.id = a.note_id
@@ -3223,9 +2954,13 @@ impl Repositories {
         .bind(profile)
         .bind(profile)
         .bind(profile)
+        .bind(profile)
+        .bind(profile)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
     }
 
     pub(crate) async fn note_audio_export_selection(
@@ -3283,9 +3018,72 @@ impl Repositories {
     }
 
     pub async fn delete_note(&self, note_id: &str) -> Result<(), sqlx::error::Error> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_note_with_artifact_paths(note_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Take the write lock before reading paths so a concurrent video checkpoint
+    /// cannot invalidate the WAL snapshot when the transaction starts deleting.
+    pub async fn delete_note_with_artifact_paths(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let files = note_artifact_paths_for_deletion(&mut tx, note_id).await?;
         delete_note_records(&mut tx, note_id).await?;
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(files))
+    }
+
+    pub(crate) async fn delete_note_in_profile(
+        &self,
+        profile: &str,
+        note_id: &str,
+        authority: Option<McpMutation<'_>>,
+    ) -> Result<Vec<String>, AppError> {
+        let mut tx = if matches!(authority, Some(McpMutation::External(_))) {
+            self.pool.begin_with("BEGIN IMMEDIATE").await?
+        } else {
+            self.pool.begin().await?
+        };
+        if let Some(authority) = authority {
+            authority.guard(&mut tx, profile).await?;
+        }
+        // Acquire the write lock before checking ownership and collecting paths.
+        let claimed = query("UPDATE notes SET id = id WHERE id = ? AND profile = ?")
+            .bind(note_id)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if claimed == 0 {
+            return Err(AppError::new("note_not_found", "Note was not found."));
+        }
+        if let Some(target) = authority.and_then(McpMutation::external_target) {
+            let current = mcp_note_delete_target(&mut tx, profile, note_id).await?;
+            if &current != target {
+                return Err(AppError::new(
+                    "note_conflict",
+                    "The note or its recordings changed after approval was requested.",
+                ));
+            }
+        }
+        let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions WHERE note_id = ? AND status IN ('recording', 'paused')")
+            .bind(note_id).fetch_one(&mut *tx).await?;
+        if active != 0 {
+            return Err(AppError::new(
+                "note_recording_active",
+                "Stop the recording before deleting its note.",
+            ));
+        }
+        let paths = note_artifact_paths_for_deletion(&mut tx, note_id).await?;
+        delete_note_records(&mut tx, note_id).await?;
+        if let Some(authority) = authority {
+            authority.before_commit(profile)?;
+        }
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(paths))
     }
 
     /// Deletes a deterministic meeting-start draft only while it is still the
@@ -3303,12 +3101,8 @@ impl Repositories {
                AND title = ''
                AND COALESCE(generated_content, '') = ''
                AND COALESCE(edited_content, '') = ''
-               AND NOT EXISTS (SELECT 1 FROM note_folders WHERE note_id = ?)
-               AND NOT EXISTS (
-                 SELECT 1 FROM share_keys WHERE item_kind = 'note' AND item_id = ?
-               )",
+               AND NOT EXISTS (SELECT 1 FROM note_folders WHERE note_id = ?)",
         )
-        .bind(note_id)
         .bind(note_id)
         .bind(note_id)
         .execute(&mut *tx)
@@ -3325,11 +3119,23 @@ impl Repositories {
     }
 
     pub async fn delete_notes(&self, note_ids: &[String]) -> Result<(), sqlx::error::Error> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_notes_with_artifact_paths(note_ids)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn delete_notes_with_artifact_paths(
+        &self,
+        note_ids: &[String],
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut files = Vec::new();
         for note_id in note_ids {
+            files.extend(note_artifact_paths_for_deletion(&mut tx, note_id).await?);
             delete_note_records(&mut tx, note_id).await?;
         }
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(files))
     }
 
     pub async fn delete_folder(
@@ -3337,8 +3143,34 @@ impl Repositories {
         folder_id: &str,
         delete_notes: bool,
     ) -> Result<(), sqlx::error::Error> {
+        self.delete_folder_with_artifact_paths(folder_id, delete_notes)
+            .await
+            .map(|_| ())
+    }
+
+    /// Snapshot the exact deleted notes' files in the same transaction; expose paths only after commit.
+    pub async fn delete_folder_with_artifact_paths(
+        &self,
+        folder_id: &str,
+        delete_notes: bool,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
         let now = timestamp();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let mut artifact_paths = Vec::new();
+        if delete_notes {
+            let rows = query("SELECT path FROM (
+                SELECT a.path AS path FROM audio_artifacts a JOIN note_folders nf ON nf.note_id=a.note_id WHERE nf.folder_id=?
+                UNION SELECT a.partial_path AS path FROM audio_artifacts a JOIN note_folders nf ON nf.note_id=a.note_id WHERE nf.folder_id=?
+                UNION SELECT v.path AS path FROM video_artifacts v JOIN note_folders nf ON nf.note_id=v.note_id WHERE nf.folder_id=?
+                UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN note_folders nf ON nf.note_id=v.note_id WHERE nf.folder_id=?
+                UNION SELECT rs.final_path AS path FROM recording_sessions rs JOIN note_folders nf ON nf.note_id=rs.note_id WHERE nf.folder_id=?
+                UNION SELECT rs.partial_path AS path FROM recording_sessions rs JOIN note_folders nf ON nf.note_id=rs.note_id WHERE nf.folder_id=?
+            ) WHERE path IS NOT NULL AND trim(path) != ''")
+                .bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id)
+                .fetch_all(&mut *tx).await?;
+            artifact_paths = rows.into_iter().map(|row| row.get("path")).collect();
+        }
 
         if delete_notes {
             query(
@@ -3424,7 +3256,8 @@ impl Repositories {
             .execute(&mut *tx)
             .await?;
 
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(artifact_paths))
     }
 
     pub async fn set_note_status(
@@ -3446,6 +3279,94 @@ impl Repositories {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("updated_at"))
+    }
+
+    /// A finished chunk of a split saved-audio job, by its chunk key.
+    pub async fn note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+    ) -> Result<Option<NoteTranscriptionChunk>, sqlx::error::Error> {
+        let row = query(
+            "SELECT text, language, no_speech FROM note_transcription_chunks WHERE chunk_key = ?",
+        )
+        .bind(chunk_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| NoteTranscriptionChunk {
+            text: row.get("text"),
+            language: row.get("language"),
+            no_speech: row.get::<i64, _>("no_speech") != 0,
+        }))
+    }
+
+    pub async fn save_note_transcription_chunk(
+        &self,
+        chunk_key: &str,
+        recording_session_id: &str,
+        chunk: &NoteTranscriptionChunk,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
+            "INSERT INTO note_transcription_chunks
+             (chunk_key, recording_session_id, text, language, no_speech, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(chunk_key) DO UPDATE SET
+               text = excluded.text,
+               language = excluded.language,
+               no_speech = excluded.no_speech",
+        )
+        .bind(chunk_key)
+        .bind(recording_session_id)
+        .bind(&chunk.text)
+        .bind(&chunk.language)
+        .bind(i64::from(chunk.no_speech))
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Shows a manual retry at once, in one statement: only a note still
+    /// failed becomes transcribing, so a retry never writes over a note
+    /// another run made ready or is processing.
+    pub async fn mark_failed_note_transcribing(
+        &self,
+        note_id: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, last_error = NULL, updated_at = ?
+             WHERE id = ? AND processing_status = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Takes a note paused by a provider rate limit for its automatic resume,
+    /// in one statement: only while the note still shows that very pause, so
+    /// a Retry that got there first, or a second resume, claims nothing.
+    pub async fn claim_paused_note(
+        &self,
+        note_id: &str,
+        paused_message: &str,
+    ) -> Result<bool, sqlx::error::Error> {
+        let result = query(
+            "UPDATE notes
+             SET processing_status = ?, updated_at = ?
+             WHERE id = ? AND processing_status = ? AND last_error = ?",
+        )
+        .bind(ProcessingStatus::Transcribing.as_db())
+        .bind(timestamp())
+        .bind(note_id)
+        .bind(ProcessingStatus::Failed.as_db())
+        .bind(paused_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn set_note_transcription_warning(
@@ -3869,6 +3790,17 @@ impl Repositories {
         Ok(row.map(|row| RecordingSourceMode::from(row.get::<String, _>("source_mode").as_str())))
     }
 
+    pub async fn recording_session_started_at(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, sqlx::error::Error> {
+        let row = query("SELECT started_at FROM recording_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.get::<String, _>("started_at")))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_recording_session(
         &self,
@@ -4224,19 +4156,6 @@ impl Repositories {
         Ok(artifact)
     }
 
-    pub async fn latest_audio_artifact_path(
-        &self,
-        note_id: &str,
-    ) -> Result<Option<(String, String)>, sqlx::error::Error> {
-        let row = query(
-            "SELECT id, path FROM audio_artifacts WHERE note_id = ? AND status = 'valid' ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(note_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| (row.get("id"), row.get("path"))))
-    }
-
     async fn latest_audio_artifact(
         &self,
         note_id: &str,
@@ -4403,26 +4322,24 @@ impl Repositories {
         }))
     }
 
-    async fn source_transcripts(
+    pub(crate) async fn source_transcripts(
         &self,
         note_id: &str,
     ) -> Result<Vec<TranscriptDto>, sqlx::error::Error> {
-        let rows = query(
+        let rows = query(&format!(
             "SELECT t.id, t.recording_session_id, t.span_id, t.text, t.source_mode, t.source, t.start_ms, t.end_ms, t.turn_index, t.language, t.status, t.last_error,
                     aa.validation_summary
              FROM transcripts t
              LEFT JOIN audio_artifacts aa ON aa.id = t.audio_artifact_id
              LEFT JOIN recording_sessions rs ON rs.id = t.recording_session_id
-             WHERE t.note_id = ?
-               AND t.recording_session_id IS NOT NULL
-               AND t.turn_index IS NOT NULL
+             WHERE t.note_id = ? AND {AUTHORITATIVE_TRANSCRIPT}
              ORDER BY COALESCE(rs.started_at, t.created_at) ASC,
-                      COALESCE(rs.rowid, 9223372036854775807) ASC,
-                      COALESCE(t.turn_index, 999999),
-                      COALESCE(t.start_ms, 999999999),
+                      COALESCE(t.recording_session_id, t.id) ASC,
+                      COALESCE(t.start_ms, 0),
+                      COALESCE(t.turn_index, -1),
                       t.created_at ASC,
-                      t.rowid ASC",
-        )
+                      t.id ASC"
+        ))
         .bind(note_id)
         .fetch_all(&self.pool)
         .await?;
@@ -5455,22 +5372,6 @@ impl Repositories {
         })
     }
 
-    pub async fn delete_source_turn_transcripts_for_session(
-        &self,
-        session_id: &str,
-        source: &str,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "DELETE FROM transcripts
-             WHERE recording_session_id = ? AND source = ?",
-        )
-        .bind(session_id)
-        .bind(source)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn create_failed_source_transcript(
         &self,
@@ -5594,6 +5495,243 @@ impl Repositories {
         })
     }
 
+    /// Capture metadata exists even if permission was denied, so generation can explain the fallback.
+    pub async fn create_video_artifact(
+        &self,
+        note_id: &str,
+        session_id: &str,
+        partial_path: &str,
+        path: &str,
+    ) -> Result<(), sqlx::Error> {
+        query("INSERT INTO video_artifacts (recording_session_id,note_id,partial_path,path,status) VALUES (?,?,?,?,'recording')")
+            .bind(session_id).bind(note_id).bind(partial_path).bind(path).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn finalize_video_artifact(
+        &self,
+        session_id: &str,
+        result: &crate::audio::capture::video::VideoResult,
+    ) -> Result<bool, sqlx::Error> {
+        let result = query("UPDATE video_artifacts SET status=?,offset_ms=?,app=?,title=?,width=?,height=?,duration_ms=?,failure_reason=? WHERE recording_session_id=?")
+            .bind(if result.failure_reason.is_some() { "failed" } else { "valid" })
+            .bind(result.offset_ms).bind(&result.app).bind(&result.title).bind(result.width).bind(result.height)
+            .bind(result.duration_ms).bind(&result.failure_reason).bind(session_id).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn video_artifact_exists(&self, session_id: &str) -> Result<bool, sqlx::Error> {
+        Ok(
+            query("SELECT 1 FROM video_artifacts WHERE recording_session_id=?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
+    }
+
+    /// Processing may wait for video; the audio finalization path never does.
+    pub async fn wait_for_video_capture(&self, session_id: &str) {
+        let wait = async {
+            loop {
+                let state =
+                    query("SELECT status FROM video_artifacts WHERE recording_session_id=?")
+                        .bind(session_id)
+                        .fetch_optional(&self.pool)
+                        .await;
+                if !matches!(state, Ok(Some(row)) if row.get::<String,_>("status") == "recording") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(12), wait)
+            .await
+            .is_err()
+        {
+            let _=tokio::time::timeout(std::time::Duration::from_secs(2),
+                query("UPDATE video_artifacts SET status='failed',failure_reason='capture_failed' WHERE recording_session_id=? AND status='recording'")
+                    .bind(session_id).execute(&self.pool)).await;
+        }
+    }
+
+    pub async fn note_video_input(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+    ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
+        let recovery = std::sync::Arc::new(video_recovery_lock(session_id).lock_owned().await);
+        self.note_video_input_locked(session_id, paths, recovery)
+            .await
+    }
+
+    async fn note_video_input_locked(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+        recovery: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
+        let Some(row) = query("SELECT * FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut input = crate::providers::notes::NoteVideoInput {
+            path: String::new(),
+            offset_ms: row.get("offset_ms"),
+            app: row.get("app"),
+            title: row.get("title"),
+            failure_reason: row.get("failure_reason"),
+        };
+        // Failed captures are deliberately transcript-only, even if their partial file is readable.
+        if input.failure_reason.is_some() {
+            return Ok(Some(input));
+        }
+        let note_id: String = row.get("note_id");
+        let stored_final: String = row.get("path");
+        let stored_partial: String = row.get("partial_path");
+        let contained = contained_session_video_paths(
+            paths,
+            &note_id,
+            session_id,
+            &stored_partial,
+            &stored_final,
+        );
+        let Ok((mut partial, mut final_path)) = contained else {
+            input.failure_reason = Some("capture_failed".into());
+            return Ok(Some(input));
+        };
+        if row.get::<String, _>("status") == "recording" {
+            match crate::audio::capture::video::video_recovery_state(&partial, &stored_partial) {
+                crate::audio::capture::video::VideoRecoveryState::Active => {
+                    input.failure_reason = Some("capture_failed".into());
+                    return Ok(Some(input));
+                }
+                crate::audio::capture::video::VideoRecoveryState::Finished(Some(reason)) => {
+                    input.failure_reason = Some(reason);
+                    let changed = query("UPDATE video_artifacts SET status='failed',failure_reason=? WHERE recording_session_id=? AND status='recording'")
+                        .bind(&input.failure_reason).bind(session_id).execute(&self.pool).await?;
+                    if changed.rows_affected() == 0 {
+                        return Box::pin(self.note_video_input_locked(session_id, paths, recovery))
+                            .await;
+                    }
+                    return Ok(Some(input));
+                }
+                crate::audio::capture::video::VideoRecoveryState::Finished(None) => {}
+            }
+            let Some(timing) = crate::audio::capture::video::recovery_timing(
+                &partial,
+                session_id,
+                &stored_partial,
+            ) else {
+                input.failure_reason = Some("capture_failed".into());
+                let changed = query("UPDATE video_artifacts SET status='failed',failure_reason='capture_failed' WHERE recording_session_id=? AND status='recording'")
+                    .bind(session_id).execute(&self.pool).await?;
+                if changed.rows_affected() == 0 {
+                    // The worker may have committed and removed sidecars after our
+                    // initial read. Re-read its terminal row, never overwrite it.
+                    return Box::pin(self.note_video_input_locked(session_id, paths, recovery))
+                        .await;
+                }
+                return Ok(Some(input));
+            };
+            input.offset_ms = timing.offset_ms;
+            input.app = timing.app.clone();
+            input.title = timing.title.clone();
+            let repair_guard = std::sync::Arc::clone(&recovery);
+            let recovered;
+            (partial, final_path, recovered) = tokio::task::spawn_blocking(move || {
+                // Keep the session locked even if the async caller is cancelled during repair.
+                let _recovery = repair_guard;
+                let recovered = if crate::audio::capture::video::mp4_recovery::recover(&final_path)
+                {
+                    true
+                } else if crate::audio::capture::video::mp4_recovery::recover(&partial) {
+                    std::fs::rename(&partial, &final_path).is_ok()
+                } else {
+                    false
+                };
+                (partial, final_path, recovered)
+            })
+            .await
+            .map_err(|error| AppError::new("video_recovery_failed", error.to_string()))?;
+            input.failure_reason = (!recovered).then(|| "capture_failed".into());
+            if !self
+                .complete_video_recovery(
+                    session_id,
+                    paths,
+                    &partial,
+                    &final_path,
+                    &timing,
+                    recovered,
+                )
+                .await?
+            {
+                // A competing finalizer/deletion won the recording -> terminal
+                // transition. Re-read that settled result instead of inventing a failure.
+                return Box::pin(self.note_video_input_locked(session_id, paths, recovery)).await;
+            }
+        }
+        if input.failure_reason.is_none() {
+            // Revalidate after rename before a CLI may receive the path. Never expose an outside path.
+            match paths.contained_recording_file(&final_path) {
+                Ok(canonical)
+                    if canonical.is_file()
+                        && canonical.parent() == final_path.parent()
+                        && !std::fs::symlink_metadata(&final_path)
+                            .is_ok_and(|m| m.file_type().is_symlink()) =>
+                {
+                    input.path = canonical.to_string_lossy().into_owned();
+                }
+                _ => input.failure_reason = Some("capture_failed".into()),
+            }
+        }
+        Ok(Some(input))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_video_recovery(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+        partial: &std::path::Path,
+        final_path: &std::path::Path,
+        timing: &crate::audio::capture::video::VideoResult,
+        recovered: bool,
+    ) -> Result<bool, AppError> {
+        let updated=query("UPDATE video_artifacts SET status=?,failure_reason=?,offset_ms=?,app=?,title=?,width=?,height=? WHERE recording_session_id=? AND status='recording' AND failure_reason IS NULL")
+            .bind(if recovered {"recovered"}else{"failed"})
+            .bind((!recovered).then_some("capture_failed"))
+            .bind(timing.offset_ms).bind(&timing.app).bind(&timing.title).bind(timing.width).bind(timing.height)
+            .bind(session_id).execute(&self.pool).await?;
+        if updated.rows_affected() > 0 {
+            return Ok(true);
+        }
+        // A concurrent capture failure keeps its bytes and reason. Definitive deletion revokes all paths.
+        if !self.video_artifact_exists(session_id).await? {
+            for file in with_video_capture_metadata(vec![
+                partial.to_string_lossy().into_owned(),
+                final_path.to_string_lossy().into_owned(),
+            ]) {
+                let _ = paths.remove_recording_file(file);
+            }
+        }
+        Ok(false)
+    }
+
+    pub async fn video_artifact_paths_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = query("SELECT path FROM video_artifacts WHERE recording_session_id=? UNION SELECT partial_path FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id).bind(session_id).fetch_all(&self.pool).await?;
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
+    }
+
     pub async fn create_generation_result(
         &self,
         note_id: &str,
@@ -5603,11 +5741,34 @@ impl Repositories {
         provider: &str,
         prompt_version: &str,
     ) -> Result<String, sqlx::error::Error> {
+        self.create_generation_result_with_video_analysis(
+            note_id,
+            transcript_id,
+            content,
+            title_suggestion,
+            provider,
+            prompt_version,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_generation_result_with_video_analysis(
+        &self,
+        note_id: &str,
+        transcript_id: &str,
+        content: &str,
+        title_suggestion: Option<String>,
+        provider: &str,
+        prompt_version: &str,
+        analysis: Option<&str>,
+    ) -> Result<String, sqlx::error::Error> {
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
         query(
-            "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, status, retry_count, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
+            "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, video_analysis, status, retry_count, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
         )
         .bind(&id)
         .bind(note_id)
@@ -5616,6 +5777,7 @@ impl Repositories {
         .bind(title_suggestion)
         .bind(provider)
         .bind(prompt_version)
+        .bind(analysis)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -5645,29 +5807,36 @@ impl Repositories {
         }))
     }
 
+    /// Commit ownership revocation independently from file cleanup and note hydration.
+    pub async fn commit_recording_discard(
+        &self,
+        session_id: &str,
+        note_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
+            .bind(session_id).execute(&mut *transaction).await?;
+        query("UPDATE audio_artifacts SET status = 'discarded', last_error = 'Discarded by user' WHERE recording_session_id = ?")
+            .bind(session_id).execute(&mut *transaction).await?;
+        query("DELETE FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id)
+            .execute(&mut *transaction)
+            .await?;
+        query("UPDATE notes SET processing_status=?, last_error=?, updated_at=? WHERE id=? RETURNING id")
+            .bind(ProcessingStatus::Failed.as_db())
+            .bind("Recording discarded")
+            .bind(timestamp())
+            .bind(note_id)
+            .fetch_one(&mut *transaction).await?;
+        transaction.commit().await
+    }
+
     pub async fn mark_recording_discarded(
         &self,
         session_id: &str,
         note_id: &str,
     ) -> Result<NoteDto, sqlx::error::Error> {
-        query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
-            .bind(session_id)
-            .execute(&self.pool)
-            .await?;
-        query(
-            "UPDATE audio_artifacts
-             SET status = 'discarded', last_error = 'Discarded by user'
-             WHERE recording_session_id = ?",
-        )
-        .bind(session_id)
-        .execute(&self.pool)
-        .await?;
-        self.set_note_status(
-            note_id,
-            ProcessingStatus::Failed,
-            Some("Recording discarded".to_string()),
-        )
-        .await?;
+        self.commit_recording_discard(session_id, note_id).await?;
         self.get_note(note_id).await
     }
 
@@ -5684,135 +5853,204 @@ impl Repositories {
         .await?;
         Ok(rows.into_iter().map(|row| row.get("folder_id")).collect())
     }
+}
 
-    // ---- Private share keys (JUN-308) ----------------------------------
+/// Authority for a local write admitted by MCP. External approval has no
+/// session or run, and is checked inside the same transaction as the effect.
+#[derive(Clone, Copy)]
+pub(crate) enum McpMutation<'a> {
+    Turn(
+        &'a str,
+        &'a str,
+        &'a crate::domain::turn_authority::TurnAuthority,
+    ),
+    External(crate::approval_broker::external::ExternalApproval<'a>),
+}
 
-    pub async fn save_share_key(&self, record: &ShareKeyRecord) -> Result<(), sqlx::error::Error> {
-        // The store holds at most one share per item (the `idx_share_keys_item`
-        // unique index). Upsert on that item key so a fresh share for an
-        // already-mapped item *replaces* the stale mapping instead of failing
-        // the insert. This is what lets an item be shared again after its old
-        // share is gone, or is owned by a different account now signed in on the
-        // same local notes: the owner dialog resets to the unshared view on the
-        // ambiguous share_not_found without purging keys (the store is not
-        // account-scoped, so it must never delete another owner's live keys),
-        // and the eventual re-share lands here to replace the row.
-        query(
-            "INSERT INTO share_keys (share_id, item_kind, item_id, content_key, created_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(item_kind, item_id) DO UPDATE SET
-               share_id = excluded.share_id,
-               content_key = excluded.content_key,
-               created_at = excluded.created_at",
-        )
-        .bind(&record.share_id)
-        .bind(&record.item_kind)
-        .bind(&record.item_id)
-        .bind(&record.content_key)
-        .bind(timestamp())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+impl<'a> McpMutation<'a> {
+    pub(crate) fn from_turn(
+        (session, run, authority): (
+            &'a str,
+            &'a str,
+            &'a crate::domain::turn_authority::TurnAuthority,
+        ),
+    ) -> Self {
+        Self::Turn(session, run, authority)
     }
 
-    pub async fn share_key_for_item(
-        &self,
-        item_kind: &str,
-        item_id: &str,
-    ) -> Result<Option<ShareKeyRecord>, sqlx::error::Error> {
-        let row = query(
-            "SELECT share_id, item_kind, item_id, content_key
-             FROM share_keys WHERE item_kind = ? AND item_id = ?",
-        )
-        .bind(item_kind)
-        .bind(item_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(share_key_from_row))
-    }
-
-    pub async fn share_keys_for_profile_notes(
-        &self,
+    pub(crate) async fn guard(
+        self,
+        tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
         profile: &str,
-    ) -> Result<Vec<ShareKeyRecord>, sqlx::error::Error> {
-        let rows = query(
-            "SELECT sk.share_id, sk.item_kind, sk.item_id, sk.content_key
-             FROM share_keys sk
-             INNER JOIN notes n ON n.id = sk.item_id
-             WHERE sk.item_kind = 'note' AND n.profile = ?
-             ORDER BY sk.created_at ASC, sk.share_id ASC",
-        )
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Turn(session, run, authority) => {
+                guard_bound_turn(tx, profile, session, run, authority).await
+            }
+            Self::External(approval) => approval.check(profile),
+        }
+    }
+
+    pub(crate) fn external_target(self) -> Option<&'a serde_json::Value> {
+        match self {
+            Self::External(approval) => approval.target(),
+            Self::Turn(..) => None,
+        }
+    }
+
+    pub(crate) fn before_commit(self, profile: &str) -> Result<(), AppError> {
+        match self {
+            Self::External(approval) => approval.check(profile),
+            Self::Turn(..) => Ok(()),
+        }
+    }
+}
+
+pub(crate) async fn mcp_project_target<'a>(
+    executor: impl sqlx::executor::Executor<'a, Database = Sqlite>,
+    profile: &str,
+    id: &str,
+) -> Result<serde_json::Value, AppError> {
+    let row = query(
+        "SELECT name, updated_at FROM folders WHERE id=? AND profile=? AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(profile)
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| AppError::new("folder_not_found", "Project was not found."))?;
+    Ok(
+        serde_json::json!({"projectId":id,"name":row.get::<String,_>("name"),"updatedAt":row.get::<String,_>("updated_at")}),
+    )
+}
+
+async fn check_mcp_project_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+    target: &serde_json::Value,
+) -> Result<(), AppError> {
+    if &mcp_project_target(&mut **tx, profile, id).await? != target {
+        return Err(AppError::new(
+            "project_conflict",
+            "The destination project changed after approval was requested.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn mcp_note_delete_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+) -> Result<serde_json::Value, AppError> {
+    use sha2::{Digest, Sha256};
+    let row = query("SELECT title, revision, updated_at FROM notes WHERE id=? AND profile=?")
+        .bind(id)
         .bind(profile)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(share_key_from_row).collect())
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| AppError::new("note_not_found", "The note was not found."))?;
+    let recordings = query(
+        "SELECT id,started_at,status FROM recording_sessions WHERE note_id=? ORDER BY id LIMIT 101",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if recordings.len() > 100 {
+        return Err(AppError::new(
+            "mcp_external_preview_too_large",
+            "Clovy could not preview all recordings for approval.",
+        ));
     }
-
-    pub async fn save_share_invite_key(
-        &self,
-        record: &ShareInviteKeyRecord,
-    ) -> Result<(), sqlx::error::Error> {
-        query(
-            "INSERT INTO share_invite_keys (invite_id, share_id, invite_key, created_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(invite_id) DO UPDATE SET
-               share_id = excluded.share_id,
-               invite_key = excluded.invite_key",
-        )
-        .bind(&record.invite_id)
-        .bind(&record.share_id)
-        .bind(&record.invite_key)
-        .bind(timestamp())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    let recordings = recordings.iter().map(|recording| serde_json::json!({
+        "id":recording.get::<String,_>("id"),"startedAt":recording.get::<String,_>("started_at"),"status":recording.get::<String,_>("status")
+    })).collect::<Vec<_>>();
+    let mut paths = note_artifact_paths_for_deletion(tx, id).await?;
+    paths.sort();
+    let artifacts = query(
+        "SELECT 'audio' AS kind, id, status, checksum AS contents FROM audio_artifacts WHERE note_id = ?
+         UNION ALL
+         SELECT 'video' AS kind, recording_session_id AS id, status, COALESCE(CAST(duration_ms AS TEXT), '') AS contents FROM video_artifacts WHERE note_id = ?
+         ORDER BY kind, id LIMIT 101",
+    ).bind(id).bind(id).fetch_all(&mut **tx).await?;
+    if artifacts.len() > 100 {
+        return Err(AppError::new(
+            "mcp_external_preview_too_large",
+            "Clovy could not preview all recording artifacts for approval.",
+        ));
     }
-
-    pub async fn share_invite_keys(
-        &self,
-        share_id: &str,
-    ) -> Result<Vec<ShareInviteKeyRecord>, sqlx::error::Error> {
-        let rows = query(
-            "SELECT invite_id, share_id, invite_key
-             FROM share_invite_keys WHERE share_id = ? ORDER BY created_at ASC",
-        )
-        .bind(share_id)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| ShareInviteKeyRecord {
-                invite_id: row.get("invite_id"),
-                share_id: row.get("share_id"),
-                invite_key: row.get("invite_key"),
-            })
-            .collect())
+    // Keep local paths in storage while detecting any target change under
+    // the same writer as the eventual deletion.
+    let mut fingerprint = Sha256::new();
+    for path in &paths {
+        fingerprint.update(path.len().to_le_bytes());
+        fingerprint.update(path.as_bytes());
     }
-
-    /// Purges every locally stored key for a share (used on unshare).
-    pub async fn delete_share_keys(&self, share_id: &str) -> Result<(), sqlx::error::Error> {
-        query("DELETE FROM share_invite_keys WHERE share_id = ?")
-            .bind(share_id)
-            .execute(&self.pool)
-            .await?;
-        query("DELETE FROM share_keys WHERE share_id = ?")
-            .bind(share_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    for artifact in &artifacts {
+        for column in ["kind", "id", "status", "contents"] {
+            let value = artifact.get::<&str, _>(column);
+            fingerprint.update(value.len().to_le_bytes());
+            fingerprint.update(value.as_bytes());
+        }
     }
+    Ok(serde_json::json!({
+        "id":id,"title":row.get::<String,_>("title"),"revision":row.get::<i64,_>("revision"),
+        "updatedAt":row.get::<String,_>("updated_at"),"recordings":recordings,
+        "recordingFiles":paths.len(),"recordingFilesFingerprint":format!("{:x}",fingerprint.finalize())
+    }))
 }
 
-fn share_key_from_row(row: sqlx_sqlite::SqliteRow) -> ShareKeyRecord {
-    ShareKeyRecord {
-        share_id: row.get("share_id"),
-        item_kind: row.get("item_kind"),
-        item_id: row.get("item_id"),
-        content_key: row.get("content_key"),
+async fn check_memory_target(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    id: &str,
+    target: &serde_json::Value,
+) -> Result<(), AppError> {
+    let row =
+        query("SELECT folder_id, content, updated_at FROM memories WHERE id = ? AND profile = ?")
+            .bind(id)
+            .bind(profile)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?;
+    if target["projectId"].as_str() != row.get::<Option<&str>, _>("folder_id")
+        || target["content"].as_str() != Some(row.get::<&str, _>("content"))
+        || target["updatedAt"].as_str() != Some(row.get::<&str, _>("updated_at"))
+    {
+        return Err(AppError::new(
+            "memory_conflict",
+            "Memory changed after approval was requested.",
+        ));
     }
+    Ok(())
 }
 
-async fn delete_note_records(
+pub(crate) async fn guard_bound_turn(
+    tx: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+    profile: &str,
+    session_id: &str,
+    run_id: &str,
+    authority: &crate::domain::turn_authority::TurnAuthority,
+) -> Result<(), AppError> {
+    // A write statement acquires SQLite's write lock before the effect. Stop,
+    // partition reassignment, and this mutation therefore have a serial order.
+    let claimed = query("UPDATE agent_runs SET id = id WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND CASE WHEN json_valid(run_config_json) THEN json_type(run_config_json, '$.dataPartition') = 'text' AND json_extract(run_config_json, '$.dataPartition') = ? ELSE 0 END AND EXISTS (SELECT 1 FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND COALESCE(p.profile, 'default') = ?)")
+        .bind(run_id).bind(session_id).bind(profile).bind(session_id).bind(profile).execute(&mut **tx).await?.rows_affected();
+    // The database may still say running while natural turn teardown has
+    // already revoked its token. Check the live host capability only after
+    // the writer wait, before any domain mutation is admitted.
+    authority.check_live()?;
+    if claimed == 0 {
+        return Err(AppError::new(
+            "turn_expired",
+            "The bound run or data partition changed.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn delete_note_records(
     tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     note_id: &str,
 ) -> Result<(), sqlx::error::Error> {
@@ -5912,9 +6150,23 @@ fn generated_title_from_content(content: &str) -> Option<String> {
         .map(|line| truncate_title(&line, 72))
 }
 
+/// Note headings joined into a title. Generated notes nest the meeting's
+/// subjects under fixed sections (summary, discussion, tasks): `## Subject`
+/// under `#` sections, or `### Subject` in a continuation block. When more than
+/// one heading level exists, only the deepest level names the note; notes with
+/// a single level (one `#` heading per subject) keep using every heading.
 fn title_from_generated_headings(content: &str) -> Option<String> {
+    let levels = || content.lines().filter_map(markdown_heading_level);
+    let subject_level = match (levels().min(), levels().max()) {
+        (Some(top), Some(deepest)) if deepest > top => Some(deepest),
+        _ => None,
+    };
     let mut headings = Vec::new();
-    for heading in content.lines().filter_map(markdown_heading_text) {
+    for heading in content
+        .lines()
+        .filter(|line| subject_level.is_none() || markdown_heading_level(line) == subject_level)
+        .filter_map(markdown_heading_text)
+    {
         let heading = clean_generated_title_line(heading);
         if heading.is_empty()
             || is_replaceable_generated_title(&heading)
@@ -6058,6 +6310,16 @@ fn strip_duplicate_generated_heading<'a>(
     } else {
         content
     }
+}
+
+fn markdown_heading_level(line: &str) -> Option<usize> {
+    markdown_heading_text(line)?;
+    Some(
+        line.trim_start()
+            .chars()
+            .take_while(|character| *character == '#')
+            .count(),
+    )
 }
 
 fn markdown_heading_text(line: &str) -> Option<&str> {
@@ -6218,16 +6480,6 @@ pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn scoped_note_error(error: sqlx::error::Error) -> AppError {
-    if matches!(error, sqlx::error::Error::RowNotFound) {
-        return AppError::new(
-            "note_not_found",
-            "That note is not available in the current data partition.",
-        );
-    }
-    AppError::from(error)
-}
-
 async fn insert_browser_approval_event(
     tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     approval_id: &str,
@@ -6249,6 +6501,159 @@ async fn insert_browser_approval_event(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Validate the exact session and every existing path before reading or repairing video bytes.
+fn contained_session_video_paths(
+    paths: &crate::app_paths::AppPaths,
+    note_id: &str,
+    session_id: &str,
+    partial: &str,
+    final_path: &str,
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::io::{Error, ErrorKind};
+    let dir = paths.recording_session_dir(note_id, session_id)?;
+    let expected_partial = dir.join("window.partial.mp4");
+    let expected_final = dir.join("window.mp4");
+    if std::path::Path::new(partial) != expected_partial
+        || std::path::Path::new(final_path) != expected_final
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "video path does not belong to this recording session",
+        ));
+    }
+    if std::fs::symlink_metadata(&paths.recordings_dir)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "recordings root is a symlink",
+        ));
+    }
+    let mut targets = vec![expected_partial.clone(), expected_final.clone()];
+    targets.extend(
+        [
+            "pid",
+            "status.json",
+            "lease",
+            "control.json",
+            "control.tmp",
+            "control.pipe",
+            "timing.json",
+            "capture.json",
+            "capture.tmp",
+        ]
+        .map(|extension| expected_partial.with_extension(extension)),
+    );
+    // Reject symlink components before canonicalization, including linked sidecars/session directories.
+    for target in &targets {
+        let relative = target.strip_prefix(&paths.recordings_dir).map_err(|_| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                "video path is outside recordings",
+            )
+        })?;
+        let mut current = paths.recordings_dir.clone();
+        for component in relative.components() {
+            current.push(component);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        "video path contains a symlink",
+                    ))
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let canonical_dir = paths.contained_recording_file(&dir)?;
+    for target in &targets {
+        match paths.contained_recording_file(target) {
+            Ok(canonical) if canonical.parent() == Some(canonical_dir.as_path()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "video path is outside its session",
+                ))
+            }
+        }
+    }
+    Ok((
+        canonical_dir.join("window.partial.mp4"),
+        canonical_dir.join("window.mp4"),
+    ))
+}
+
+pub(crate) async fn note_artifact_paths_for_deletion(
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    note_id: &str,
+) -> Result<Vec<String>, sqlx::error::Error> {
+    let rows = query(
+        "SELECT path FROM (
+        SELECT path FROM audio_artifacts WHERE note_id=?
+        UNION SELECT partial_path AS path FROM audio_artifacts WHERE note_id=?
+        UNION SELECT path FROM video_artifacts WHERE note_id=?
+        UNION SELECT partial_path AS path FROM video_artifacts WHERE note_id=?
+        UNION SELECT final_path AS path FROM recording_sessions WHERE note_id=?
+        UNION SELECT partial_path AS path FROM recording_sessions WHERE note_id=?
+    ) WHERE path IS NOT NULL AND trim(path) != ''",
+    )
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|row| row.get("path")).collect())
+}
+
+pub(crate) fn with_video_capture_metadata(paths: Vec<String>) -> Vec<String> {
+    let partials = paths
+        .iter()
+        .filter(|path| path.ends_with(".partial.mp4"))
+        .collect::<Vec<_>>();
+    // Revoke every capture before unlinking MP4s, including a helper that starts late.
+    let mut all = partials
+        .iter()
+        .map(|path| {
+            std::path::Path::new(path)
+                .with_extension("lease")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let metadata = partials
+        .iter()
+        .flat_map(|path| {
+            [
+                "status.json",
+                "pid",
+                "control.json",
+                "control.tmp",
+                "control.pipe",
+                "timing.json",
+                "capture.json",
+                "capture.tmp",
+            ]
+            .map(|extension| {
+                std::path::Path::new(path)
+                    .with_extension(extension)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    all.extend(paths);
+    all.extend(metadata);
+    all
 }
 
 fn nonnegative_u64(value: i64) -> u64 {
@@ -6455,6 +6860,7 @@ fn dictionary_entry_from_row(row: sqlx_sqlite::SqliteRow) -> DictionaryEntryDto 
 
 fn dictation_history_item_from_row(row: sqlx_sqlite::SqliteRow) -> DictationHistoryItemDto {
     DictationHistoryItemDto {
+        app_bundle_id: row.get("app_bundle_id"),
         id: row.get("id"),
         text: row.get("text"),
         language: row.get("language"),
@@ -6463,51 +6869,9 @@ fn dictation_history_item_from_row(row: sqlx_sqlite::SqliteRow) -> DictationHist
     }
 }
 
-fn dictation_history_cutoff_timestamp() -> String {
+pub(crate) fn dictation_history_cutoff_timestamp() -> String {
     (Utc::now() - Duration::days(DICTATION_HISTORY_RETENTION_DAYS))
         .to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn companion_operation_cutoff_timestamp() -> String {
-    (Utc::now() - Duration::days(COMPANION_OPERATION_RETENTION_DAYS))
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-async fn prune_companion_operations(
-    transaction: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
-    device_id: &str,
-) -> Result<(), sqlx::error::Error> {
-    query("DELETE FROM companion_operations WHERE created_at < ?")
-        .bind(companion_operation_cutoff_timestamp())
-        .execute(&mut **transaction)
-        .await?;
-    query(
-        "DELETE FROM companion_operations
-         WHERE device_id = ? AND operation_state = 'completed'
-           AND operation_id NOT IN (
-             SELECT operation_id FROM companion_operations
-             WHERE device_id = ? AND operation_state = 'completed'
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?
-           )",
-    )
-    .bind(device_id)
-    .bind(device_id)
-    .bind(MAX_COMPANION_OPERATIONS_PER_DEVICE)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-fn companion_device_from_row(row: sqlx_sqlite::SqliteRow) -> CompanionDeviceRecord {
-    CompanionDeviceRecord {
-        id: row.get("id"),
-        display_name: row.get("display_name"),
-        public_key: row.get("public_key"),
-        linked_at: row.get("linked_at"),
-        last_seen_at: row.get("last_seen_at"),
-        revoked_at: row.get("revoked_at"),
-    }
 }
 
 fn preview_for(title: &str, content: &str) -> String {
@@ -6554,10 +6918,7 @@ fn validation_summary_recorded_silence(summary: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Repositories, MAX_COMPANION_OPERATIONS_PER_DEVICE,
-        MAX_PENDING_COMPANION_OPERATIONS_PER_DEVICE,
-    };
+    use super::Repositories;
     use crate::domain::types::{
         NoteCalendarEventDto, NoteTranscriptionJobKind, NoteTranscriptionJobPlan,
         NoteTranscriptionJobStatus, ProcessingStatus, RecordingOriginMetadata, RecordingSourceMode,
@@ -6566,7 +6927,6 @@ mod tests {
     use sqlx::row::Row;
     use sqlx_sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::time::Duration as StdDuration;
-    use uuid::Uuid;
 
     async fn test_repositories() -> Repositories {
         let pool = SqlitePoolOptions::new()
@@ -6578,6 +6938,565 @@ mod tests {
             .await
             .expect("migrations");
         Repositories::new(pool)
+    }
+
+    #[tokio::test]
+    async fn authorized_note_deletion_removes_video_and_preserves_refusal_guards() {
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        let recording = "video-authorized-delete";
+        let dir = paths.recording_session_dir(&note.id, recording).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("window.partial.mp4");
+        let final_path = dir.join("window.mp4");
+        repos
+            .create_recording_session(
+                &note.id,
+                recording,
+                RecordingSourceMode::MicrophoneOnly,
+                "",
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                recording,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let files = [
+            partial.clone(),
+            final_path.clone(),
+            partial.with_extension("lease"),
+            partial.with_extension("status.json"),
+            partial.with_extension("pid"),
+            partial.with_extension("control.json"),
+            partial.with_extension("control.tmp"),
+            partial.with_extension("control.pipe"),
+            partial.with_extension("timing.json"),
+            partial.with_extension("capture.json"),
+            partial.with_extension("capture.tmp"),
+        ];
+        for file in &files {
+            std::fs::write(file, b"synthetic fixture").unwrap();
+        }
+        query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES ('delete-session','Fixture','test','running','now','now')")
+            .execute(&repos.pool).await.unwrap();
+        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at,run_config_json) VALUES ('delete-run','delete-session','test','running','now','now','{\"dataPartition\":\"default\"}')")
+            .execute(&repos.pool).await.unwrap();
+        let authority = crate::domain::turn_authority::TurnAuthority::new();
+        for (profile, run, expected) in [
+            ("other", "delete-run", "turn_expired"),
+            ("default", "missing-run", "turn_expired"),
+            ("default", "delete-run", "note_recording_active"),
+        ] {
+            let error = repos
+                .delete_note_in_profile(
+                    profile,
+                    &note.id,
+                    Some(crate::db::repositories::McpMutation::Turn(
+                        "delete-session",
+                        run,
+                        &authority,
+                    )),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, expected);
+            assert!(files.iter().all(|file| file.exists()));
+            assert!(repos.video_artifact_exists(recording).await.unwrap());
+            assert!(repos.get_note(&note.id).await.is_ok());
+        }
+        let error = repos
+            .delete_note_in_profile("other", &note.id, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "note_not_found");
+        query("UPDATE recording_sessions SET status='validated' WHERE id=?")
+            .bind(recording)
+            .execute(&repos.pool)
+            .await
+            .unwrap();
+        let revoked = crate::domain::turn_authority::TurnAuthority::new();
+        revoked.revoke();
+        let error = repos
+            .delete_note_in_profile(
+                "default",
+                &note.id,
+                Some(crate::db::repositories::McpMutation::Turn(
+                    "delete-session",
+                    "delete-run",
+                    &revoked,
+                )),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "turn_expired");
+        assert!(files.iter().all(|file| file.exists()));
+        assert!(repos.video_artifact_exists(recording).await.unwrap());
+        let deleted = repos
+            .delete_note_in_profile(
+                "default",
+                &note.id,
+                Some(crate::db::repositories::McpMutation::Turn(
+                    "delete-session",
+                    "delete-run",
+                    &authority,
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(&deleted[0]),
+            partial.with_extension("lease")
+        );
+        for file in &files {
+            assert!(deleted
+                .iter()
+                .any(|path| std::path::Path::new(path) == file));
+        }
+        for file in deleted {
+            paths.remove_recording_file(file).unwrap();
+        }
+        assert!(files.iter().all(|file| !file.exists()));
+        assert!(!repos.video_artifact_exists(recording).await.unwrap());
+        assert!(repos.get_note(&note.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn video_deletion_waits_for_concurrent_writer_before_snapshotting_paths() {
+        for mode in ["note", "batch", "folder", "profile"] {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = SqlitePoolOptions::new()
+                .max_connections(2)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(temp.path().join("notes.sqlite3"))
+                        .create_if_missing(true)
+                        .journal_mode(SqliteJournalMode::Wal)
+                        .busy_timeout(StdDuration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            crate::db::migrations::run_migrations(&pool).await.unwrap();
+            let repos = Repositories::new(pool.clone());
+            let folder = repos
+                .create_folder("video-contention", "Fixture", None)
+                .await
+                .unwrap();
+            let note = repos
+                .create_note("video-contention", Some(folder.id.clone()))
+                .await
+                .unwrap();
+            repos
+                .create_recording_session(
+                    &note.id,
+                    "capture",
+                    RecordingSourceMode::MicrophoneOnly,
+                    "mic.partial.wav",
+                    "mic.wav",
+                    None,
+                )
+                .await
+                .unwrap();
+            repos
+                .create_video_artifact(&note.id, "capture", "window.partial.mp4", "before.mp4")
+                .await
+                .unwrap();
+            let mut writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            query("UPDATE video_artifacts SET path='committed.mp4' WHERE recording_session_id='capture'")
+                .execute(&mut *writer).await.unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let deleting = tokio::spawn(async move {
+                let _ = started.send(());
+                match mode {
+                    "note" => repos.delete_note_with_artifact_paths(&note.id).await,
+                    "batch" => repos.delete_notes_with_artifact_paths(&[note.id]).await,
+                    "folder" => {
+                        repos
+                            .delete_folder_with_artifact_paths(&folder.id, true)
+                            .await
+                    }
+                    _ => {
+                        repos
+                            .delete_profile_data_with_artifact_paths("video-contention")
+                            .await
+                    }
+                }
+            });
+            ready.await.unwrap();
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+            let waited = !deleting.is_finished();
+            writer.commit().await.unwrap();
+            let result = tokio::time::timeout(StdDuration::from_secs(5), deleting)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                waited,
+                "{mode} must wait for the write lock before reading artifact paths: {result:?}"
+            );
+            let paths = result.unwrap();
+            assert!(
+                paths.iter().any(|p| p == "committed.mp4"),
+                "{mode}: {paths:?}"
+            );
+            assert!(
+                !paths.iter().any(|p| p == "before.mp4"),
+                "{mode}: stale snapshot"
+            );
+            let remaining = query("SELECT COUNT(*) AS count FROM video_artifacts")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(remaining.get::<i64, _>("count"), 0);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn video_analysis_is_atomic_and_latest_generation_hydrates_note() {
+        let repos = test_repositories().await;
+        let note = repos.create_note("default", None).await.unwrap();
+        assert!(repos
+            .get_note(&note.id)
+            .await
+            .unwrap()
+            .video_analysis
+            .is_none());
+        let plan = query(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            Repositories::NOTE_VIDEO_ANALYSIS_QUERY,
+        ))
+        .bind(&note.id)
+        .fetch_all(&repos.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>();
+        assert!(
+            plan.iter().any(|step| step.starts_with("SEARCH ")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("SCAN ") || step.contains("TEMP B-TREE")),
+            "latest video notice must seek without scanning history or sorting: {plan:?}",
+        );
+        repos
+            .create_recording_session(
+                &note.id,
+                "video-analysis",
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        let artifact = repos
+            .create_pending_source_artifact(
+                &note.id,
+                "video-analysis",
+                "microphone",
+                "mic.partial.wav",
+                "mic.wav",
+            )
+            .await
+            .unwrap();
+        let transcript = repos
+            .create_transcript(&note.id, &artifact.id, "spoken", None, "test")
+            .await
+            .unwrap();
+        repos
+            .create_generation_result_with_video_analysis(
+                &note.id,
+                &transcript.id,
+                "visual",
+                None,
+                "claude",
+                "video-v1",
+                Some("analyzed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repos
+                .get_note(&note.id)
+                .await
+                .unwrap()
+                .video_analysis
+                .as_deref(),
+            Some("analyzed")
+        );
+        repos
+            .create_generation_result(
+                &note.id,
+                &transcript.id,
+                "audio only",
+                None,
+                "test",
+                "note-v1",
+            )
+            .await
+            .unwrap();
+        // Equal timestamps must still prefer the last inserted result, including
+        // its absent notice, rather than retain an older analyzed generation.
+        query(
+            "UPDATE generation_results SET created_at='2026-10-28T12:00:00.000Z' WHERE note_id=?",
+        )
+        .bind(&note.id)
+        .execute(&repos.pool)
+        .await
+        .unwrap();
+        assert!(repos
+            .get_note(&note.id)
+            .await
+            .unwrap()
+            .video_analysis
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn video_recovery_commit_cleans_late_rename_when_note_was_deleted() {
+        for deleted in [false, true] {
+            let repos = test_repositories().await;
+            let temp = tempfile::tempdir().unwrap();
+            let paths =
+                crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+            let note = repos.create_note("default", None).await.unwrap();
+            let session = "video-recovery-race";
+            let dir = paths.recording_session_dir(&note.id, session).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let partial = dir.join("window.partial.mp4");
+            let final_path = dir.join("window.mp4");
+            repos
+                .create_recording_session(
+                    &note.id,
+                    session,
+                    RecordingSourceMode::MicrophoneOnly,
+                    "mic.partial.wav",
+                    "mic.wav",
+                    None,
+                )
+                .await
+                .unwrap();
+            repos
+                .create_video_artifact(
+                    &note.id,
+                    session,
+                    &partial.to_string_lossy(),
+                    &final_path.to_string_lossy(),
+                )
+                .await
+                .unwrap();
+            if deleted {
+                let files = repos
+                    .delete_note_with_artifact_paths(&note.id)
+                    .await
+                    .unwrap();
+                for file in files {
+                    let _ = paths.remove_recording_file(file);
+                }
+            }
+            // The deletion snapshot already unlinked final, then recovery's rename wins the filesystem race.
+            std::fs::write(&partial, b"owned late recovery").unwrap();
+            std::fs::rename(&partial, &final_path).unwrap();
+            std::fs::write(partial.with_extension("capture.json"), b"owned manifest").unwrap();
+            let result = crate::audio::capture::video::VideoResult {
+                offset_ms: 1250,
+                ..Default::default()
+            };
+            let retained = repos
+                .complete_video_recovery(session, &paths, &partial, &final_path, &result, true)
+                .await
+                .unwrap();
+            assert_eq!(retained, !deleted);
+            assert_eq!(final_path.exists(), !deleted);
+            assert_eq!(partial.with_extension("capture.json").exists(), !deleted);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn video_partial_is_recovered_and_deleted_with_note() {
+        let _settings_lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        let session = "video-recovery";
+        let dir = paths.recording_session_dir(&note.id, session).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("window.partial.mp4");
+        let final_path = dir.join("window.mp4");
+        repos
+            .create_recording_session(
+                &note.id,
+                session,
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                session,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let env = crate::llm::shell_env::login_env().await;
+        let Some(ffmpeg) = env.which("ffmpeg") else {
+            eprintln!("video fixture needs ffmpeg; skipped");
+            return;
+        };
+        assert!(tokio::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=64x64:rate=5",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-frag_duration",
+                "500000",
+                "-f",
+                "mp4"
+            ])
+            .arg(&partial)
+            .status()
+            .await
+            .unwrap()
+            .success());
+        let nonce = "d0bee8db-9cf8-4fc3-94d9-e0c911e6db13";
+        crate::audio::capture::video::write_capture_binding(&partial, session, nonce, 1000)
+            .unwrap();
+        std::fs::write(
+            partial.with_extension("pid"),
+            serde_json::json!({"pid":2147483647,"captureNonce":nonce}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(partial.with_extension("timing.json"),serde_json::json!({"schema":1,"recordingSessionId":session,"partialPath":partial,"captureNonce":nonce,"audioStartedHostMs":1000,"startedAtHostMs":2250,"pausedBeforeFirstMs":0,"offsetMs":1250,"app":"Chrome","title":"Meet - recovery","width":64,"height":64}).to_string()).unwrap();
+        let paths = std::sync::Arc::new(paths);
+        let held = super::video_recovery_lock(session).lock_owned().await;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let spawn_recovery = || {
+            let repos = Repositories::new(repos.pool.clone());
+            let paths = std::sync::Arc::clone(&paths);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                repos
+                    .note_video_input(session, &paths)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            })
+        };
+        let first = spawn_recovery();
+        let second = spawn_recovery();
+        barrier.wait().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!first.is_finished() && !second.is_finished());
+        assert!(!final_path.exists() && partial.exists());
+        drop(held);
+        let input = first.await.unwrap();
+        let concurrent = second.await.unwrap();
+        assert!(concurrent.failure_reason.is_none());
+        assert_eq!(input.path, concurrent.path);
+        assert_eq!(
+            input.path,
+            final_path.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(input.failure_reason.is_none());
+        assert_eq!(input.offset_ms, 1250);
+        assert!(final_path.exists());
+        assert!(!partial.exists());
+        let files = repos.audio_artifact_paths_for_note(&note.id).await.unwrap();
+        assert!(files
+            .iter()
+            .any(|p| std::path::Path::new(p).canonicalize().ok().as_ref()
+                == Some(&std::path::PathBuf::from(&input.path))));
+        repos.delete_note(&note.id).await.unwrap();
+        for file in files {
+            let _ = paths.remove_recording_file(&file);
+        }
+        assert!(!final_path.exists());
+        assert!(repos
+            .note_video_input(session, &paths)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_video_keeps_fallback_reason_without_a_file() {
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        repos
+            .create_recording_session(
+                &note.id,
+                "video-denied",
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                "video-denied",
+                "/missing/video.partial.mp4",
+                "/missing/video.mp4",
+            )
+            .await
+            .unwrap();
+        let result = crate::audio::capture::video::VideoResult {
+            failure_reason: Some("permission_denied".into()),
+            ..Default::default()
+        };
+        repos
+            .finalize_video_artifact("video-denied", &result)
+            .await
+            .unwrap();
+        let input = repos
+            .note_video_input("video-denied", &paths)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(input.failure_reason.as_deref(), Some("permission_denied"));
+        repos
+            .mark_recording_discarded("video-denied", &note.id)
+            .await
+            .unwrap();
+        assert!(repos
+            .note_video_input("video-denied", &paths)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     async fn concurrent_test_repositories() -> (tempfile::TempDir, Repositories) {
@@ -6600,6 +7519,53 @@ mod tests {
 
     fn scopes(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn dictation_history_saves_target_and_normalizes_empty_id() {
+        let repos = test_repositories().await;
+        repos
+            .create_dictation_history_item_with_app(
+                "default",
+                "target",
+                None,
+                "test",
+                Some("org.example.app"),
+            )
+            .await
+            .unwrap();
+        repos
+            .create_dictation_history_item_with_app(
+                "default",
+                "no target",
+                None,
+                "test",
+                Some("  "),
+            )
+            .await
+            .unwrap();
+        let items = repos
+            .list_dictation_history("default", 20)
+            .await
+            .unwrap()
+            .items;
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.text == "target")
+                .unwrap()
+                .app_bundle_id
+                .as_deref(),
+            Some("org.example.app")
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.text == "no target")
+                .unwrap()
+                .app_bundle_id,
+            None
+        );
     }
 
     #[tokio::test]
@@ -6749,26 +7715,6 @@ mod tests {
         assert_eq!(named.title, "My own title");
         assert_eq!(named.calendar_event, Some(event));
         assert_eq!(named.revision, named_revision);
-
-        let conflict = repos
-            .update_note_cas(
-                &untouched.id,
-                untouched_revision,
-                Some("Stale phone title".to_string()),
-                Some("Stale phone content".to_string()),
-            )
-            .await
-            .expect_err("calendar title must invalidate a stale companion edit");
-        assert_eq!(conflict.code, "note_revision_conflict");
-        let current = repos
-            .get_note(&untouched.id)
-            .await
-            .expect("calendar-titled note");
-        assert_eq!(current.title, "Product review");
-        assert_ne!(
-            current.edited_content.as_deref(),
-            Some("Stale phone content")
-        );
     }
 
     async fn recording_fixture(
@@ -6906,12 +7852,12 @@ mod tests {
     #[tokio::test]
     async fn moving_profile_atomically_deletes_the_redundant_home_session() {
         let repos = test_repositories().await;
-        let agents = crate::agent_runtime::AgentRepository::new(repos.pool.clone());
+        let agents = crate::agent_sessions::AgentRepository::new(repos.pool.clone());
         let retained = agents
             .create_session_in_profile(
                 "Default Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "default",
             )
@@ -6921,7 +7867,7 @@ mod tests {
             .create_session_in_profile(
                 "Work Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "work",
             )
@@ -6931,7 +7877,7 @@ mod tests {
             .create_session_in_profile(
                 "Work task",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "work",
             )
@@ -6959,12 +7905,12 @@ mod tests {
     #[tokio::test]
     async fn deleting_profile_deletes_its_agent_sessions_instead_of_exposing_them_as_default() {
         let repos = test_repositories().await;
-        let agents = crate::agent_runtime::AgentRepository::new(repos.pool.clone());
+        let agents = crate::agent_sessions::AgentRepository::new(repos.pool.clone());
         let private_session = agents
             .create_session_in_profile(
                 "Private Home",
                 "open-software/auto",
-                crate::agent_runtime::AgentSafetyMode::Sandboxed,
+                crate::agent_sessions::AgentSafetyMode::Sandboxed,
                 None,
                 "private",
             )
@@ -8505,513 +9451,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn companion_note_edits_use_compare_and_swap_revisions() {
-        let repos = test_repositories().await;
-        let note = repos
-            .create_note("default", None)
-            .await
-            .expect("create note");
-        assert_eq!(note.revision, 1);
-
-        let updated = repos
-            .update_note_cas(
-                &note.id,
-                note.revision,
-                Some("From iPhone".to_string()),
-                Some("Encrypted edit".to_string()),
-            )
-            .await
-            .expect("first compare-and-swap update");
-        assert_eq!(updated.revision, 2);
-
-        let conflict = repos
-            .update_note_cas(
-                &note.id,
-                note.revision,
-                None,
-                Some("Stale edit".to_string()),
-            )
-            .await
-            .expect_err("stale revision must not overwrite the note");
-        assert_eq!(conflict.code, "note_revision_conflict");
-        assert_eq!(
-            conflict
-                .details
-                .as_ref()
-                .and_then(|value| value["revision"].as_u64()),
-            Some(2)
-        );
-        assert_eq!(
-            repos
-                .get_note(&note.id)
-                .await
-                .expect("current note")
-                .edited_content
-                .as_deref(),
-            Some("Encrypted edit")
-        );
-    }
-
-    #[tokio::test]
-    async fn companion_note_reads_and_edits_recheck_the_active_partition() {
-        let repos = test_repositories().await;
-        let note = repos
-            .create_note("partition-a", None)
-            .await
-            .expect("create partition A note");
-
-        let read_error = repos
-            .get_note_in_profile("partition-b", &note.id)
-            .await
-            .expect_err("cached note id must not cross partitions");
-        assert!(matches!(read_error, sqlx::error::Error::RowNotFound));
-
-        let edit_error = repos
-            .update_note_cas_in_profile(
-                "partition-b",
-                &note.id,
-                note.revision,
-                Some("Cross-partition title".to_string()),
-                Some("Cross-partition edit".to_string()),
-            )
-            .await
-            .expect_err("cached edit must not cross partitions");
-        assert_eq!(edit_error.code, "note_not_found");
-
-        let unchanged = repos
-            .get_note_in_profile("partition-a", &note.id)
-            .await
-            .expect("partition A note remains readable");
-        assert_eq!(unchanged.title, note.title);
-        assert_eq!(unchanged.edited_content, note.edited_content);
-        assert_eq!(unchanged.revision, note.revision);
-    }
-
-    #[tokio::test]
-    async fn companion_computer_use_decision_audit_is_durable_and_device_attributed() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_test", &device_id, "iPhone", &[4; 32])
-            .await
-            .expect("create companion device");
-
-        assert!(repos
-            .record_companion_computer_use_approval_decision(
-                &device_id,
-                "approval-1",
-                "session-1",
-                "approve",
-                "2026-07-28T10:00:00Z",
-            )
-            .await
-            .expect("record decision"));
-        assert!(!repos
-            .record_companion_computer_use_approval_decision(
-                &device_id,
-                "approval-1",
-                "session-1",
-                "deny",
-                "2026-07-28T10:01:00Z",
-            )
-            .await
-            .expect("duplicate decision is idempotent"));
-        repos
-            .delete_companion_device("usr_test", &device_id)
-            .await
-            .expect("delete linked device");
-
-        let row = query(
-            "SELECT device_id, request_id, stored_session_id, decision, recorded_at
-             FROM companion_computer_use_approval_audit",
-        )
-        .fetch_one(&repos.pool)
-        .await
-        .expect("durable audit row");
-        assert_eq!(row.get::<String, _>("device_id"), device_id);
-        assert_eq!(row.get::<String, _>("request_id"), "approval-1");
-        assert_eq!(row.get::<String, _>("stored_session_id"), "session-1");
-        assert_eq!(row.get::<String, _>("decision"), "approve");
-        assert_eq!(row.get::<String, _>("recorded_at"), "2026-07-28T10:00:00Z");
-    }
-
-    #[tokio::test]
-    async fn companion_computer_use_decision_audit_rolls_back_with_failed_resolution() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        let mut failed_resolution = repos.pool.begin().await.expect("begin failed resolution");
-        assert!(
-            Repositories::record_companion_computer_use_approval_decision_in_transaction(
-                &mut failed_resolution,
-                &device_id,
-                "approval-rollback",
-                "session-1",
-                "approve",
-                "2026-07-28T10:00:00Z",
-            )
-            .await
-            .expect("stage failed decision")
-        );
-        failed_resolution
-            .rollback()
-            .await
-            .expect("roll back failed resolution");
-
-        let audit_count: i64 = query(
-            "SELECT COUNT(*) AS count
-             FROM companion_computer_use_approval_audit
-             WHERE request_id = ?",
-        )
-        .bind("approval-rollback")
-        .fetch_one(&repos.pool)
-        .await
-        .expect("count rolled-back receipts")
-        .get("count");
-        assert_eq!(audit_count, 0);
-
-        let mut successful_resolution = repos
-            .pool
-            .begin()
-            .await
-            .expect("begin successful resolution");
-        assert!(
-            Repositories::record_companion_computer_use_approval_decision_in_transaction(
-                &mut successful_resolution,
-                &device_id,
-                "approval-rollback",
-                "session-1",
-                "deny",
-                "2026-07-28T10:01:00Z",
-            )
-            .await
-            .expect("stage successful decision")
-        );
-        successful_resolution
-            .commit()
-            .await
-            .expect("commit successful resolution");
-
-        let decision: String = query(
-            "SELECT decision
-             FROM companion_computer_use_approval_audit
-             WHERE request_id = ?",
-        )
-        .bind("approval-rollback")
-        .fetch_one(&repos.pool)
-        .await
-        .expect("committed receipt")
-        .get("decision");
-        assert_eq!(decision, "deny");
-    }
-
-    #[tokio::test]
-    async fn companion_operation_history_is_bounded_and_cleared_on_revocation() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_test", &device_id, "iPhone", &[4; 32])
-            .await
-            .expect("create companion device");
-        repos
-            .reserve_companion_operation(
-                "usr_test",
-                &device_id,
-                "pending-mutation",
-                b"outcome-unknown",
-            )
-            .await
-            .expect("reserve pending mutation");
-
-        for index in 0..=MAX_COMPANION_OPERATIONS_PER_DEVICE {
-            repos
-                .remember_companion_operation(
-                    "usr_test",
-                    &device_id,
-                    &format!("operation-{index:04}"),
-                    b"accepted",
-                )
-                .await
-                .expect("remember operation");
-        }
-        assert_eq!(
-            repos
-                .companion_operation("usr_test", &device_id, "operation-0000")
-                .await
-                .expect("read pruned operation"),
-            None
-        );
-        assert_eq!(
-            repos
-                .companion_operation(
-                    "usr_test",
-                    &device_id,
-                    &format!("operation-{MAX_COMPANION_OPERATIONS_PER_DEVICE:04}"),
-                )
-                .await
-                .expect("read retained operation")
-                .as_deref(),
-            Some(b"accepted".as_slice())
-        );
-        assert_eq!(
-            repos
-                .companion_operation("usr_test", &device_id, "pending-mutation")
-                .await
-                .expect("read retained pending mutation")
-                .as_deref(),
-            Some(b"outcome-unknown".as_slice())
-        );
-
-        repos
-            .revoke_companion_device("usr_test", &device_id)
-            .await
-            .expect("revoke companion device");
-        assert_eq!(
-            repos
-                .companion_operation(
-                    "usr_test",
-                    &device_id,
-                    &format!("operation-{MAX_COMPANION_OPERATIONS_PER_DEVICE:04}"),
-                )
-                .await
-                .expect("read revoked operation"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn companion_mutation_reservation_survives_until_a_final_response_replaces_it() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_test", &device_id, "iPhone", &[4; 32])
-            .await
-            .expect("create companion device");
-
-        assert!(repos
-            .reserve_companion_operation("usr_test", &device_id, "mutation-1", b"outcome-unknown",)
-            .await
-            .expect("reserve mutation"));
-        assert!(!repos
-            .reserve_companion_operation(
-                "usr_test",
-                &device_id,
-                "mutation-1",
-                b"different-reservation",
-            )
-            .await
-            .expect("reject duplicate reservation"));
-        assert_eq!(
-            repos
-                .companion_operation("usr_test", &device_id, "mutation-1")
-                .await
-                .expect("read reservation")
-                .as_deref(),
-            Some(b"outcome-unknown".as_slice())
-        );
-
-        repos
-            .complete_companion_operation("usr_test", &device_id, "mutation-1", b"accepted")
-            .await
-            .expect("complete mutation");
-        assert_eq!(
-            repos
-                .companion_operation("usr_test", &device_id, "mutation-1")
-                .await
-                .expect("read completed response")
-                .as_deref(),
-            Some(b"accepted".as_slice())
-        );
-    }
-
-    #[tokio::test]
-    async fn companion_legacy_mutation_reservations_migrate_to_outcome_unknown() {
-        use clovy_companion_protocol::{
-            Capability, FailureCode, ProtocolFailure, Response, ResultPayload,
-        };
-
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_test", &device_id, "iPhone", &[4; 32])
-            .await
-            .expect("create companion device");
-        let legacy = Response {
-            capability: Capability::AgentChat,
-            result: ResultPayload::Error(ProtocolFailure {
-                code: FailureCode::Busy,
-                message: "This request may already have reached June. Check your Mac before trying a different request."
-                    .to_string(),
-                retryable: true,
-            }),
-        };
-        query(
-            "INSERT INTO companion_operations (device_id, operation_id, response, created_at)
-             VALUES (?, 'legacy-reservation', ?, '2026-07-17T00:00:00.000Z')",
-        )
-        .bind(&device_id)
-        .bind(serde_json::to_vec(&legacy).expect("encode legacy reservation"))
-        .execute(&repos.pool)
-        .await
-        .expect("insert legacy reservation");
-
-        crate::db::migrations::run_migrations(&repos.pool)
-            .await
-            .expect("rerun migrations");
-
-        let row = query(
-            "SELECT operation_state, response FROM companion_operations
-             WHERE device_id = ? AND operation_id = 'legacy-reservation'",
-        )
-        .bind(&device_id)
-        .fetch_one(&repos.pool)
-        .await
-        .expect("read migrated reservation");
-        assert_eq!(row.get::<String, _>("operation_state"), "pending");
-        let encoded: Vec<u8> = row.get("response");
-        let migrated: Response =
-            serde_json::from_slice(&encoded).expect("decode migrated response");
-        assert!(matches!(
-            migrated.result,
-            ResultPayload::Error(ProtocolFailure {
-                code: FailureCode::OutcomeUnknown,
-                retryable: false,
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn companion_pending_mutation_limit_refuses_new_work_without_evicting_reservations() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_test", &device_id, "iPhone", &[4; 32])
-            .await
-            .expect("create companion device");
-
-        for index in 0..MAX_PENDING_COMPANION_OPERATIONS_PER_DEVICE {
-            assert!(repos
-                .reserve_companion_operation(
-                    "usr_test",
-                    &device_id,
-                    &format!("pending-{index:03}"),
-                    b"outcome-unknown",
-                )
-                .await
-                .expect("reserve pending operation"));
-        }
-        assert!(!repos
-            .reserve_companion_operation(
-                "usr_test",
-                &device_id,
-                "pending-over-limit",
-                b"outcome-unknown",
-            )
-            .await
-            .expect("refuse excess pending operation"));
-        assert_eq!(
-            repos
-                .companion_operation("usr_test", &device_id, "pending-000")
-                .await
-                .expect("oldest pending operation remains")
-                .as_deref(),
-            Some(b"outcome-unknown".as_slice())
-        );
-    }
-
-    #[tokio::test]
-    async fn companion_device_mutations_are_account_scoped() {
-        let repos = test_repositories().await;
-        let device_id = Uuid::new_v4().to_string();
-        repos
-            .upsert_companion_device("usr_owner", &device_id, "Owner phone", &[4; 32])
-            .await
-            .expect("create owner device");
-        repos
-            .remember_companion_operation("usr_owner", &device_id, "operation-1", b"accepted")
-            .await
-            .expect("remember owner operation");
-        assert_eq!(
-            repos
-                .companion_account_user_id()
-                .await
-                .expect("read persisted companion account")
-                .as_deref(),
-            Some("usr_owner")
-        );
-
-        assert!(repos
-            .companion_device("usr_other", &device_id)
-            .await
-            .expect("look up other account")
-            .is_none());
-        assert!(repos
-            .upsert_companion_device("usr_other", &device_id, "Other phone", &[4; 32])
-            .await
-            .is_err());
-        assert_eq!(
-            repos
-                .companion_account_user_id()
-                .await
-                .expect("retain owner companion account")
-                .as_deref(),
-            Some("usr_owner")
-        );
-        repos
-            .rename_companion_device("usr_other", &device_id, "Renamed")
-            .await
-            .expect("ignore cross-account rename");
-        repos
-            .touch_companion_device("usr_other", &device_id)
-            .await
-            .expect("ignore cross-account touch");
-        repos
-            .revoke_companion_device("usr_other", &device_id)
-            .await
-            .expect("ignore cross-account revoke");
-        repos
-            .delete_companion_device("usr_other", &device_id)
-            .await
-            .expect("ignore cross-account delete");
-        assert!(repos
-            .companion_operation("usr_other", &device_id, "operation-1")
-            .await
-            .expect("ignore cross-account operation read")
-            .is_none());
-        repos
-            .remember_companion_operation(
-                "usr_other",
-                &device_id,
-                "cross-account-operation",
-                b"unexpected",
-            )
-            .await
-            .expect("ignore cross-account operation write");
-        assert!(repos
-            .companion_operation("usr_owner", &device_id, "cross-account-operation")
-            .await
-            .expect("read owner operation history")
-            .is_none());
-
-        let owner = repos
-            .companion_device("usr_owner", &device_id)
-            .await
-            .expect("look up owner account")
-            .expect("owner device remains");
-        assert_eq!(owner.display_name, "Owner phone");
-        assert!(owner.last_seen_at.is_none());
-        assert!(owner.revoked_at.is_none());
-        assert_eq!(
-            repos
-                .companion_operation("usr_owner", &device_id, "operation-1")
-                .await
-                .expect("read owner operation")
-                .as_deref(),
-            Some(b"accepted".as_slice())
-        );
-    }
-
-    #[tokio::test]
     async fn connector_account_upsert_list_and_status() {
         let repos = test_repositories().await;
         repos
@@ -10151,112 +10590,5 @@ mod tests {
             .clear_trigger_cursor("user@example.com", "email_received")
             .await
             .expect("clear idempotent");
-    }
-
-    #[tokio::test]
-    async fn share_keys_round_trip_and_purge() {
-        use super::{ShareInviteKeyRecord, ShareKeyRecord};
-
-        let repos = test_repositories().await;
-        let share_key = ShareKeyRecord {
-            share_id: "shr_1".to_string(),
-            item_kind: "note".to_string(),
-            item_id: "note_1".to_string(),
-            content_key: vec![1u8; 32],
-        };
-        repos.save_share_key(&share_key).await.expect("save key");
-        // Saving again for the same share replaces rather than duplicating.
-        let replacement = ShareKeyRecord {
-            content_key: vec![2u8; 32],
-            ..share_key.clone()
-        };
-        repos
-            .save_share_key(&replacement)
-            .await
-            .expect("upsert key");
-        assert_eq!(
-            repos
-                .share_key_for_item("note", "note_1")
-                .await
-                .expect("get key"),
-            Some(replacement)
-        );
-        assert_eq!(
-            repos
-                .share_key_for_item("note", "missing")
-                .await
-                .expect("get missing"),
-            None
-        );
-
-        let invite_key = ShareInviteKeyRecord {
-            invite_id: "shi_1".to_string(),
-            share_id: "shr_1".to_string(),
-            invite_key: vec![3u8; 32],
-        };
-        repos
-            .save_share_invite_key(&invite_key)
-            .await
-            .expect("save invite key");
-        repos
-            .save_share_invite_key(&ShareInviteKeyRecord {
-                invite_id: "shi_2".to_string(),
-                share_id: "shr_1".to_string(),
-                invite_key: vec![4u8; 32],
-            })
-            .await
-            .expect("save second invite key");
-        let keys = repos.share_invite_keys("shr_1").await.expect("list");
-        assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].invite_id, "shi_1");
-        assert_eq!(keys[0].invite_key, vec![3u8; 32]);
-
-        repos.delete_share_keys("shr_1").await.expect("purge");
-        assert!(repos
-            .share_key_for_item("note", "note_1")
-            .await
-            .expect("get after purge")
-            .is_none());
-        assert!(repos
-            .share_invite_keys("shr_1")
-            .await
-            .expect("list after purge")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn save_share_key_replaces_a_different_share_for_the_same_item() {
-        use super::ShareKeyRecord;
-
-        let repos = test_repositories().await;
-        repos
-            .save_share_key(&ShareKeyRecord {
-                share_id: "shr_old".to_string(),
-                item_kind: "note".to_string(),
-                item_id: "note_1".to_string(),
-                content_key: vec![1u8; 32],
-            })
-            .await
-            .expect("save first");
-        // A fresh share for the same item (re-sharing after the old share is
-        // gone, or owned by a different signed-in account) replaces the stale
-        // mapping rather than colliding on the item unique index.
-        let replacement = ShareKeyRecord {
-            share_id: "shr_new".to_string(),
-            item_kind: "note".to_string(),
-            item_id: "note_1".to_string(),
-            content_key: vec![2u8; 32],
-        };
-        repos
-            .save_share_key(&replacement)
-            .await
-            .expect("replace by item");
-        assert_eq!(
-            repos
-                .share_key_for_item("note", "note_1")
-                .await
-                .expect("get key"),
-            Some(replacement)
-        );
     }
 }

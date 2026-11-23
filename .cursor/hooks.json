@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Search|Shell",
+        "command": "node \"/Users/guilhermevarela/Documents/Projetos/SelfHosting/guilhermexp-os-clovy/.cursor/hooks/graft-hooks.cjs\" cursor-post-tool"
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "node \"/Users/guilhermevarela/Documents/Projetos/SelfHosting/guilhermexp-os-clovy/.cursor/hooks/graft-hooks.cjs\" cursor-mcp"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node \"/Users/guilhermevarela/Documents/Projetos/SelfHosting/guilhermexp-os-clovy/.cursor/hooks/graft-hooks.cjs\" cursor-session-end"
+      }
+    ]
+  }
+}

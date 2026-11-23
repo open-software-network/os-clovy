@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-"""Compress, upload, and optionally PR-comment a QA walkthrough video."""
+"""Compress a QA walkthrough video into a small shareable MP4."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import mimetypes
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
-from urllib.parse import urlparse
 
 DEFAULT_MAX_BYTES = 300 * 1024 * 1024
-DEFAULT_API_BASE_URL = "https://app.opensoftware.co/api"
-ENV_KEY_NAMES = (
-    "OS_PLATFORM_API_KEY",
-    "CLOVY__ISSUE_REPORTS__OS_PLATFORM_API_KEY",
-    "JUNE__ISSUE_REPORTS__OS_PLATFORM_API_KEY",
-)
 
 
 def parse_size(raw: str) -> int:
@@ -204,139 +195,6 @@ def compress_video(args: argparse.Namespace) -> pathlib.Path:
     return output_path
 
 
-def repo_root() -> pathlib.Path:
-    result = run(["git", "rev-parse", "--show-toplevel"])
-    if result.returncode == 0:
-        return pathlib.Path(result.stdout.strip())
-    return pathlib.Path.cwd()
-
-
-def unquote_env_value(value: str) -> str:
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        return value[1:-1]
-    return value
-
-
-def load_os_platform_key(root: pathlib.Path) -> str | None:
-    for name in ENV_KEY_NAMES:
-        value = os.environ.get(name)
-        if value:
-            return value.strip()
-
-    env_file = root / "clovy-api" / ".env"
-    if not env_file.exists():
-        return None
-
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() in ENV_KEY_NAMES:
-            return unquote_env_value(value)
-    return None
-
-
-def absolute_download_url(base_url: str, download_url: str) -> str:
-    parsed_download = urlparse(download_url)
-    if parsed_download.scheme and parsed_download.netloc:
-        return download_url
-
-    base = base_url.rstrip("/")
-    parsed_base = urlparse(base)
-    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
-
-    if download_url.startswith("/v1/"):
-        return f"{base}{download_url}"
-    if download_url.startswith("/api/"):
-        return f"{origin}{download_url}"
-    if download_url.startswith("/"):
-        return f"{origin}{download_url}"
-    return f"{base}/{download_url}"
-
-
-def curl_config_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def upload_video(path: pathlib.Path, args: argparse.Namespace, root: pathlib.Path) -> str:
-    if args.visibility == "public" and not args.confirm_public:
-        raise SystemExit(
-            "public os-platform uploads are downloadable by anyone with the URL. "
-            "Pass --confirm-public only after the QA charter allows PR sharing."
-        )
-
-    api_key = load_os_platform_key(root)
-    if not api_key:
-        names = " or ".join(ENV_KEY_NAMES)
-        raise SystemExit(f"set {names} before uploading QA video artifacts")
-
-    base_url = args.api_base_url.rstrip("/")
-    endpoint = f"{base_url}/v1/files"
-    content_type = mimetypes.guess_type(path.name)[0] or "video/mp4"
-    is_public = "true" if args.visibility == "public" else "false"
-    curl_config = f'header = "Authorization: Bearer {curl_config_value(api_key)}"\n'
-    result = run(
-        [
-            "curl",
-            "-sS",
-            "-X",
-            "POST",
-            endpoint,
-            "--config",
-            "-",
-            "-F",
-            f"file=@{path};type={content_type};filename={path.name}",
-            "-F",
-            f"is_public={is_public}",
-            "-F",
-            "purpose=attachment",
-        ],
-        input_text=curl_config,
-    )
-    if result.returncode != 0:
-        raise SystemExit(result.stderr.strip() or "curl upload failed")
-
-    try:
-        envelope = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"os-platform returned non-JSON response: {exc}") from exc
-
-    if not envelope.get("success"):
-        message = envelope.get("message") or "upload failed"
-        raise SystemExit(f"os-platform upload failed: {message}")
-
-    data = envelope.get("data") or {}
-    download_url = data.get("download_url")
-    if not isinstance(download_url, str) or not download_url:
-        raise SystemExit("os-platform upload response did not include download_url")
-
-    url = absolute_download_url(base_url, download_url)
-    print(f"upload_url={url}")
-    return url
-
-
-def comment_on_pr(url: str, path: pathlib.Path, args: argparse.Namespace) -> None:
-    if not args.comment_pr:
-        return
-    if shutil.which("gh") is None:
-        raise SystemExit("gh is required to comment on the PR")
-
-    body = (
-        "QA video artifact\n\n"
-        f"- Video: {url}\n"
-        f"- Compressed file: `{path.name}` ({human_size(path.stat().st_size)})"
-    )
-    command = ["gh", "pr", "comment", str(args.comment_pr), "--body", body]
-    if args.github_repo:
-        command.extend(["--repo", args.github_repo])
-    result = run(command)
-    if result.returncode != 0:
-        raise SystemExit(result.stderr.strip() or "gh pr comment failed")
-    print(f"pr_comment=posted:{args.comment_pr}")
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=pathlib.Path, help="Raw .mov or other QA recording")
@@ -353,19 +211,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bitrate-kbps", type=int, help="Fixed target video bitrate")
     parser.add_argument("--min-bitrate-kbps", type=int, default=250)
     parser.add_argument("--max-bitrate-kbps", type=int, default=1200)
-    parser.add_argument("--upload", action="store_true", help="Upload compressed file to os-platform")
-    parser.add_argument(
-        "--api-base-url",
-        default=os.environ.get("OS_PLATFORM_API_BASE_URL", DEFAULT_API_BASE_URL),
-    )
-    parser.add_argument("--visibility", choices=("public", "private"), default="public")
-    parser.add_argument(
-        "--confirm-public",
-        action="store_true",
-        help="Acknowledge public URL sharing when --upload uses public visibility",
-    )
-    parser.add_argument("--comment-pr", type=int, help="Comment the upload URL on this PR number")
-    parser.add_argument("--github-repo", help="GitHub owner/repo for PR comments")
     return parser.parse_args(argv)
 
 
@@ -373,19 +218,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.min_bitrate_kbps > args.max_bitrate_kbps:
         raise SystemExit("--min-bitrate-kbps must be <= --max-bitrate-kbps")
-    if args.comment_pr and not args.upload:
-        raise SystemExit("--comment-pr requires --upload")
-    if args.upload and args.visibility == "public" and not args.confirm_public:
-        raise SystemExit(
-            "public os-platform uploads are downloadable by anyone with the URL. "
-            "Pass --confirm-public only after the QA charter allows PR sharing."
-        )
-
-    root = repo_root()
-    compressed = compress_video(args)
-    if args.upload:
-        url = upload_video(compressed, args, root)
-        comment_on_pr(url, compressed, args)
+    compress_video(args)
     return 0
 
 

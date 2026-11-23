@@ -70,7 +70,7 @@ user and tenant have approved.
   indexing.
 - Replacing Microsoft Purview, retention, or eDiscovery controls.
 - Promising every Teams resource is available through one user grant.
-- Storing Microsoft content in Clovy API.
+- Storing Microsoft content in a Clovy-hosted service.
 - Hiding admin-consent or conditional-access requirements from users.
 
 ## Packaging

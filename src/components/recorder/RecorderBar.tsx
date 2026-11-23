@@ -1,6 +1,7 @@
 import { IconPause } from "central-icons-filled/IconPause";
 import { IconPlay } from "central-icons-filled/IconPlay";
 import { IconStop } from "central-icons-filled/IconStop";
+import { useT } from "../../i18n";
 import type { RecordingStatusDto } from "../../lib/tauri";
 import { useRecordingElapsedMs } from "../../lib/recording-telemetry-store";
 import { combineSourceAudioLevels, Waveform } from "./Waveform";
@@ -13,6 +14,7 @@ type RecorderBarProps = {
 };
 
 export function RecorderBar({ status, onPause, onResume, onDone }: RecorderBarProps) {
+  const t = useT();
   const paused = status.state === "paused";
   const controlsEnabled = status.state === "recording" || status.state === "paused";
   const elapsedMs = useRecordingElapsedMs(status.sessionId, status.elapsedMs);
@@ -22,12 +24,13 @@ export function RecorderBar({ status, onPause, onResume, onDone }: RecorderBarPr
       ? combineSourceAudioLevels(status.sources)
       : status.level;
   const pauseLabel = paused
-    ? "Resume"
+    ? t("recorder.resume")
     : status.state === "recording"
-      ? "Pause"
+      ? t("recorder.pause")
       : status.state === "starting"
-        ? "Starting"
-        : "Finalizing";
+        ? t("recorder.starting")
+        : t("recorder.finalizing");
+  const stopLabel = controlsEnabled ? t("common.done") : t("recorder.working");
 
   return (
     <div className="recorder-bar" data-state={status.state}>
@@ -54,8 +57,8 @@ export function RecorderBar({ status, onPause, onResume, onDone }: RecorderBarPr
         className="recorder-stop"
         disabled={!controlsEnabled}
         onClick={() => onDone(status.sessionId)}
-        aria-label={controlsEnabled ? "Done" : "Working"}
-        title={controlsEnabled ? "Done" : "Working"}
+        aria-label={stopLabel}
+        title={stopLabel}
       >
         <IconStop size={14} />
       </button>

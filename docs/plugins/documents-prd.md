@@ -64,7 +64,7 @@ you approve the destination.
 - Pixel-perfect round-trip editing of arbitrary DOCX files.
 - Running macros, embedded objects, or external links automatically.
 - Overwriting the imported original.
-- Uploading documents to Clovy API for storage.
+- Uploading documents to a Clovy-hosted storage service.
 
 ## Packaging
 

@@ -8,6 +8,7 @@ import {
   type OnboardingArea,
   type OnboardingMood,
 } from "../../../lib/onboarding";
+import { useT } from "../../../i18n";
 import { setClovyPersona } from "../../../lib/tauri";
 import { OnboardingCharacter, ONBOARDING_MOOD_PRESENTATION } from "../OnboardingCharacter";
 import { StepActions, StepCard } from "../StepChrome";
@@ -19,6 +20,7 @@ export function MoodStep({
   area: OnboardingArea;
   onContinue: (mood: OnboardingMood) => void;
 }) {
+  const t = useT();
   const [selected, setSelected] = useState<OnboardingMood>(() =>
     onboardingMood(ONBOARDING_AREA_MOOD_PRESETS[area]),
   );
@@ -35,7 +37,7 @@ export function MoodStep({
       saveOnboardingMood(selected);
       onContinue(selected);
     } catch {
-      setSaveError("I couldn't save this yet. Try again.");
+      setSaveError(t("onboarding.mood.saveError"));
     } finally {
       setSaving(false);
     }
@@ -43,8 +45,8 @@ export function MoodStep({
 
   return (
     <StepCard
-      title="Choose my personality"
-      subtitle="Pick the mood for our first conversation."
+      title={t("onboarding.mood.title")}
+      subtitle={t("onboarding.mood.subtitle")}
       wide
       className="onboarding-card-moods"
     >
@@ -54,7 +56,7 @@ export function MoodStep({
           <p className="onboarding-personality-greeting">{selectedPresentation.greeting}</p>
         </div>
         <fieldset className="onboarding-personality-picker">
-          <legend className="visually-hidden">Choose Clovy's greeting mood</legend>
+          <legend className="visually-hidden">{t("onboarding.mood.legend")}</legend>
           <div className="onboarding-personality-options">
             {ONBOARDING_MOODS.map((mood) => {
               const active = mood === selected;
@@ -90,7 +92,10 @@ export function MoodStep({
         </fieldset>
       </div>
       <p className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
-        {selectedPresentation.label} tone. {selectedPresentation.greeting}
+        {t("onboarding.mood.status", {
+          mood: selectedPresentation.label,
+          greeting: selectedPresentation.greeting,
+        })}
       </p>
       {saveError ? (
         <p className="onboarding-mood-save-error" role="alert">
@@ -98,7 +103,7 @@ export function MoodStep({
         </p>
       ) : null}
       <StepActions
-        continueLabel={saving ? "Saving..." : "Continue"}
+        continueLabel={saving ? t("common.saving") : t("common.continue")}
         continueDisabled={saving}
         onContinue={() => void continueWithMood()}
       />
