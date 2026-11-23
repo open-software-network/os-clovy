@@ -2,11 +2,56 @@ import * as React from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Editor } from "@tiptap/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppState } from "../app/use-app-state";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { htmlToMarkdown } from "../components/note-editor/NotePreview";
-import type { NoteDto, RecoverableRecordingDto } from "../lib/tauri";
+import type {
+  LiveTranscriptEventDto,
+  NoteDto,
+  RecordingMarkDto,
+  RecordingStatusDto,
+  RecoverableRecordingDto,
+} from "../lib/tauri";
+
+const meetingCommands = vi.hoisted(() => ({
+  list: vi.fn(),
+  add: vi.fn(),
+  suggest: vi.fn(),
+  status: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const core = await importOriginal<typeof import("@tauri-apps/api/core")>();
+  return {
+    ...core,
+    invoke: (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_recording_marks":
+          return meetingCommands.list(args);
+        case "add_recording_mark":
+          return meetingCommands.add(args);
+        case "suggest_recording_question":
+          return meetingCommands.suggest(args);
+        case "get_recording_assistance_status":
+          return meetingCommands.status(args);
+        default:
+          return core.invoke(command, args);
+      }
+    },
+  };
+});
+
+beforeEach(() => {
+  meetingCommands.list.mockReset().mockResolvedValue([]);
+  meetingCommands.add.mockReset();
+  meetingCommands.suggest.mockReset();
+  meetingCommands.status.mockReset().mockResolvedValue({
+    epoch: 0,
+    enabled: true,
+    hasRecentContext: true,
+  });
+});
 
 const now = "2026-05-19T10:00:00Z";
 
@@ -59,6 +104,47 @@ const recovery: RecoverableRecordingDto = {
   finalPathPresent: false,
   bytesFound: 4096,
 };
+
+function activeMeeting(overrides: Partial<RecordingStatusDto> = {}): RecordingStatusDto {
+  return {
+    sessionId: "session-1",
+    noteId: "note-1",
+    state: "recording",
+    elapsedMs: 8000,
+    level: { peak: 0, rms: 0, recentPeaks: [] },
+    silenceWarning: false,
+    bytesWritten: 4096,
+    livePreviewEnabled: true,
+    ...overrides,
+  };
+}
+
+function meetingPreview(overrides: Partial<LiveTranscriptEventDto> = {}): LiveTranscriptEventDto {
+  return {
+    noteId: "note-1",
+    sessionId: "session-1",
+    sourceMode: "microphonePlusSystem",
+    source: "microphone",
+    segmentId: "mic-turn",
+    startMs: 5000,
+    endMs: 7500,
+    text: "We should confirm timing with the supplier.",
+    stability: "final",
+    ...overrides,
+  };
+}
+
+function recordingMark(overrides: Partial<RecordingMarkDto> = {}): RecordingMarkDto {
+  return {
+    id: "mark-1",
+    noteId: "note-1",
+    sessionId: "session-1",
+    elapsedMs: 8123,
+    label: "Confirm timing",
+    createdAt: now,
+    ...overrides,
+  };
+}
 
 function stubNavigatorPlatform(platform: string, userAgent: string) {
   const ownPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
@@ -462,11 +548,9 @@ describe("NoteEditor", () => {
     );
 
     // Scope to the turn labels — the source filter (shown when both
-    // sources are present) also renders "System"/"Microphone" options.
-    expect(screen.getByText("System", { selector: ".transcript-turn-source" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Microphone", { selector: ".transcript-turn-source" }),
-    ).toBeInTheDocument();
+    // sources are present) also renders "Others"/"You" options.
+    expect(screen.getByText("Others", { selector: ".transcript-turn-source" })).toBeInTheDocument();
+    expect(screen.getByText("You", { selector: ".transcript-turn-source" })).toBeInTheDocument();
     expect(screen.getByText("0:01-0:03")).toBeInTheDocument();
     expect(screen.getByText("System playback text")).toBeInTheDocument();
     expect(screen.getByText("Microphone response")).toBeInTheDocument();
@@ -512,7 +596,7 @@ describe("NoteEditor", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Microphone" }));
+    await userEvent.click(screen.getByRole("button", { name: "You" }));
     scrollTo.mockClear();
     await userEvent.click(screen.getByRole("button", { name: "All" }));
 
@@ -633,6 +717,415 @@ describe("NoteEditor", () => {
     expect(screen.getByText("Still-visible session B preview")).toBeInTheDocument();
   });
 
+  it("shows live sources on the notes tab and keeps native recording marks after stop and reopen", async () => {
+    const saved: RecordingMarkDto[] = [];
+    meetingCommands.list.mockImplementation(async () => [...saved]);
+    meetingCommands.add
+      .mockImplementationOnce(async () => {
+        const mark = recordingMark();
+        saved.push(mark);
+        return mark;
+      })
+      .mockImplementationOnce(async () => {
+        const mark = recordingMark({ id: "mark-2", label: "" });
+        saved.push(mark);
+        return mark;
+      });
+    const previews = [
+      meetingPreview(),
+      meetingPreview({
+        source: "system",
+        segmentId: "system-turn",
+        text: "The revised delivery date is Thursday.",
+      }),
+    ];
+    const { rerender, unmount } = render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={previews}
+      />,
+    );
+    expect(
+      await screen.findByText("You", { selector: ".transcript-turn-source" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Others", { selector: ".transcript-turn-source" })).toBeInTheDocument();
+    expect(meetingCommands.suggest).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Label (optional)" }), {
+      target: { value: "  Confirm timing  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add mark" }));
+    expect(await screen.findByText("Confirm timing")).toBeInTheDocument();
+    expect(meetingCommands.add).toHaveBeenLastCalledWith({
+      noteId: "note-1",
+      sessionId: "session-1",
+      label: "Confirm timing",
+    });
+
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ activeTab: "transcription" })}
+        recordingStatus={activeMeeting({ state: "paused" })}
+        liveTranscript={previews}
+      />,
+    );
+    expect(
+      screen.queryByRole("region", { name: "Live transcript preview" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Suggest a question" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Add mark" }));
+    expect(await screen.findByText("Mark")).toBeInTheDocument();
+    expect(meetingCommands.add).toHaveBeenLastCalledWith({
+      noteId: "note-1",
+      sessionId: "session-1",
+      label: undefined,
+    });
+    expect(screen.getAllByText("00:08")).toHaveLength(3);
+
+    rerender(<NoteEditor {...props} note={note()} />);
+    expect(screen.getByText("Confirm timing")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add mark" })).not.toBeInTheDocument();
+    unmount();
+
+    render(<NoteEditor {...props} note={note({ activeTab: "transcription" })} />);
+    expect(await screen.findByText("Confirm timing")).toBeInTheDocument();
+    expect(screen.getAllByText("00:08")).toHaveLength(2);
+    expect(meetingCommands.list).toHaveBeenLastCalledWith({ noteId: "note-1" });
+  });
+
+  it("keeps suggestion failure recoverable and drops a late result across pause and resume", async () => {
+    let completeAbandoned: (question: string) => void = () => {};
+    meetingCommands.suggest
+      .mockRejectedValueOnce(new Error("Notes engine unavailable"))
+      .mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          completeAbandoned = resolve;
+        }),
+      )
+      .mockResolvedValueOnce("Who will confirm Thursday's delivery?");
+    const preview = [meetingPreview()];
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={preview}
+      />,
+    );
+    const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+    await waitFor(() => expect(suggest()).toBeEnabled());
+
+    fireEvent.click(suggest());
+    expect(await screen.findByText("Could not suggest a question. Try again.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add mark" })).toBeEnabled();
+    fireEvent.click(suggest());
+    expect(screen.getByRole("button", { name: "Suggesting a question…" })).toBeDisabled();
+
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting({ state: "paused" })}
+        liveTranscript={preview}
+      />,
+    );
+    expect(suggest()).toBeDisabled();
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={preview}
+      />,
+    );
+    await waitFor(() => expect(suggest()).toBeEnabled());
+    await act(async () => completeAbandoned("An outdated question?"));
+    expect(screen.queryByText("An outdated question?")).not.toBeInTheDocument();
+
+    fireEvent.click(suggest());
+    expect(await screen.findByText("Who will confirm Thursday's delivery?")).toBeInTheDocument();
+    expect(meetingCommands.suggest).toHaveBeenLastCalledWith({
+      noteId: "note-1",
+      sessionId: "session-1",
+    });
+
+    rerender(<NoteEditor {...props} note={note()} />);
+    expect(screen.queryByText("Who will confirm Thursday's delivery?")).not.toBeInTheDocument();
+  });
+
+  it("retries reading saved marks and keeps a failed mark label available for retry", async () => {
+    meetingCommands.list
+      .mockRejectedValueOnce(new Error("Read unavailable"))
+      .mockResolvedValueOnce([recordingMark()]);
+    meetingCommands.add
+      .mockRejectedValueOnce(new Error("Write unavailable"))
+      .mockResolvedValueOnce(recordingMark({ id: "mark-2", label: "Check pricing" }));
+    render(<NoteEditor {...props} note={note()} recordingStatus={activeMeeting()} />);
+
+    expect(await screen.findByText("Could not load recording marks.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Confirm timing")).toBeInTheDocument();
+
+    const label = screen.getByRole("textbox", { name: "Label (optional)" });
+    const add = screen.getByRole("button", { name: "Add mark" });
+    fireEvent.change(label, { target: { value: "Check pricing" } });
+    fireEvent.click(add);
+    expect(await screen.findByText("Could not save the mark. Try again.")).toBeInTheDocument();
+    expect(label).toHaveValue("Check pricing");
+    fireEvent.click(add);
+    expect(await screen.findByText("Check pricing")).toBeInTheDocument();
+    expect(label).toHaveValue("");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("discloses Notes engine use and gives setup guidance when the engine is unsupported", async () => {
+    meetingCommands.suggest.mockRejectedValueOnce({
+      code: "recording_suggestion_tools_unavailable",
+      message: "Raw native message",
+    });
+    render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={[meetingPreview()]}
+      />,
+    );
+
+    const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+    await waitFor(() => expect(suggest()).toBeEnabled());
+    expect(suggest()).toHaveAccessibleDescription(
+      "Uses your Notes engine and recent transcript. Provider charges may apply.",
+    );
+    fireEvent.click(suggest());
+    expect(
+      await screen.findByText(
+        "Choose a different Notes engine in Settings to request suggestions.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Raw native message")).not.toBeInTheDocument();
+  });
+
+  it("isolates pending marks and suggestions across notes and sessions", async () => {
+    let completeMark: (mark: RecordingMarkDto) => void = () => {};
+    let completeQuestion: (question: string) => void = () => {};
+    meetingCommands.add.mockReturnValueOnce(
+      new Promise<RecordingMarkDto>((resolve) => {
+        completeMark = resolve;
+      }),
+    );
+    meetingCommands.suggest.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        completeQuestion = resolve;
+      }),
+    );
+    const preview = [meetingPreview()];
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={preview}
+      />,
+    );
+    const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+    await waitFor(() => expect(suggest()).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Add mark" }));
+    fireEvent.click(suggest());
+
+    const second = activeMeeting({ noteId: "note-2", sessionId: "session-2" });
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({ id: "note-2" })}
+        recordingStatus={second}
+        liveTranscript={preview}
+      />,
+    );
+    expect(suggest()).toBeDisabled();
+    await act(async () => {
+      completeMark(recordingMark());
+      completeQuestion("What does the first meeting need?");
+    });
+    expect(screen.queryByText("Confirm timing")).not.toBeInTheDocument();
+    expect(screen.queryByText("What does the first meeting need?")).not.toBeInTheDocument();
+    expect(meetingCommands.list).toHaveBeenLastCalledWith({ noteId: "note-2" });
+    expect(meetingCommands.suggest).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a completed mark after reopening its note before the save settles", async () => {
+    let completeMark: (mark: RecordingMarkDto) => void = () => {};
+    meetingCommands.add.mockReturnValueOnce(
+      new Promise<RecordingMarkDto>((resolve) => {
+        completeMark = resolve;
+      }),
+    );
+    const first = <NoteEditor {...props} note={note()} recordingStatus={activeMeeting()} />;
+    const { rerender } = render(first);
+    fireEvent.click(screen.getByRole("button", { name: "Add mark" }));
+    rerender(<NoteEditor {...props} note={note({ id: "note-2" })} />);
+    rerender(first);
+    await act(async () => {}); // The second read of the first note precedes the save.
+    expect(meetingCommands.list).toHaveBeenLastCalledWith({ noteId: "note-1" });
+    expect(screen.queryByText("Confirm timing")).not.toBeInTheDocument();
+    await act(async () => completeMark(recordingMark()));
+    expect(screen.getByText("Confirm timing")).toBeInTheDocument();
+  });
+
+  it("clears the previous question when native context changes between status refreshes", async () => {
+    vi.useFakeTimers();
+    try {
+      meetingCommands.suggest.mockResolvedValueOnce("Who can confirm delivery?");
+      render(
+        <NoteEditor
+          {...props}
+          note={note()}
+          recordingStatus={activeMeeting()}
+          liveTranscript={[meetingPreview()]}
+        />,
+      );
+      const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+      await act(async () => {});
+      expect(suggest()).toBeEnabled();
+      await act(async () => fireEvent.click(suggest()));
+      expect(screen.getByText("Who can confirm delivery?")).toBeInTheDocument();
+
+      meetingCommands.status.mockResolvedValue({ epoch: 2, enabled: true, hasRecentContext: true });
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(suggest()).toBeEnabled();
+      expect(screen.queryByText("Who can confirm delivery?")).not.toBeInTheDocument();
+
+      meetingCommands.status.mockResolvedValue({
+        epoch: 2,
+        enabled: true,
+        hasRecentContext: false,
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(suggest()).toBeDisabled();
+      expect(screen.getByText("Suggestions need recent speech.")).toBeInTheDocument();
+      expect(meetingCommands.status).toHaveBeenLastCalledWith({
+        noteId: "note-1",
+        sessionId: "session-1",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("expires old preview context and disables suggestions when live transcription is off", async () => {
+    meetingCommands.status.mockResolvedValue({ epoch: 1, enabled: true, hasRecentContext: false });
+    const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+    const preview = [meetingPreview()];
+    const { rerender, unmount } = render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting({ elapsedMs: 80_000 })}
+        liveTranscript={preview}
+      />,
+    );
+    expect(suggest()).toBeDisabled();
+    expect(await screen.findByText("Suggestions need recent speech.")).toBeInTheDocument();
+
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting({ livePreviewEnabled: false })}
+        liveTranscript={preview}
+      />,
+    );
+    expect(suggest()).toBeDisabled();
+    expect(screen.getByText("Live transcription is required for suggestions.")).toBeInTheDocument();
+    unmount();
+
+    meetingCommands.status.mockResolvedValue({ epoch: 2, enabled: false, hasRecentContext: false });
+    render(
+      <NoteEditor
+        {...props}
+        note={note()}
+        recordingStatus={activeMeeting()}
+        liveTranscript={preview}
+      />,
+    );
+    expect(
+      await screen.findByText("Live transcription is required for suggestions."),
+    ).toBeInTheDocument();
+    expect(suggest()).toBeDisabled();
+    expect(
+      screen.queryByRole("region", { name: "Live transcript preview" }),
+    ).not.toBeInTheDocument();
+    expect(meetingCommands.suggest).not.toHaveBeenCalled();
+  });
+
+  it("preserves an accepted suggestion when recent context expires while it is pending", async () => {
+    vi.useFakeTimers();
+    try {
+      let completeQuestion: (question: string) => void = () => {};
+      meetingCommands.suggest.mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          completeQuestion = resolve;
+        }),
+      );
+      render(<NoteEditor {...props} note={note()} recordingStatus={activeMeeting()} />);
+      await act(async () => {});
+      fireEvent.click(screen.getByRole("button", { name: "Suggest a question" }));
+
+      meetingCommands.status.mockResolvedValue({
+        epoch: 0,
+        enabled: true,
+        hasRecentContext: false,
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(screen.getByRole("button", { name: "Suggesting a question…" })).toBeDisabled();
+      expect(screen.getByText("Suggestions need recent speech.")).toBeInTheDocument();
+
+      await act(async () => completeQuestion("Who will confirm delivery?"));
+      expect(screen.getByText("Who will confirm delivery?")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Suggest a question" })).toBeDisabled();
+      expect(meetingCommands.suggest).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves an accepted suggestion when a status refresh temporarily fails", async () => {
+    vi.useFakeTimers();
+    try {
+      let completeQuestion: (question: string) => void = () => {};
+      meetingCommands.suggest.mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          completeQuestion = resolve;
+        }),
+      );
+      render(<NoteEditor {...props} note={note()} recordingStatus={activeMeeting()} />);
+      await act(async () => {});
+      const suggest = () => screen.getByRole("button", { name: "Suggest a question" });
+      fireEvent.click(suggest());
+
+      meetingCommands.status.mockRejectedValueOnce(new Error("Status temporarily unavailable"));
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(screen.getByRole("button", { name: "Suggesting a question…" })).toBeDisabled();
+      expect(
+        screen.getByText("Could not check recording status. Try again in a moment."),
+      ).toBeInTheDocument();
+
+      await act(async () => completeQuestion("Who will confirm delivery?"));
+      expect(screen.getByText("Who will confirm delivery?")).toBeInTheDocument();
+      expect(suggest()).toBeDisabled();
+
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(suggest()).toBeEnabled();
+      expect(screen.getByText("Who will confirm delivery?")).toBeInTheDocument();
+      expect(meetingCommands.suggest).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows system-source live transcript preview turns while recording", () => {
     render(
       <NoteEditor
@@ -676,14 +1169,14 @@ describe("NoteEditor", () => {
       />,
     );
 
-    // The System Source must surface in the live preview, labelled "System",
+    // The System Source must surface in the live preview, labelled "Others",
     // alongside the microphone turn, not be dropped or mislabelled.
     expect(screen.getByText("What the meeting played back")).toBeInTheDocument();
     expect(screen.getByText("What I said into the mic")).toBeInTheDocument();
-    expect(screen.getByText("System", { selector: ".transcript-turn-source" })).toBeInTheDocument();
+    expect(screen.getByText("Others", { selector: ".transcript-turn-source" })).toBeInTheDocument();
   });
 
-  it("only shows the live preview waiting state when preview is enabled", () => {
+  it("only shows the live preview waiting state when native preview is enabled", async () => {
     const recordingStatus = {
       sessionId: "session-1",
       state: "recording" as const,
@@ -722,7 +1215,9 @@ describe("NoteEditor", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Listening for transcript preview...");
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Listening for transcript preview...",
+    );
   });
 
   it("floats a source warning notice over the recorder and hides the consent hint", () => {

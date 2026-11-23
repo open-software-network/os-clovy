@@ -53,6 +53,14 @@ pub(super) fn require_openrouter_key(key: Option<&str>) -> Result<&str, AppError
     })
 }
 
+pub(super) fn text_generation_model(model: String) -> String {
+    if model == crate::providers::LEGACY_AUTO_GENERATION_MODEL || model == "auto" {
+        crate::providers::DEFAULT_GENERATION_MODEL.to_string()
+    } else {
+        model
+    }
+}
+
 /// Note generation sends the local prompt directly to OpenRouter with the user's key.
 pub(crate) async fn generate_note_via(
     transport: &DirectTransport<'_>,
@@ -61,11 +69,7 @@ pub(crate) async fn generate_note_via(
     request: GenerationRequest,
 ) -> Result<GenerationProviderResult, AppError> {
     let openrouter_key = require_openrouter_key(openrouter_key)?;
-    let model = if model == crate::providers::LEGACY_AUTO_GENERATION_MODEL || model == "auto" {
-        crate::providers::DEFAULT_GENERATION_MODEL.to_string()
-    } else {
-        model
-    };
+    let model = text_generation_model(model);
     let body = serde_json::json!({
         "model": model,
         "messages": [

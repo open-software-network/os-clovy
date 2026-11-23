@@ -14,6 +14,7 @@ import type {
 } from "./agent-runtime-contract";
 import { parseDictationHelperEvent } from "./dictation-events";
 import { clovyHomeProfileRemovalPlan, reconcileClovyHomeProfileRemoval } from "./clovy-home";
+import { publishRecordingMark } from "./recording-marks";
 
 // Re-exported so modules that build their own command calls route through the
 // same `invoke` as the rest of the app's bindings.
@@ -520,6 +521,15 @@ export type RecordingStatusDto = {
   livePreviewEnabled?: boolean;
   sources?: SourceStatusDto[];
   warnings?: SourceWarningDto[];
+};
+
+export type RecordingMarkDto = {
+  id: string;
+  noteId: string;
+  sessionId: string;
+  elapsedMs: number;
+  label: string;
+  createdAt: string;
 };
 
 export type RecordingSourceTelemetryDto = Pick<
@@ -1143,6 +1153,33 @@ export async function startMeetingRecording(
   return invoke<MeetingStartRecordingOutcome>("start_meeting_recording", {
     request: { requestId, sourceMode, ...(video ? { video } : {}) },
   });
+}
+
+export async function addRecordingMark(noteId: string, sessionId: string, label?: string) {
+  const mark = await invoke<RecordingMarkDto>("add_recording_mark", { noteId, sessionId, label });
+  if (mark.noteId === noteId && mark.sessionId === sessionId) publishRecordingMark(mark);
+  return mark;
+}
+
+export function listRecordingMarks(noteId: string) {
+  return invoke<RecordingMarkDto[]>("list_recording_marks", { noteId });
+}
+
+export type RecordingAssistanceStatusDto = {
+  epoch: number;
+  enabled: boolean;
+  hasRecentContext: boolean;
+};
+
+export function getRecordingAssistanceStatus(noteId: string, sessionId: string) {
+  return invoke<RecordingAssistanceStatusDto>("get_recording_assistance_status", {
+    noteId,
+    sessionId,
+  });
+}
+
+export function suggestRecordingQuestion(noteId: string, sessionId: string) {
+  return invoke<string>("suggest_recording_question", { noteId, sessionId });
 }
 
 export async function pauseRecording(

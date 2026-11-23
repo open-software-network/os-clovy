@@ -268,6 +268,79 @@ async fn generate_note_from_transcript_text(
     .await
 }
 
+/// Isolated, tool-free inference for an explicit live meeting request.
+pub(crate) async fn generate_recording_question(
+    request: crate::llm::GenerateRequest,
+) -> Result<String, AppError> {
+    use crate::llm::registry::{LlmUsage, ProviderRef};
+
+    let provider = crate::llm::provider_for(LlmUsage::Notes);
+    match &provider {
+        ProviderRef::Cli { id } if !id.tools_disabled() => Err(AppError::new(
+            "recording_suggestion_tools_unavailable",
+            "The selected Notes engine cannot suggest a question with all tools disabled.",
+        )),
+        ProviderRef::Cli { .. } | ProviderRef::Endpoint { .. } => {
+            let output = crate::llm::generate(&provider, request).await?;
+            Ok(output.text)
+        }
+        ProviderRef::OpenRouter => {
+            let key = crate::providers::provider_api_key(BuiltinProvider::OpenRouter)?;
+            recording_question_via_openrouter(
+                &production_notes_transport(),
+                key.as_deref(),
+                crate::providers::remote_generation_model(),
+                request,
+            )
+            .await
+        }
+        ProviderRef::None => Err(AppError::new(
+            "recording_suggestion_provider_missing",
+            "Choose a Notes engine to suggest a question.",
+        )),
+    }
+}
+
+async fn recording_question_via_openrouter(
+    transport: &DirectTransport<'_>,
+    api_key: Option<&str>,
+    model: String,
+    request: crate::llm::GenerateRequest,
+) -> Result<String, AppError> {
+    let key = require_openrouter_key(api_key)?;
+    let body = serde_json::json!({
+        "model": text_generation_model(model),
+        "messages": [
+            { "role": "system", "content": request.system },
+            { "role": "user", "content": request.prompt }
+        ],
+        "max_tokens": 512
+    });
+    // Live assistance issues a single completion. A transient failure is
+    // returned to the requester so it cannot trigger a late automatic resend.
+    let response = transport
+        .direct_client
+        .post(format!("{}/chat/completions", transport.openrouter_base))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(network_error)?;
+    if !response.status().is_success() {
+        return Err(direct_provider_error_for(
+            BuiltinProvider::OpenRouter,
+            response.status(),
+            "a suggested question",
+        ));
+    }
+    let value = response
+        .json()
+        .await
+        .map_err(|_| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))?;
+    extract_chat_completion_text(&value)
+        .ok_or_else(|| AppError::new(REQUEST_FAILED_CODE, INVALID_DIRECT_RESPONSE))
+}
+
 /// Corrects a note transcript using its selected OpenRouter, endpoint or CLI
 /// engine and the local cleanup contract. Dictation has its own route
 /// ([`dictate_cleanup`]).

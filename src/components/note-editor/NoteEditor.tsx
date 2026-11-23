@@ -24,13 +24,14 @@ import type {
   NoteDto,
   MeetingVideoRequest,
   MeetingWindowDto,
+  RecordingAssistanceStatusDto,
   RecordingSourceMode,
   RecordingSourceReadinessDto,
   RecordingStatusDto,
   RecoverableRecordingDto,
   TranscriptDto,
 } from "../../lib/tauri";
-import { detectMeetingWindow } from "../../lib/tauri";
+import { detectMeetingWindow, getRecordingAssistanceStatus } from "../../lib/tauri";
 import { DotSpinner } from "../DotSpinner";
 import { InlineNotice } from "../ui/InlineNotice";
 import { CopyStateIcon } from "../ui/CopyStateIcon";
@@ -53,11 +54,64 @@ import {
   userFacingFailureMessage,
 } from "./NoteFailureBanner";
 import { NotePreview } from "./NotePreview";
+import { RecordingAssist } from "./RecordingAssist";
 
 /** Must track MEETING_END_COUNTDOWN_MS in meeting_detection.rs — the status
  * only carries seconds remaining, not the countdown's full length, and the
  * Stop button's draining background needs the ratio. */
 const MEETING_END_COUNTDOWN_SECONDS = 15;
+const ASSIST_STATUS_POLL_MS = 1_000;
+const NOTES_PREVIEW_EVENT_LIMIT = 3;
+
+function useRecordingAssistanceStatus(noteId: string, recording?: RecordingStatusDto) {
+  const sessionId =
+    (recording?.state === "recording" || recording?.state === "paused") &&
+    recording.livePreviewEnabled
+      ? recording.sessionId
+      : undefined;
+  const state = recording?.state;
+  const target = useMemo(
+    () => (sessionId ? { noteId, sessionId, state } : undefined),
+    [noteId, sessionId, state],
+  );
+  const [snapshot, setSnapshot] = useState<{
+    target: typeof target;
+    status: RecordingAssistanceStatusDto;
+    reachable: boolean;
+  }>();
+
+  useEffect(() => {
+    if (!target) return;
+    const { noteId, sessionId } = target;
+    let current = true;
+    let timer: number | undefined;
+    async function refresh() {
+      try {
+        const status = await getRecordingAssistanceStatus(noteId, sessionId);
+        if (current) setSnapshot({ target, status, reachable: true });
+      } catch {
+        if (current) {
+          setSnapshot((previous) =>
+            previous?.reachable && previous.target === target
+              ? { ...previous, reachable: false }
+              : previous,
+          );
+        }
+      } finally {
+        if (current) {
+          timer = window.setTimeout(() => void refresh(), ASSIST_STATUS_POLL_MS);
+        }
+      }
+    }
+    void refresh();
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [target]);
+
+  return snapshot?.target === target ? snapshot : undefined;
+}
 
 type NoteEditorProps = {
   note: NoteDto;
@@ -99,8 +153,8 @@ type NoteEditorProps = {
 
 function sourceLabel(source?: string) {
   return source === "system"
-    ? translate("notes.editor.source.system")
-    : translate("notes.editor.source.microphone");
+    ? translate("notes.editor.source.others")
+    : translate("notes.editor.source.you");
 }
 
 /** Normalise a turn's source to one of the two filterable buckets — an
@@ -288,8 +342,8 @@ export function NoteEditor({
   ] as const;
   const sourceFilters = [
     { value: "all", label: t("notes.editor.source.all") },
-    { value: "microphone", label: t("notes.editor.source.microphone") },
-    { value: "system", label: t("notes.editor.source.system") },
+    { value: "microphone", label: t("notes.editor.source.you") },
+    { value: "system", label: t("notes.editor.source.others") },
   ] as const;
   const noteTitlePlaceholder = t("notes.editor.titlePlaceholder");
   const content = note.editedContent ?? note.generatedContent ?? "";
@@ -310,7 +364,24 @@ export function NoteEditor({
     () => orderTranscriptTurns([...sourceTranscripts, ...liveTranscriptTurns]),
     [sourceTranscripts, liveTranscriptTurns],
   );
-  const recordingForNote = recordingStatus;
+  const recordingForNote =
+    recordingStatus?.noteId && recordingStatus.noteId !== note.id ? undefined : recordingStatus;
+  const assistanceSnapshot = useRecordingAssistanceStatus(note.id, recordingForNote);
+  const assistance = assistanceSnapshot?.status;
+  const sessionPreviewEvents = useMemo(
+    () =>
+      reconciledLiveTranscript.filter(
+        (event) => event.noteId === note.id && event.sessionId === recordingForNote?.sessionId,
+      ),
+    [note.id, recordingForNote?.sessionId, reconciledLiveTranscript],
+  );
+  const notesPreviewTurns = useMemo(
+    () =>
+      coalesceLiveTranscriptEventsForDisplay(
+        sessionPreviewEvents.slice(-NOTES_PREVIEW_EVENT_LIMIT),
+      ).map(liveTranscriptEventToTurn),
+    [sessionPreviewEvents],
+  );
   const recordingActive = Boolean(recordingForNote);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [meetingWindow, setMeetingWindow] = useState<MeetingWindowDto | null>(null);
@@ -503,8 +574,7 @@ export function NoteEditor({
   const transcriptCoverageNotice = transcriptCoverageNoticeText(note);
   const silentSourceNotice = silentSourceNoticeText(note);
   const showTranscriptProcessing = processingStatus !== null;
-  const showLivePreviewWaiting =
-    recordingForNote?.livePreviewEnabled === true && liveTranscriptTurns.length === 0;
+  const showLivePreviewWaiting = assistance?.enabled === true && liveTranscriptTurns.length === 0;
   // Processing runs in the background and is queued per note, so a recording
   // that's still transcribing/generating no longer blocks starting another —
   // you can stack messages and they process in order. The record button only
@@ -559,6 +629,13 @@ export function NoteEditor({
       </header>
 
       <section className="editor-content">
+        <RecordingAssist
+          key={note.id}
+          noteId={note.id}
+          recording={recordingForNote}
+          assistance={assistance}
+          assistanceStatusAvailable={assistanceSnapshot?.reachable === true}
+        />
         {note.videoAnalysis ? (
           <InlineNotice
             role="status"
@@ -659,6 +736,16 @@ export function NoteEditor({
           </div>
         ) : (
           <div className="note-body-stack">
+            {assistance?.enabled && notesPreviewTurns.length > 0 ? (
+              <section className="recording-assist-preview" aria-label={t("notes.assist.preview")}>
+                <h2>{t("notes.assist.preview")}</h2>
+                <div className="source-transcripts">
+                  {notesPreviewTurns.map((turn) => (
+                    <TranscriptTurn key={turn.id} transcript={turn} preview />
+                  ))}
+                </div>
+              </section>
+            ) : null}
             <div className={revealingNotes ? "note-reveal-active" : undefined}>
               <NotePreview
                 noteId={note.id}

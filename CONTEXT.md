@@ -246,6 +246,18 @@ The bounded dictionary spelling guidance supplied to speech recognition,
 distinct from the complete context used to correct recognized text.
 _Avoid_: full correction context, instructions, previous transcript.
 
+**Recording mark**:
+A user-created timestamp and optional label on a note-backed recording session.
+The timestamp uses the recorder's active elapsed time, excluding pauses; the
+mark stays attached to its original note and session after final transcription.
+_Avoid_: transcript turn (a mark is not detected speech), meeting object.
+
+**Recording assistance**:
+An explicitly requested question grounded in recent live transcript preview
+from the current recording session. Uses the selected Notes engine in a
+tool-free one-shot call; it does not authorize an agent run or a new provider.
+_Avoid_: automatic tool trigger, decision (a suggestion is not an agreement).
+
 **Correction context**:
 The authorized dictionary and prior same-source transcript used by the
 notes text engine to correct a note transcript; dictation cleanup

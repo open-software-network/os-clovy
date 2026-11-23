@@ -18,6 +18,34 @@ or provider fallback participates. Prompts remain local under
 `src-tauri/src/prompts/`, and CLI/endpoint calls retain `llm::generate`.
 See [llm-providers.md](llm-providers.md) for pacing, retries and saved jobs.
 
+## Recording assistance and marks
+
+The note editor offers recording marks and an explicit request for a relevant
+question while recording. Marks persist against the existing note and recording
+session; native capture supplies the active elapsed timestamp, so paused wall
+time never advances a mark. They remain available when reopening the note from
+history, independently of final transcription or note-generation success.
+
+Question requests use bounded, recent preview text from the active recording
+only. They require live transcription to be enabled and the recorder to be
+running. The selected Notes engine answers in an isolated tool-free one-shot
+call, with transcript content treated as untrusted data. Pause, stop or turning
+live transcription off invalidates pending assistance. Provider errors leave
+capture, saved audio and final processing intact. Requests are explicit because
+the selected engine may process text remotely and incur provider usage; no
+additional provider or automatic fallback is introduced.
+
+If the selected CLI cannot disable all tools for this operation, assistance
+fails with setup guidance instead of giving the transcript access to tools or
+switching engines. The existing final note-generation routes retain their
+documented isolation contracts in [llm-providers.md](llm-providers.md).
+
+Preview remains ephemeral and separate from authoritative `transcripts` rows.
+The existing final-transcription and note-generation pipeline produces the
+summary and evidence-backed decisions and next steps on the same note. Marks
+are user annotations, not inferred agreements or tasks. See
+`openspec/changes/reuniao-assistida/` for the scenarios and verification scope.
+
 ## Data flow
 
 1. **`start_recording`** → `capture::start_capture` opens `microphone.partial.wav`

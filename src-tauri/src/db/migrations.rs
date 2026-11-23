@@ -1432,6 +1432,26 @@ const MIGRATIONS: &[Migration] = &[
             },
         ],
     },
+    Migration {
+        version: 58,
+        name: "recording_marks",
+        requirements: &[
+            SchemaRequirement::Table("recording_marks"),
+            SchemaRequirement::Index("idx_recording_marks_note"),
+        ],
+        steps: &[MigrationStep::Sql(
+            "CREATE TABLE IF NOT EXISTS recording_marks (
+                id TEXT PRIMARY KEY NOT NULL,
+                note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES recording_sessions(id) ON DELETE CASCADE,
+                elapsed_ms INTEGER NOT NULL CHECK (elapsed_ms >= 0),
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_recording_marks_note
+             ON recording_marks (note_id, created_at);",
+        )],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2399,6 +2419,7 @@ mod tests {
                 (55, "agent_session_approval_mode".to_string()),
                 (56, "interrupt_unresolved_tool_calls".to_string()),
                 (57, "meeting_video".to_string()),
+                (58, "recording_marks".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2464,7 +2485,7 @@ mod tests {
         assert_eq!(count, 2);
         run_migrations(&pool).await.unwrap();
         assert_latest_stamp(&pool).await;
-        assert_eq!(MIGRATIONS.last().unwrap().version, 57);
+        assert!(table_exists(&pool, "recording_marks").await);
     }
 
     #[tokio::test]
@@ -2830,6 +2851,7 @@ mod tests {
                 (55, "agent_session_approval_mode".to_string()),
                 (56, "interrupt_unresolved_tool_calls".to_string()),
                 (57, "meeting_video".to_string()),
+                (58, "recording_marks".to_string()),
             ]
         );
 

@@ -51,6 +51,7 @@ mod local_env;
 pub mod macos_menu_icons;
 pub mod main_window;
 pub mod mcp_server;
+mod meeting_assist;
 pub mod meeting_calendar_context;
 pub mod meeting_detection;
 pub mod meeting_hud;
@@ -200,6 +201,10 @@ pub fn run() {
             theme_icon::set_dock_icon,
             print_current_webview,
             commands::bootstrap_app,
+            meeting_assist::list_recording_marks,
+            meeting_assist::add_recording_mark,
+            meeting_assist::suggest_recording_question,
+            meeting_assist::get_recording_assistance_status,
             agent_sessions::api::list_agent_sessions,
             agent_sessions::api::get_agent_session,
             agent_sessions::api::get_latest_agent_run,

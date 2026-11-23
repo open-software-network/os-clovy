@@ -6,7 +6,13 @@ import { resetInterfaceLocaleForTests } from "../i18n/locale";
 import type { NoteDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({ detect: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ detectMeetingWindow: mocks.detect }));
+vi.mock("../lib/tauri", () => ({
+  detectMeetingWindow: mocks.detect,
+  listRecordingMarks: vi.fn().mockResolvedValue([]),
+  getRecordingAssistanceStatus: vi
+    .fn()
+    .mockResolvedValue({ epoch: 0, enabled: false, hasRecentContext: false }),
+}));
 vi.mock("../components/note-editor/NotePreview", () => ({
   NotePreview: () => <div>Note body</div>,
 }));

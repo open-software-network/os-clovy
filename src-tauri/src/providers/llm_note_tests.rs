@@ -25,6 +25,75 @@ impl Drop for Restore {
 }
 
 #[tokio::test]
+async fn recording_question_routes_only_to_the_selected_tool_free_notes_engine() {
+    use crate::llm::{endpoint::test_server, registry::LlmEndpointRecord, GenerateRequest};
+
+    let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+    let _restore = Restore;
+    let endpoint = test_server::start(std::sync::Arc::new(|_| {
+        (200, test_server::chat_reply("Qual é o prazo?"))
+    }))
+    .await;
+    let mut settings = crate::providers::default_settings_for_tests();
+    let endpoint_id = "recording-question-endpoint";
+    let provider = ProviderRef::Endpoint {
+        id: endpoint_id.into(),
+    };
+    settings.llm_endpoints.push(LlmEndpointRecord {
+        id: endpoint_id.into(),
+        name: "Notes endpoint".into(),
+        base_url: endpoint.base_url.clone(),
+        model_id: "notes-test-model".into(),
+        has_api_key: false,
+        structured_output: None,
+        rpm_limit: None,
+    });
+    settings.llm_usage.chat = provider.clone();
+    let request = GenerateRequest {
+        system: Some("Return one grounded question.".into()),
+        prompt: r#"{"transcript":[{"source":"microphone","text":"Ainda falta decidir o prazo."}]}"#
+            .into(),
+        ..Default::default()
+    };
+
+    for (selected, expected_error) in [
+        (ProviderRef::None, "recording_suggestion_provider_missing"),
+        (
+            ProviderRef::Cli { id: CliKind::Codex },
+            "recording_suggestion_tools_unavailable",
+        ),
+        (
+            ProviderRef::Cli { id: CliKind::Agy },
+            "recording_suggestion_tools_unavailable",
+        ),
+    ] {
+        settings.llm_usage.notes = selected;
+        crate::providers::replace_current_settings_for_tests(settings.clone());
+        let error = generate_recording_question(request.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected_error);
+        assert!(endpoint.requests.lock().unwrap().is_empty());
+    }
+
+    settings.llm_usage.notes = provider;
+    settings.llm_usage.chat = ProviderRef::None;
+    crate::providers::replace_current_settings_for_tests(settings);
+    assert_eq!(
+        generate_recording_question(request.clone()).await.unwrap(),
+        "Qual é o prazo?"
+    );
+    let requests = endpoint.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0];
+    assert_eq!(body["model"], "notes-test-model");
+    assert_eq!(body["messages"][0]["content"], request.system.unwrap());
+    assert_eq!(body["messages"][1]["content"], request.prompt);
+    assert!(body.get("tools").is_none());
+    assert!(body.get("tool_choice").is_none());
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn llm_note_generated_by_fake_cli_is_persisted_like_a_clovy_note() {
     let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;

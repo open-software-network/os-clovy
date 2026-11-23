@@ -853,6 +853,7 @@ pub(crate) fn pause_capture(
     super::control_admission::with_control_admission(&ACTIVE_RECORDING, authorization, |active| {
         let recording = active_for_session(active.as_mut(), session_id)?;
         if !recording.paused {
+            crate::meeting_assist::invalidate_preview(false);
             if let Some(active_since) = recording.active_since.take() {
                 recording.accumulated_active += active_since.elapsed();
             }
@@ -924,8 +925,13 @@ pub fn is_capture_finalizing() -> bool {
 /// leaves `ACTIVE_RECORDING` before finalization starts.
 pub fn finish_active_capture() -> Result<Option<FinishedRecording>, AppError> {
     let _finalization = lock_finalization()?;
-    let Some(recording) = lock_active()?.take() else {
-        return Ok(None);
+    let recording = {
+        let mut active = lock_active()?;
+        let Some(recording) = active.take() else {
+            return Ok(None);
+        };
+        crate::meeting_assist::invalidate_preview(true);
+        recording
     };
     finalize_recording(recording).map(Some)
 }
@@ -967,6 +973,7 @@ pub(crate) fn finish_capture(
                     ),
                 ));
             }
+            crate::meeting_assist::invalidate_preview(true);
             Ok(recording)
         },
     )?;

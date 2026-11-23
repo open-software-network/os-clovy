@@ -153,6 +153,10 @@ vi.mock("../lib/agent-sounds", () => ({
 }));
 
 vi.mock("../lib/tauri", () => ({
+  listRecordingMarks: vi.fn().mockResolvedValue([]),
+  getRecordingAssistanceStatus: vi
+    .fn()
+    .mockResolvedValue({ epoch: 0, enabled: false, hasRecentContext: false }),
   appPreferencesGet: vi.fn().mockResolvedValue({ hideFromDock: false }),
   appPreferencesSet: vi.fn(async (request: { hideFromDock: boolean }) => request),
   agentRuntimeBindings: {

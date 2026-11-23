@@ -10751,6 +10751,94 @@ button.agent-user-attachment:hover {
   min-height: 0;
 }
 
+.recording-assist,
+.recording-assist-preview {
+  display: grid;
+  gap: var(--sp-3);
+  margin-block-end: var(--sp-5);
+  padding-block: var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.recording-assist-actions,
+.recording-assist-mark-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: var(--sp-2);
+}
+
+.recording-assist-actions {
+  gap: var(--sp-3);
+}
+
+.recording-assist-group {
+  display: grid;
+  justify-items: start;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.recording-assist .primary-action:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.recording-assist .primary-action:disabled:hover {
+  border-color: var(--border);
+  background: var(--card);
+}
+
+.recording-assist-hint,
+.recording-assist-question,
+.recording-assist-preview h2 {
+  margin: 0;
+}
+
+.recording-assist-hint {
+  color: var(--body-copy);
+  font-size: var(--fs-sm);
+  max-inline-size: 35ch;
+}
+
+.recording-assist-question {
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+
+.recording-assist-preview h2 {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.recording-assist-marks {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-md);
+}
+
+.recording-assist-marks li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+
+.recording-assist-marks time {
+  color: var(--body-copy);
+}
+
+@media print {
+  .recording-assist-actions,
+  .recording-assist-preview {
+    display: none;
+  }
+}
+
 .note-body,
 .transcript-view {
   width: 100%;
@@ -22656,6 +22744,13 @@ button.memory-project:hover {
   min-height: 96px;
   resize: none;
   line-height: 1.45;
+}
+
+.recording-assist-mark-form .dialog-input {
+  flex: 1 1 12ch;
+  min-width: 0;
+  max-width: 20ch;
+  padding-block: 0;
 }
 
 .dialog-footer {

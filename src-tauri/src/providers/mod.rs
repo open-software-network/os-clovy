@@ -1411,6 +1411,9 @@ fn settings_store() -> &'static Mutex<ProviderModelSettings> {
 
 fn replace_current_settings(settings: ProviderModelSettings) {
     if let Ok(mut current) = settings_store().lock() {
+        if current.live_transcription != settings.live_transcription {
+            crate::meeting_assist::invalidate_preview(true);
+        }
         *current = settings;
     }
 }
